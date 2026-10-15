@@ -13,7 +13,9 @@ typedef struct Keyword {
 
 static const Keyword keywords[] = {
     {"and", LZ_TOKEN_AND},   {"or", LZ_TOKEN_OR},   {"true", LZ_TOKEN_TRUE},
-    {"false", LZ_TOKEN_FALSE}, {"nil", LZ_TOKEN_NIL},
+    {"false", LZ_TOKEN_FALSE}, {"nil", LZ_TOKEN_NIL}, {"let", LZ_TOKEN_LET},
+    {"const", LZ_TOKEN_CONST}, {"if", LZ_TOKEN_IF},   {"else", LZ_TOKEN_ELSE},
+    {"while", LZ_TOKEN_WHILE},
 };
 
 static bool is_digit(char c) {
@@ -560,6 +562,16 @@ const char *lz_token_type_name(LzTokenType type) {
         return "FALSE";
     case LZ_TOKEN_NIL:
         return "NIL";
+    case LZ_TOKEN_LET:
+        return "LET";
+    case LZ_TOKEN_CONST:
+        return "CONST";
+    case LZ_TOKEN_IF:
+        return "IF";
+    case LZ_TOKEN_ELSE:
+        return "ELSE";
+    case LZ_TOKEN_WHILE:
+        return "WHILE";
     }
     return "UNKNOWN";
 }

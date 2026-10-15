@@ -130,6 +130,15 @@ static void test_ordering_operators(void) {
     check_compare(LZ_OP_LESS, number(NAN), number(1.0), false);
     check_compare(LZ_OP_GREATER, number(NAN), number(1.0), false);
     check_compare(LZ_OP_GREATER, integer(1), number(NAN), false);
+    check_compare(LZ_OP_LESS_EQUAL, integer(2), integer(2), true);
+    check_compare(LZ_OP_LESS_EQUAL, integer(3), integer(2), false);
+    check_compare(LZ_OP_LESS_EQUAL, integer(1), number(1.0), true);
+    check_compare(LZ_OP_LESS_EQUAL, number(NAN), number(NAN), false);
+    check_compare(LZ_OP_LESS_EQUAL, number(1.0), number(NAN), false);
+    check_compare(LZ_OP_GREATER_EQUAL, integer(2), integer(2), true);
+    check_compare(LZ_OP_GREATER_EQUAL, integer(1), integer(2), false);
+    check_compare(LZ_OP_GREATER_EQUAL, number(2.5), integer(2), true);
+    check_compare(LZ_OP_GREATER_EQUAL, number(NAN), number(NAN), false);
 
     LzValue result = lz_value_nil();
     LzValue text = lz_value_bool(true);

@@ -46,6 +46,12 @@ void lz_vm_set_fuel(LzVM *vm, uint64_t fuel);
  */
 LzStatus lz_vm_run(LzVM *vm, const LzChunk *chunk);
 
+/*
+ * Like lz_vm_run, but on success stores the value left on top of the stack
+ * (nil if the stack is empty) in *result as a new reference the caller owns.
+ */
+LzStatus lz_vm_eval(LzVM *vm, const LzChunk *chunk, LzValue *result);
+
 /* Pops and releases every value on the stack. */
 void lz_vm_reset_stack(LzVM *vm);
 

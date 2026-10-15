@@ -27,7 +27,16 @@ typedef enum LzOpCode {
     LZ_OP_EQUAL,         /* pop b, pop a, push a == b */
     LZ_OP_LESS,          /* pop b, pop a, push a < b (numbers only) */
     LZ_OP_GREATER,       /* pop b, pop a, push a > b (numbers only) */
+    LZ_OP_LESS_EQUAL,    /* pop b, pop a, push a <= b (false with NaN) */
+    LZ_OP_GREATER_EQUAL, /* pop b, pop a, push a >= b (false with NaN) */
     LZ_OP_NOT,           /* pop a, push true if a is falsy */
+    LZ_OP_GET_LOCAL,     /* u16 slot: push a copy of stack[slot] */
+    LZ_OP_SET_LOCAL,     /* u16 slot: pop the top value into stack[slot] */
+    LZ_OP_SET_GLOBAL,    /* u16 name index: pop the top value into an existing global */
+    LZ_OP_JUMP,          /* u16 distance: skip forward */
+    LZ_OP_JUMP_IF_FALSE, /* u16 distance: skip forward if the top is falsy; does not pop */
+    LZ_OP_JUMP_IF_TRUE,  /* u16 distance: skip forward if the top is truthy; does not pop */
+    LZ_OP_LOOP,          /* u16 distance: jump backward */
     LZ_OP_RETURN         /* stop executing the chunk */
 } LzOpCode;
 
@@ -55,5 +64,11 @@ bool lz_chunk_write_u16(LzChunk *chunk, uint16_t operand, uint32_t source_offset
 bool lz_chunk_add_constant(LzChunk *chunk, LzValue value, uint16_t *index);
 
 const char *lz_opcode_name(uint8_t opcode);
+
+/* Total size of an instruction in bytes, or 0 for an unknown opcode. */
+size_t lz_opcode_length(uint8_t opcode);
+
+/* Drops code and constants added after the given marks, releasing those constants. */
+void lz_chunk_truncate(LzHeap *heap, LzChunk *chunk, size_t code_count, size_t constant_count);
 
 #endif

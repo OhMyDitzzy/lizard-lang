@@ -3,9 +3,20 @@
 An interpreted programming language written in C. Source files use the `.lz`
 extension.
 
-Status: early. The memory model, bytecode VM, builtin registry, `print`/`println`
-and the lexer exist and are tested; there is no parser or compiler yet, so the
-binary cannot run scripts.
+Status: early. Scripts run: variables, constants, arithmetic, strings, `if`,
+`while`, blocks and the builtins `print` and `println`. Functions and `for`
+are next.
+
+```
+const GREETING = "Hello" + ", " + "Lizard"
+let i = 1
+while i <= 3 {
+  println(GREETING, i)
+  i = i + 1
+}
+```
+
+More in `examples/`. Run one with `build/bin/lizard examples/fizzbuzz.lz`.
 
 ## Build
 
@@ -39,7 +50,7 @@ Example: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DLZ_ENABLE_SANITIZERS=ON
 | `-V`, `--version` | Show the version |
 | `--heap-stats` | Print heap statistics when the program ends |
 | `--trace-memory` | Log every heap allocation and release to stderr |
-| `--dump-tokens` | Print the tokens of the script and exit (the only thing the front-end does so far) |
+| `--dump-tokens` | Print the tokens of the script and exit |
 | `--max-heap=N` | Limit live heap bytes (suffix `K`, `M` or `G`) |
 | `--fuel=N` | Limit the number of executed instructions |
 | `--` | Stop option parsing |

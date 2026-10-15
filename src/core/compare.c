@@ -18,6 +18,12 @@ LzStatus lz_compare_order(LzVM *vm, LzOpCode op, const LzValue *left, const LzVa
     case LZ_OP_GREATER:
         *result = lz_value_bool(order == LZ_ORDER_GREATER);
         return LZ_OK;
+    case LZ_OP_LESS_EQUAL:
+        *result = lz_value_bool(order == LZ_ORDER_LESS || order == LZ_ORDER_EQUAL);
+        return LZ_OK;
+    case LZ_OP_GREATER_EQUAL:
+        *result = lz_value_bool(order == LZ_ORDER_GREATER || order == LZ_ORDER_EQUAL);
+        return LZ_OK;
     default:
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "unknown comparison operator");
     }

@@ -81,6 +81,7 @@ static void run_one(void) {
     LzVM vm;
     lz_vm_init(&vm, sink, sink);
     LZ_CHECK(lz_builtin_install(&vm) == LZ_OK);
+    lz_vm_set_heap_limit(&vm, 1u << 20);
 
     LzChunk chunk;
     lz_chunk_init(&chunk);
@@ -96,9 +97,11 @@ static void run_one(void) {
         (void)lz_chunk_write(&chunk, byte, i / 4 + 1);
     }
 
+    lz_vm_set_fuel(&vm, 5000);
     LzStatus status = lz_vm_run(&vm, &chunk);
     LZ_CHECK(status == LZ_OK || status == LZ_ERR_RUNTIME || status == LZ_ERR_ARITY ||
-             status == LZ_ERR_MEMORY || status == LZ_ERR_IO || status == LZ_ERR_STACK_OVERFLOW);
+             status == LZ_ERR_MEMORY || status == LZ_ERR_IO || status == LZ_ERR_STACK_OVERFLOW ||
+             status == LZ_ERR_FUEL || status == LZ_ERR_HEAP_LIMIT);
     LZ_CHECK(vm.stack_count == 0);
 
     lz_chunk_free(&vm.heap, &chunk);

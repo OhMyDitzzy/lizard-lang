@@ -4,15 +4,17 @@
 #include <string.h>
 
 #include "lizard/builtin.h"
+#include "lizard/compiler.h"
 #include "lizard/lexer.h"
 #include "lizard/vm.h"
 #include "lizard/version.h"
 #include "options.h"
 
 enum {
-    EXIT_RUNTIME_ERROR = 1,
     EXIT_USAGE = 64,
-    EXIT_NO_INPUT = 66
+    EXIT_DATA_ERROR = 65,
+    EXIT_NO_INPUT = 66,
+    EXIT_RUNTIME_ERROR = 70
 };
 
 static void print_usage(FILE *stream) {
@@ -96,7 +98,68 @@ static int dump_tokens(const char *path) {
     }
 
     lz_source_free(&source);
-    return failed ? EXIT_RUNTIME_ERROR : EXIT_SUCCESS;
+    return failed ? EXIT_DATA_ERROR : EXIT_SUCCESS;
+}
+
+static void report_runtime_error(const LzVM *vm, const LzSource *source) {
+    LzWriter err = lz_writer_from_file(stderr);
+    if (vm->error_offset != LZ_NO_OFFSET) {
+        lz_source_write_diagnostic(source, vm->error_offset, 0, "error", vm->error, &err);
+    } else {
+        fprintf(stderr, "lizard: error: %s\n", vm->error);
+    }
+}
+
+static int run_script(const LzOptions *options) {
+    LzSource source;
+    char error[200];
+    if (!lz_source_read_file(&source, options->script_path, error, sizeof error)) {
+        fprintf(stderr, "lizard: %s\n", error);
+        return EXIT_NO_INPUT;
+    }
+
+    LzVM vm;
+    lz_vm_init(&vm, lz_writer_from_file(stdout), lz_writer_from_file(stderr));
+    vm.heap.trace = options->trace_memory;
+
+    LzChunk chunk;
+    lz_chunk_init(&chunk);
+    int exit_code = EXIT_SUCCESS;
+
+    if (lz_builtin_install(&vm) != LZ_OK) {
+        fprintf(stderr, "lizard: %s\n", vm.error);
+        exit_code = EXIT_RUNTIME_ERROR;
+    } else {
+        if (options->has_max_heap) {
+            lz_vm_set_heap_limit(&vm, (size_t)options->max_heap_bytes);
+        }
+        if (options->has_fuel) {
+            lz_vm_set_fuel(&vm, options->fuel);
+        }
+
+        LzDiagnostics diagnostics;
+        LzStatus status = lz_compile(&vm, &source, &chunk, &diagnostics);
+        if (status == LZ_ERR_COMPILE) {
+            lz_diagnostics_write(&diagnostics, &source, &vm.err);
+            exit_code = EXIT_DATA_ERROR;
+        } else if (status != LZ_OK) {
+            fprintf(stderr, "lizard: error: %s\n", vm.error);
+            exit_code = EXIT_RUNTIME_ERROR;
+        } else if (lz_vm_run(&vm, &chunk) != LZ_OK) {
+            lz_writer_flush(&vm.out);
+            report_runtime_error(&vm, &source);
+            exit_code = EXIT_RUNTIME_ERROR;
+        }
+    }
+
+    lz_chunk_free(&vm.heap, &chunk);
+    lz_vm_release_roots(&vm);
+    if (options->heap_stats) {
+        print_heap_stats(&vm.heap);
+    }
+    lz_vm_free(&vm);
+    lz_source_free(&source);
+    return exit_code;
 }
 
 int main(int argc, char **argv) {
@@ -126,30 +189,5 @@ int main(int argc, char **argv) {
                 options.script_path);
     }
 
-    LzVM vm;
-    lz_vm_init(&vm, lz_writer_from_file(stdout), lz_writer_from_file(stderr));
-    vm.heap.trace = options.trace_memory;
-
-    if (lz_builtin_install(&vm) != LZ_OK) {
-        fprintf(stderr, "lizard: %s\n", vm.error);
-        lz_vm_free(&vm);
-        return EXIT_RUNTIME_ERROR;
-    }
-
-    if (options.has_max_heap) {
-        lz_vm_set_heap_limit(&vm, (size_t)options.max_heap_bytes);
-    }
-    if (options.has_fuel) {
-        lz_vm_set_fuel(&vm, options.fuel);
-    }
-
-    /* The lexer, parser and evaluator are not written yet; syntax is still undecided. */
-    lz_writer_write_cstr(&vm.err, "lizard: the language front-end is not implemented yet\n");
-
-    lz_vm_release_roots(&vm);
-    if (options.heap_stats) {
-        print_heap_stats(&vm.heap);
-    }
-    lz_vm_free(&vm);
-    return EXIT_RUNTIME_ERROR;
+    return run_script(&options);
 }

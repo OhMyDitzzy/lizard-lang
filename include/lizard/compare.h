@@ -5,7 +5,7 @@
 #include "lizard/vm.h"
 
 /*
- * op is LZ_OP_LESS or LZ_OP_GREATER. Only numbers are ordered; anything else
+ * op is LZ_OP_LESS, LZ_OP_GREATER, LZ_OP_LESS_EQUAL or LZ_OP_GREATER_EQUAL. Only numbers are ordered; anything else
  * is a runtime error. Comparisons involving NaN are false. The result is a
  * boolean value.
  */

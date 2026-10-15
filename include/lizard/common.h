@@ -16,6 +16,7 @@ typedef enum LzStatus {
     LZ_ERR_MEMORY,
     LZ_ERR_IO,
     LZ_ERR_RUNTIME,
+    LZ_ERR_COMPILE,
     /*
      * The script is valid but ran out of a budget the host configured. Hosts
      * can tell these apart from bugs and decide whether to retry or abort.

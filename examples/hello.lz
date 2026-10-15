@@ -1,0 +1,4 @@
+# Hello, Lizard
+const GREETING = "Hello" + ", " + "Lizard"
+println(GREETING + "!")
+println("1 + 2 * 3 =", 1 + 2 * 3)

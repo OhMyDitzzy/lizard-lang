@@ -75,6 +75,29 @@ int main(void) {
     LZ_CHECK(strstr(out.data, "0002    | OP_RETURN") != NULL);
     lz_chunk_free(&vm.heap, &located);
 
+    LzChunk flow;
+    lz_chunk_init(&flow);
+    emit(&flow, LZ_OP_NIL, 1);
+    emit_u16(&flow, LZ_OP_JUMP_IF_FALSE, 4, 1);
+    emit(&flow, LZ_OP_POP, 1);
+    emit_u16(&flow, LZ_OP_GET_LOCAL, 7, 1);
+    emit_u16(&flow, LZ_OP_SET_LOCAL, 9, 1);
+    emit_u16(&flow, LZ_OP_JUMP, 0, 1);
+    emit_u16(&flow, LZ_OP_LOOP, 9, 1);
+    emit(&flow, LZ_OP_LESS_EQUAL, 1);
+    emit(&flow, LZ_OP_GREATER_EQUAL, 1);
+    emit(&flow, LZ_OP_RETURN, 1);
+    lz_disassemble_chunk(&flow, "flow", NULL, &writer);
+    LZ_CHECK(strstr(out.data, "OP_JUMP_IF_FALSE") != NULL);
+    LZ_CHECK(strstr(out.data, "4 -> 0008") != NULL);
+    LZ_CHECK(strstr(out.data, "OP_GET_LOCAL") != NULL);
+    LZ_CHECK(strstr(out.data, "OP_SET_LOCAL") != NULL);
+    LZ_CHECK(strstr(out.data, "OP_LOOP") != NULL);
+    LZ_CHECK(strstr(out.data, "9 -> 0008") != NULL);
+    LZ_CHECK(strstr(out.data, "OP_LESS_EQUAL") != NULL);
+    LZ_CHECK(strstr(out.data, "OP_GREATER_EQUAL") != NULL);
+    lz_chunk_free(&vm.heap, &flow);
+
     size_t next = lz_disassemble_instruction(&chunk, 0, NULL, &writer);
     LZ_CHECK(next == 3);
 

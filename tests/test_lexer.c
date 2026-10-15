@@ -110,6 +110,8 @@ static void test_keywords_and_identifiers(void) {
            T(NIL), T(IDENTIFIER), T(IDENTIFIER), T(IDENTIFIER), T(IDENTIFIER), T(IDENTIFIER),
            T(IDENTIFIER), T(NEWLINE));
     EXPECT("And NIL", T(IDENTIFIER), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("let const if else while letx iff whiled", T(LET), T(CONST), T(IF), T(ELSE), T(WHILE),
+           T(IDENTIFIER), T(IDENTIFIER), T(IDENTIFIER), T(NEWLINE));
 }
 
 static void test_integers(void) {

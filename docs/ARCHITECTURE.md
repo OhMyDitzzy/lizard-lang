@@ -6,7 +6,7 @@
 | --- | --- |
 | `include/lizard/` | Public headers of the core (values, heap, VM, writer) |
 | `src/core/` | Core implementation, no knowledge of any builtin |
-| `src/frontend/` | Lexer (parser and compiler will join it) |
+| `src/frontend/` | Lexer and the single-pass compiler |
 | `src/cli/` | The `lizard` binary: argument parsing and process entry point |
 | `builtin/` | Builtin functions and their registry, one subfolder per area (`io/`, ...) |
 | `tests/` | Unit tests, registered with CTest |
@@ -72,6 +72,54 @@ lexical rules are decided; the grammar built on them is not.
 
 `strtod` is locale dependent, so float literals swap in the locale's decimal
 point before parsing; this will be revisited with the determinism work.
+
+## Syntax and compiler
+
+`lz_compile` turns a script into one chunk in a single pass (Pratt parser, no
+AST). It collects up to `LZ_MAX_DIAGNOSTICS` errors per run, recovering at
+statement boundaries, and the CLI prints them with source lines.
+
+```
+statement  = let | const | if | while | block | assignment | expression
+let        = "let" IDENT [ "=" expr ]
+const      = "const" IDENT "=" expr
+assignment = IDENT "=" expr            a statement, never an expression
+if         = "if" expr block [ "else" ( if | block ) ]
+while      = "while" expr block
+block      = "{" statement* "}"
+```
+
+A statement ends at a newline or `;`, or just before `}` or the end of the
+file. A newline after a binary operator, `and`, `or` or `=` is ignored, and
+`else` may sit on the line after `}`. Expressions, lowest to highest
+precedence: `or`, `and`, `== !=`, `< <= > >=`, `+ -`, `* / // %`, unary `! -`,
+call. `and` and `or` short-circuit and return the deciding operand.
+
+**Names.** Every name must be declared before use, and an unknown name is a
+compile error. Declaring a name twice in one scope is an error; an inner
+scope may shadow. `let` at the top level makes a global (`DEFINE_GLOBAL`);
+inside a block it is a stack slot (`GET_LOCAL`/`SET_LOCAL`) popped when the
+block ends. Builtins and host-defined globals are visible but cannot be
+assigned to.
+
+**`const`.** If the initializer is made only of literals, other constants and
+pure operators, the compiler runs that code on the real VM
+(`lz_vm_eval`), throws the code away and remembers the value. The constant has
+no storage at all: each use compiles to one `OP_CONSTANT`, and the value lives
+once in the chunk's constant table. An error while evaluating it, such as
+`1 / 0`, is a compile error. Otherwise (a call, a variable) the constant is an
+ordinary global or slot that the compiler refuses to assign to.
+
+**Jumps.** `JUMP`, `JUMP_IF_FALSE`, `JUMP_IF_TRUE` and `LOOP` take a 16-bit
+distance, so one block body is limited to 65535 bytes. The VM bounds-checks
+every jump, local slot and operand, so malformed bytecode fails cleanly
+instead of crashing; fuel stops infinite loops.
+
+**Limits.** 255 call arguments, 256 locals, 512 declared names, and 128
+levels of expression or block nesting.
+
+**Exit codes.** `lizard file.lz` exits 65 on compile errors, 66 if the file
+cannot be read, and 70 on a runtime error or an exhausted budget.
 
 ## Resource limits
 
@@ -156,5 +204,5 @@ area's header, add one row to the table in `registry.c`, and add the source to
 
 ## Not decided yet
 
-Syntax and the lexer/parser/compiler. Local scopes, user functions and call frames, arithmetic and control-flow opcodes. Removing entries from `LzTable`.
+Functions (`fn`), `for`, `break`/`continue`, and call frames. Removing entries from `LzTable`.
 Garbage collection beyond reference counting (cycles).

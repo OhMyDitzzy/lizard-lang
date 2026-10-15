@@ -128,9 +128,76 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_GREATER";
     case LZ_OP_NOT:
         return "OP_NOT";
+    case LZ_OP_LESS_EQUAL:
+        return "OP_LESS_EQUAL";
+    case LZ_OP_GREATER_EQUAL:
+        return "OP_GREATER_EQUAL";
+    case LZ_OP_GET_LOCAL:
+        return "OP_GET_LOCAL";
+    case LZ_OP_SET_LOCAL:
+        return "OP_SET_LOCAL";
+    case LZ_OP_SET_GLOBAL:
+        return "OP_SET_GLOBAL";
+    case LZ_OP_JUMP:
+        return "OP_JUMP";
+    case LZ_OP_JUMP_IF_FALSE:
+        return "OP_JUMP_IF_FALSE";
+    case LZ_OP_JUMP_IF_TRUE:
+        return "OP_JUMP_IF_TRUE";
+    case LZ_OP_LOOP:
+        return "OP_LOOP";
     case LZ_OP_RETURN:
         return "OP_RETURN";
     default:
         return "OP_UNKNOWN";
+    }
+}
+
+size_t lz_opcode_length(uint8_t opcode) {
+    switch (opcode) {
+    case LZ_OP_CONSTANT:
+    case LZ_OP_GET_GLOBAL:
+    case LZ_OP_DEFINE_GLOBAL:
+    case LZ_OP_SET_GLOBAL:
+    case LZ_OP_GET_LOCAL:
+    case LZ_OP_SET_LOCAL:
+    case LZ_OP_JUMP:
+    case LZ_OP_JUMP_IF_FALSE:
+    case LZ_OP_JUMP_IF_TRUE:
+    case LZ_OP_LOOP:
+        return 3;
+    case LZ_OP_CALL:
+        return 2;
+    case LZ_OP_NIL:
+    case LZ_OP_TRUE:
+    case LZ_OP_FALSE:
+    case LZ_OP_POP:
+    case LZ_OP_ADD:
+    case LZ_OP_SUBTRACT:
+    case LZ_OP_MULTIPLY:
+    case LZ_OP_DIVIDE:
+    case LZ_OP_FLOOR_DIVIDE:
+    case LZ_OP_MODULO:
+    case LZ_OP_NEGATE:
+    case LZ_OP_EQUAL:
+    case LZ_OP_LESS:
+    case LZ_OP_GREATER:
+    case LZ_OP_LESS_EQUAL:
+    case LZ_OP_GREATER_EQUAL:
+    case LZ_OP_NOT:
+    case LZ_OP_RETURN:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+void lz_chunk_truncate(LzHeap *heap, LzChunk *chunk, size_t code_count, size_t constant_count) {
+    if (code_count < chunk->count) {
+        chunk->count = code_count;
+    }
+    while (chunk->constant_count > constant_count) {
+        chunk->constant_count--;
+        lz_value_release(heap, &chunk->constants[chunk->constant_count]);
     }
 }

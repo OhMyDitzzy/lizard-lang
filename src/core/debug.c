@@ -32,6 +32,31 @@ static size_t byte_instruction(const LzChunk *chunk, size_t offset, const LzWrit
     return offset + 2;
 }
 
+static size_t slot_instruction(const LzChunk *chunk, size_t offset, const LzWriter *out) {
+    const char *name = lz_opcode_name(chunk->code[offset]);
+    if (offset + 3 > chunk->count) {
+        put(out, "%s <truncated>\n", name);
+        return chunk->count;
+    }
+    unsigned slot = (unsigned)((chunk->code[offset + 1] << 8) | chunk->code[offset + 2]);
+    put(out, "%-18s %5u\n", name, slot);
+    return offset + 3;
+}
+
+static size_t jump_instruction(const LzChunk *chunk, size_t offset, bool forward,
+                               const LzWriter *out) {
+    const char *name = lz_opcode_name(chunk->code[offset]);
+    if (offset + 3 > chunk->count) {
+        put(out, "%s <truncated>\n", name);
+        return chunk->count;
+    }
+    size_t distance = (size_t)((chunk->code[offset + 1] << 8) | chunk->code[offset + 2]);
+    size_t after = offset + 3;
+    size_t target = forward ? after + distance : (distance <= after ? after - distance : 0);
+    put(out, "%-18s %5zu -> %04zu\n", name, distance, target);
+    return offset + 3;
+}
+
 static size_t constant_instruction(const LzChunk *chunk, size_t offset, const LzWriter *out) {
     const char *name = lz_opcode_name(chunk->code[offset]);
     if (offset + 3 > chunk->count) {
@@ -69,7 +94,17 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_CONSTANT:
     case LZ_OP_GET_GLOBAL:
     case LZ_OP_DEFINE_GLOBAL:
+    case LZ_OP_SET_GLOBAL:
         return constant_instruction(chunk, offset, out);
+    case LZ_OP_GET_LOCAL:
+    case LZ_OP_SET_LOCAL:
+        return slot_instruction(chunk, offset, out);
+    case LZ_OP_JUMP:
+    case LZ_OP_JUMP_IF_FALSE:
+    case LZ_OP_JUMP_IF_TRUE:
+        return jump_instruction(chunk, offset, true, out);
+    case LZ_OP_LOOP:
+        return jump_instruction(chunk, offset, false, out);
     case LZ_OP_CALL:
         return byte_instruction(chunk, offset, out);
     case LZ_OP_NIL:
@@ -86,6 +121,8 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_EQUAL:
     case LZ_OP_LESS:
     case LZ_OP_GREATER:
+    case LZ_OP_LESS_EQUAL:
+    case LZ_OP_GREATER_EQUAL:
     case LZ_OP_NOT:
     case LZ_OP_RETURN:
         return simple_instruction(lz_opcode_name(opcode), offset, out);
