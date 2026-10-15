@@ -85,6 +85,8 @@ bool lz_options_parse(LzOptions *options, int argc, char **argv) {
             options->heap_stats = true;
         } else if (strcmp(arg, "--trace-memory") == 0) {
             options->trace_memory = true;
+        } else if (strcmp(arg, "--dump-tokens") == 0) {
+            options->dump_tokens = true;
         } else if (option_value(arg, "--max-heap") != NULL) {
             uint64_t bytes;
             if (!parse_count(option_value(arg, "--max-heap"), true, &bytes) || bytes > SIZE_MAX) {

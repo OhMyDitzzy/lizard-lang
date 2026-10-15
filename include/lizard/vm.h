@@ -20,7 +20,7 @@ struct LzVM {
     size_t stack_count;
     uint64_t fuel;
     uint64_t instructions;
-    uint32_t error_line;
+    uint32_t error_offset; /* source offset of the failing instruction, or LZ_NO_OFFSET */
     char error[256];
 };
 
@@ -41,8 +41,8 @@ void lz_vm_set_fuel(LzVM *vm, uint64_t fuel);
 
 /*
  * Executes a chunk from its first byte until OP_RETURN. On failure the status
- * is returned, vm->error holds the message and vm->error_line the source line
- * of the failing instruction. The value stack is always empty afterwards.
+ * is returned, vm->error holds the message and vm->error_offset the source
+ * offset of the failing instruction. The value stack is always empty afterwards.
  */
 LzStatus lz_vm_run(LzVM *vm, const LzChunk *chunk);
 

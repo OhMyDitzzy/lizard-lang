@@ -4,7 +4,7 @@
 
 void lz_chunk_init(LzChunk *chunk) {
     chunk->code = NULL;
-    chunk->lines = NULL;
+    chunk->offsets = NULL;
     chunk->count = 0;
     chunk->capacity = 0;
     chunk->constants = NULL;
@@ -17,7 +17,7 @@ void lz_chunk_free(LzHeap *heap, LzChunk *chunk) {
         lz_value_release(heap, &chunk->constants[i]);
     }
     free(chunk->code);
-    free(chunk->lines);
+    free(chunk->offsets);
     free(chunk->constants);
     lz_chunk_init(chunk);
 }
@@ -39,31 +39,31 @@ static bool reserve_code(LzChunk *chunk, size_t extra) {
     }
     chunk->code = code;
 
-    uint32_t *lines = realloc(chunk->lines, capacity * sizeof *lines);
-    if (lines == NULL) {
+    uint32_t *offsets = realloc(chunk->offsets, capacity * sizeof *offsets);
+    if (offsets == NULL) {
         return false;
     }
-    chunk->lines = lines;
+    chunk->offsets = offsets;
     chunk->capacity = capacity;
     return true;
 }
 
-bool lz_chunk_write(LzChunk *chunk, uint8_t byte, uint32_t line) {
+bool lz_chunk_write(LzChunk *chunk, uint8_t byte, uint32_t source_offset) {
     if (!reserve_code(chunk, 1)) {
         return false;
     }
     chunk->code[chunk->count] = byte;
-    chunk->lines[chunk->count] = line;
+    chunk->offsets[chunk->count] = source_offset;
     chunk->count++;
     return true;
 }
 
-bool lz_chunk_write_u16(LzChunk *chunk, uint16_t operand, uint32_t line) {
+bool lz_chunk_write_u16(LzChunk *chunk, uint16_t operand, uint32_t source_offset) {
     if (!reserve_code(chunk, 2)) {
         return false;
     }
-    return lz_chunk_write(chunk, (uint8_t)(operand >> 8), line) &&
-           lz_chunk_write(chunk, (uint8_t)(operand & 0xFF), line);
+    return lz_chunk_write(chunk, (uint8_t)(operand >> 8), source_offset) &&
+           lz_chunk_write(chunk, (uint8_t)(operand & 0xFF), source_offset);
 }
 
 bool lz_chunk_add_constant(LzChunk *chunk, LzValue value, uint16_t *index) {

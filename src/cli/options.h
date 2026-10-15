@@ -9,6 +9,7 @@ typedef struct LzOptions {
     bool show_version;
     bool heap_stats;
     bool trace_memory;
+    bool dump_tokens;
     bool has_max_heap;
     uint64_t max_heap_bytes;
     bool has_fuel;

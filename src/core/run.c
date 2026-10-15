@@ -251,12 +251,12 @@ static LzStatus execute(LzVM *vm, const LzChunk *chunk, size_t *failed_at) {
 LzStatus lz_vm_run(LzVM *vm, const LzChunk *chunk) {
     size_t failed_at = 0;
     vm->error[0] = '\0';
-    vm->error_line = 0;
+    vm->error_offset = LZ_NO_OFFSET;
     vm->heap.limit_hit = false;
 
     LzStatus status = execute(vm, chunk, &failed_at);
     if (status != LZ_OK && failed_at < chunk->count) {
-        vm->error_line = chunk->lines[failed_at];
+        vm->error_offset = chunk->offsets[failed_at];
     }
     lz_vm_reset_stack(vm);
     return status;

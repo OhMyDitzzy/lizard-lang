@@ -5,18 +5,18 @@
 
 #include "lizard/vm.h"
 
-static void emit(LzChunk *chunk, LzOpCode op, uint32_t line) {
-    (void)lz_chunk_write(chunk, (uint8_t)op, line);
+static void emit(LzChunk *chunk, LzOpCode op, uint32_t offset) {
+    (void)lz_chunk_write(chunk, (uint8_t)op, offset);
 }
 
-static void emit_u8(LzChunk *chunk, LzOpCode op, uint8_t operand, uint32_t line) {
-    emit(chunk, op, line);
-    (void)lz_chunk_write(chunk, operand, line);
+static void emit_u8(LzChunk *chunk, LzOpCode op, uint8_t operand, uint32_t offset) {
+    emit(chunk, op, offset);
+    (void)lz_chunk_write(chunk, operand, offset);
 }
 
-static void emit_u16(LzChunk *chunk, LzOpCode op, uint16_t operand, uint32_t line) {
-    emit(chunk, op, line);
-    (void)lz_chunk_write_u16(chunk, operand, line);
+static void emit_u16(LzChunk *chunk, LzOpCode op, uint16_t operand, uint32_t offset) {
+    emit(chunk, op, offset);
+    (void)lz_chunk_write_u16(chunk, operand, offset);
 }
 
 static uint16_t constant_value(LzChunk *chunk, LzValue value) {

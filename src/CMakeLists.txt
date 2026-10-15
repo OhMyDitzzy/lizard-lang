@@ -6,6 +6,7 @@ add_library(lizard_core STATIC
     core/memory.c
     core/native.c
     core/run.c
+    core/source.c
     core/table.c
     core/value.c
     core/vm.c
@@ -22,4 +23,5 @@ endif()
 
 lz_enable_warnings(lizard_core)
 
+add_subdirectory(frontend)
 add_subdirectory(cli)

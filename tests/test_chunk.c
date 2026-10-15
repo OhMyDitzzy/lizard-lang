@@ -13,7 +13,7 @@ static void test_write_and_operands(void) {
 
     LZ_CHECK(chunk.count == 4);
     LZ_CHECK(chunk.code[1] == 0x01 && chunk.code[2] == 0x02);
-    LZ_CHECK(chunk.lines[0] == 3 && chunk.lines[2] == 3 && chunk.lines[3] == 4);
+    LZ_CHECK(chunk.offsets[0] == 3 && chunk.offsets[2] == 3 && chunk.offsets[3] == 4);
 
     for (int i = 0; i < 1000; i++) {
         LZ_CHECK(lz_chunk_write(&chunk, LZ_OP_NIL, 5));

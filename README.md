@@ -3,9 +3,9 @@
 An interpreted programming language written in C. Source files use the `.lz`
 extension.
 
-Status: early. The memory model, bytecode VM, builtin registry and
-`print`/`println` exist and are tested; syntax and the front-end are not
-designed yet, so the binary cannot run scripts.
+Status: early. The memory model, bytecode VM, builtin registry, `print`/`println`
+and the lexer exist and are tested; there is no parser or compiler yet, so the
+binary cannot run scripts.
 
 ## Build
 
@@ -39,6 +39,7 @@ Example: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DLZ_ENABLE_SANITIZERS=ON
 | `-V`, `--version` | Show the version |
 | `--heap-stats` | Print heap statistics when the program ends |
 | `--trace-memory` | Log every heap allocation and release to stderr |
+| `--dump-tokens` | Print the tokens of the script and exit (the only thing the front-end does so far) |
 | `--max-heap=N` | Limit live heap bytes (suffix `K`, `M` or `G`) |
 | `--fuel=N` | Limit the number of executed instructions |
 | `--` | Stop option parsing |

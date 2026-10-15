@@ -11,7 +11,7 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->stack_count = 0;
     vm->fuel = LZ_FUEL_UNLIMITED;
     vm->instructions = 0;
-    vm->error_line = 0;
+    vm->error_offset = LZ_NO_OFFSET;
     vm->out = out;
     vm->err = err;
     vm->error[0] = '\0';

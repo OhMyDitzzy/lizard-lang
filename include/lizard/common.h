@@ -5,6 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Marks "no source position", for example an error with no failing instruction. */
+#define LZ_NO_OFFSET UINT32_MAX
+
 typedef struct LzVM LzVM;
 
 typedef enum LzStatus {

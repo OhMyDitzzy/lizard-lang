@@ -19,7 +19,7 @@ int main(void) {
     emit(&chunk, LZ_OP_RETURN, 3);
 
     LzWriter writer = lz_writer_from_buffer(&out);
-    lz_disassemble_chunk(&chunk, "main", &writer);
+    lz_disassemble_chunk(&chunk, "main", NULL, &writer);
 
     LZ_CHECK(out.data != NULL);
     if (out.data != NULL) {
@@ -40,7 +40,7 @@ int main(void) {
     emit(&math, LZ_OP_SUBTRACT, 1);
     emit(&math, LZ_OP_MULTIPLY, 1);
     emit(&math, LZ_OP_DIVIDE, 1);
-    lz_disassemble_chunk(&math, "math", &writer);
+    lz_disassemble_chunk(&math, "math", NULL, &writer);
     LZ_CHECK(strstr(out.data, "OP_NEGATE") != NULL);
     LZ_CHECK(strstr(out.data, "0001    | OP_ADD") != NULL);
     LZ_CHECK(strstr(out.data, "OP_SUBTRACT") != NULL);
@@ -50,19 +50,32 @@ int main(void) {
     emit(&math, LZ_OP_LESS, 2);
     emit(&math, LZ_OP_GREATER, 2);
     emit(&math, LZ_OP_NOT, 2);
-    lz_disassemble_chunk(&math, "logic", &writer);
+    lz_disassemble_chunk(&math, "logic", NULL, &writer);
     LZ_CHECK(strstr(out.data, "0005    2 OP_EQUAL") != NULL);
     LZ_CHECK(strstr(out.data, "OP_LESS") != NULL);
     LZ_CHECK(strstr(out.data, "OP_GREATER") != NULL);
     LZ_CHECK(strstr(out.data, "0008    | OP_NOT") != NULL);
     emit(&math, LZ_OP_FLOOR_DIVIDE, 3);
     emit(&math, LZ_OP_MODULO, 3);
-    lz_disassemble_chunk(&math, "more", &writer);
+    lz_disassemble_chunk(&math, "more", NULL, &writer);
     LZ_CHECK(strstr(out.data, "0009    3 OP_FLOOR_DIVIDE") != NULL);
     LZ_CHECK(strstr(out.data, "0010    | OP_MODULO") != NULL);
     lz_chunk_free(&vm.heap, &math);
 
-    size_t next = lz_disassemble_instruction(&chunk, 0, &writer);
+    LzSource lines;
+    lz_source_from_string(&lines, "t.lz", "a\nb\n");
+    LzChunk located;
+    lz_chunk_init(&located);
+    emit(&located, LZ_OP_NIL, 0);
+    emit(&located, LZ_OP_POP, 2);
+    emit(&located, LZ_OP_RETURN, 3);
+    lz_disassemble_chunk(&located, "located", &lines, &writer);
+    LZ_CHECK(strstr(out.data, "0000    1 OP_NIL") != NULL);
+    LZ_CHECK(strstr(out.data, "0001    2 OP_POP") != NULL);
+    LZ_CHECK(strstr(out.data, "0002    | OP_RETURN") != NULL);
+    lz_chunk_free(&vm.heap, &located);
+
+    size_t next = lz_disassemble_instruction(&chunk, 0, NULL, &writer);
     LZ_CHECK(next == 3);
 
     lz_chunk_free(&vm.heap, &chunk);

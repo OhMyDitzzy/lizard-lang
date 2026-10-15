@@ -35,7 +35,7 @@ typedef enum LzOpCode {
 
 typedef struct LzChunk {
     uint8_t *code;
-    uint32_t *lines;
+    uint32_t *offsets; /* source offset of each byte, see lizard/source.h */
     size_t count;
     size_t capacity;
     LzValue *constants;
@@ -48,8 +48,8 @@ void lz_chunk_init(LzChunk *chunk);
 /* Releases the references held by the constant table. */
 void lz_chunk_free(LzHeap *heap, LzChunk *chunk);
 
-bool lz_chunk_write(LzChunk *chunk, uint8_t byte, uint32_t line);
-bool lz_chunk_write_u16(LzChunk *chunk, uint16_t operand, uint32_t line);
+bool lz_chunk_write(LzChunk *chunk, uint8_t byte, uint32_t source_offset);
+bool lz_chunk_write_u16(LzChunk *chunk, uint16_t operand, uint32_t source_offset);
 
 /* The chunk retains the value. Fails when out of memory or past LZ_CONSTANTS_MAX. */
 bool lz_chunk_add_constant(LzChunk *chunk, LzValue value, uint16_t *index);

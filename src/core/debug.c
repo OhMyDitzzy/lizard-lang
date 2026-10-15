@@ -50,12 +50,18 @@ static size_t constant_instruction(const LzChunk *chunk, size_t offset, const Lz
     return offset + 3;
 }
 
-size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzWriter *out) {
-    uint32_t line = chunk->lines[offset];
-    if (offset > 0 && line == chunk->lines[offset - 1]) {
+static uint32_t shown_position(const LzChunk *chunk, size_t index, const LzSource *source) {
+    uint32_t position = chunk->offsets[index];
+    return source != NULL ? lz_source_locate(source, position).line : position;
+}
+
+size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzSource *source,
+                                  const LzWriter *out) {
+    uint32_t shown = shown_position(chunk, offset, source);
+    if (offset > 0 && shown == shown_position(chunk, offset - 1, source)) {
         put(out, "%04zu    | ", offset);
     } else {
-        put(out, "%04zu %4u ", offset, (unsigned)line);
+        put(out, "%04zu %4u ", offset, (unsigned)shown);
     }
 
     uint8_t opcode = chunk->code[offset];
@@ -89,9 +95,10 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzW
     }
 }
 
-void lz_disassemble_chunk(const LzChunk *chunk, const char *name, const LzWriter *out) {
+void lz_disassemble_chunk(const LzChunk *chunk, const char *name, const LzSource *source,
+                          const LzWriter *out) {
     put(out, "== %s ==\n", name);
     for (size_t offset = 0; offset < chunk->count;) {
-        offset = lz_disassemble_instruction(chunk, offset, out);
+        offset = lz_disassemble_instruction(chunk, offset, source, out);
     }
 }

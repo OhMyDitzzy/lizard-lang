@@ -82,7 +82,7 @@ static void test_heap_limit_in_a_program(void) {
     lz_vm_set_heap_limit(&vm, vm.heap.live_bytes);
     LZ_CHECK(lz_vm_run(&vm, &chunk) == LZ_ERR_HEAP_LIMIT);
     LZ_CHECK(strstr(vm.error, "heap limit") != NULL);
-    LZ_CHECK(vm.error_line == 4);
+    LZ_CHECK(vm.error_offset == 4);
     LZ_CHECK(vm.stack_count == 0);
 
     lz_vm_set_heap_limit(&vm, LZ_HEAP_UNLIMITED);
@@ -120,12 +120,12 @@ static void test_fuel(void) {
     lz_vm_set_fuel(&vm, 4);
     LZ_CHECK(lz_vm_run(&vm, &chunk) == LZ_ERR_FUEL);
     LZ_CHECK(strstr(vm.error, "instruction limit") != NULL);
-    LZ_CHECK(vm.error_line == 5);
+    LZ_CHECK(vm.error_offset == 5);
     LZ_CHECK(vm.stack_count == 0);
 
     lz_vm_set_fuel(&vm, 0);
     LZ_CHECK(lz_vm_run(&vm, &chunk) == LZ_ERR_FUEL);
-    LZ_CHECK(vm.error_line == 1);
+    LZ_CHECK(vm.error_offset == 1);
 
     lz_vm_set_fuel(&vm, 7);
     LZ_CHECK(lz_vm_run(&vm, &chunk) == LZ_OK);
@@ -154,12 +154,12 @@ static void test_natives_can_charge_fuel(void) {
 
     lz_vm_set_fuel(&vm, 50);
     LZ_CHECK(lz_vm_run(&vm, &chunk) == LZ_ERR_FUEL);
-    LZ_CHECK(vm.error_line == 1);
+    LZ_CHECK(vm.error_offset == 1);
     LZ_CHECK(vm.fuel == 0);
 
     lz_vm_set_fuel(&vm, 103);
     LZ_CHECK(lz_vm_run(&vm, &chunk) == LZ_ERR_FUEL);
-    LZ_CHECK(vm.error_line == 2);
+    LZ_CHECK(vm.error_offset == 2);
 
     lz_vm_set_fuel(&vm, 104);
     LZ_CHECK(lz_vm_run(&vm, &chunk) == LZ_OK);

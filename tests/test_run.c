@@ -137,7 +137,7 @@ static void test_runtime_errors(void) {
     emit(&undefined, LZ_OP_RETURN, 7);
     LZ_CHECK(lz_vm_run(&vm, &undefined) == LZ_ERR_RUNTIME);
     LZ_CHECK(strstr(vm.error, "undefined variable 'nope'") != NULL);
-    LZ_CHECK(vm.error_line == 7);
+    LZ_CHECK(vm.error_offset == 7);
     LZ_CHECK(vm.stack_count == 0);
 
     LzChunk not_callable;
@@ -147,7 +147,7 @@ static void test_runtime_errors(void) {
     emit(&not_callable, LZ_OP_RETURN, 4);
     LZ_CHECK(lz_vm_run(&vm, &not_callable) == LZ_ERR_RUNTIME);
     LZ_CHECK(strstr(vm.error, "can only call functions") != NULL);
-    LZ_CHECK(vm.error_line == 4);
+    LZ_CHECK(vm.error_offset == 4);
 
     LzChunk arity;
     lz_chunk_init(&arity);
@@ -156,7 +156,7 @@ static void test_runtime_errors(void) {
     emit(&arity, LZ_OP_RETURN, 9);
     LZ_CHECK(lz_vm_run(&vm, &arity) == LZ_ERR_ARITY);
     LZ_CHECK(strstr(vm.error, "one()") != NULL);
-    LZ_CHECK(vm.error_line == 9);
+    LZ_CHECK(vm.error_offset == 9);
     LZ_CHECK(vm.stack_count == 0);
 
     lz_chunk_free(&vm.heap, &undefined);
@@ -267,7 +267,7 @@ static void test_arithmetic_errors(void) {
     emit(&overflow, LZ_OP_RETURN, 4);
     LZ_CHECK(lz_vm_run(&vm, &overflow) == LZ_ERR_RUNTIME);
     LZ_CHECK(strstr(vm.error, "integer overflow") != NULL);
-    LZ_CHECK(vm.error_line == 4);
+    LZ_CHECK(vm.error_offset == 4);
     LZ_CHECK(vm.stack_count == 0);
 
     LzChunk zero;
@@ -278,7 +278,7 @@ static void test_arithmetic_errors(void) {
     emit(&zero, LZ_OP_RETURN, 5);
     LZ_CHECK(lz_vm_run(&vm, &zero) == LZ_ERR_RUNTIME);
     LZ_CHECK(strstr(vm.error, "division by zero") != NULL);
-    LZ_CHECK(vm.error_line == 5);
+    LZ_CHECK(vm.error_offset == 5);
 
     LzChunk wrong_type;
     lz_chunk_init(&wrong_type);
@@ -357,7 +357,7 @@ static void test_comparison_errors(void) {
     emit(&text_order, LZ_OP_RETURN, 9);
     LZ_CHECK(lz_vm_run(&vm, &text_order) == LZ_ERR_RUNTIME);
     LZ_CHECK(strstr(vm.error, "operands must be numbers") != NULL);
-    LZ_CHECK(vm.error_line == 9);
+    LZ_CHECK(vm.error_offset == 9);
     LZ_CHECK(vm.stack_count == 0);
 
     LzChunk underflow;
@@ -426,7 +426,7 @@ static void test_stage3_errors(void) {
     emit(&mixed, LZ_OP_RETURN, 4);
     LZ_CHECK(lz_vm_run(&vm, &mixed) == LZ_ERR_RUNTIME);
     LZ_CHECK(strstr(vm.error, "two numbers or two strings") != NULL);
-    LZ_CHECK(vm.error_line == 4);
+    LZ_CHECK(vm.error_offset == 4);
     LZ_CHECK(vm.stack_count == 0);
 
     LzChunk zero;
@@ -437,7 +437,7 @@ static void test_stage3_errors(void) {
     emit(&zero, LZ_OP_RETURN, 6);
     LZ_CHECK(lz_vm_run(&vm, &zero) == LZ_ERR_RUNTIME);
     LZ_CHECK(strstr(vm.error, "division by zero") != NULL);
-    LZ_CHECK(vm.error_line == 6);
+    LZ_CHECK(vm.error_offset == 6);
 
     lz_chunk_free(&vm.heap, &mixed);
     teardown(&vm, &zero, &out, &err);

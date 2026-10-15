@@ -6,6 +6,7 @@
 | --- | --- |
 | `include/lizard/` | Public headers of the core (values, heap, VM, writer) |
 | `src/core/` | Core implementation, no knowledge of any builtin |
+| `src/frontend/` | Lexer (parser and compiler will join it) |
 | `src/cli/` | The `lizard` binary: argument parsing and process entry point |
 | `builtin/` | Builtin functions and their registry, one subfolder per area (`io/`, ...) |
 | `tests/` | Unit tests, registered with CTest |
@@ -41,6 +42,36 @@ afterwards. `lz_disassemble_chunk` (`debug.h`) prints a chunk for debugging.
 
 There are no call frames yet: nothing can be called except natives. Frames
 arrive together with user-defined functions.
+
+## Source positions and diagnostics
+
+Anything that points into program text stores a byte offset into an `LzSource`:
+tokens, and every byte of a chunk (`chunk->offsets`). Lines and columns are
+computed only when an error is shown (`lz_source_locate`), and
+`lz_source_write_diagnostic` prints `name:line:col: severity: message` with the
+source line and a caret underline. Columns count UTF-8 code points. A runtime
+error reports `vm->error_offset`, the offset of the failing instruction
+(`LZ_NO_OFFSET` when there is none). Sources are limited to 64 MiB.
+
+## Lexer
+
+`lz_lexer_next` never fails: bad input becomes an `ERROR` token with a static
+message and scanning resumes after it, so one pass reports every error. The
+lexical rules are decided; the grammar built on them is not.
+
+| Item | Rule |
+| --- | --- |
+| Comments | `#` to end of line |
+| Identifiers | ASCII letters, digits and `_`, not starting with a digit |
+| Keywords | `and`, `or`, `true`, `false`, `nil` (one table in `lexer.c`) |
+| Integers | decimal, `0x`, `0b`, `0o`; `_` between digits; above `INT64_MAX` is an error |
+| Floats | `1.5`, `1e3`, `1.5e-2`; a `.` needs a digit after it, so `1.foo` is `1`, `.`, `foo`; out-of-range is an error |
+| Strings | `"..."` or `'...'` on one line; escapes `\n \t \r \0 \\ \" \' \xHH` (00 to 7F) `\u{H..H}` |
+| Operators | `+ - * / // % ! != = == < <= > >=` and `( ) [ ] { } , . : ;` |
+| Newlines | a token; blank or comment-only lines collapse into one, none at the file start, one is added before EOF, and line breaks inside `( )` and `[ ]` are ignored |
+
+`strtod` is locale dependent, so float literals swap in the locale's decimal
+point before parsing; this will be revisited with the determinism work.
 
 ## Resource limits
 
