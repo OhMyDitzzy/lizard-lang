@@ -1,0 +1,16 @@
+CompileFlags:
+  CompilationDatabase: build
+  Add: [-std=c11]
+
+Diagnostics:
+  UnusedIncludes: Strict
+  ClangTidy:
+    FastCheckFilter: Loose
+
+Index:
+  Background: Build
+
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true

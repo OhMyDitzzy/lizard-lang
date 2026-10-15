@@ -1,0 +1,59 @@
+#ifndef LIZARD_MEMORY_H
+#define LIZARD_MEMORY_H
+
+#include "lizard/common.h"
+
+typedef enum LzObjType {
+    LZ_OBJ_STRING,
+    LZ_OBJ_NATIVE
+} LzObjType;
+
+/*
+ * Header shared by every heap object. The heap keeps all live objects in a
+ * doubly linked list so it can account for them and report leaks at shutdown.
+ */
+typedef struct LzObject {
+    struct LzObject *prev;
+    struct LzObject *next;
+    size_t size;
+    uint32_t refcount;
+    LzObjType type;
+} LzObject;
+
+#define LZ_HEAP_UNLIMITED SIZE_MAX
+
+/*
+ * limit_bytes caps live_bytes, which counts heap objects (strings, natives and
+ * future containers). Tables and chunks owned by the VM or the program are not
+ * counted. limit_hit is set when an allocation was refused because of the
+ * limit rather than because malloc failed.
+ */
+typedef struct LzHeap {
+    LzObject *head;
+    size_t live_objects;
+    size_t live_bytes;
+    size_t peak_bytes;
+    size_t total_allocations;
+    size_t limit_bytes;
+    bool limit_hit;
+    bool trace;
+} LzHeap;
+
+void lz_heap_init(LzHeap *heap);
+
+/* Frees every object still alive. Callers read live_objects first to detect leaks. */
+void lz_heap_destroy(LzHeap *heap);
+
+/* Returns an object with refcount 1, or NULL when out of memory or over the limit. size includes the header. */
+void *lz_heap_alloc(LzHeap *heap, LzObjType type, size_t size);
+
+/*
+ * Releases whatever references a dying object holds. Implemented in value.c,
+ * which knows every object layout; the heap itself stays layout-agnostic.
+ */
+void lz_object_finalize(LzHeap *heap, LzObject *object);
+
+void lz_object_retain(LzObject *object);
+void lz_object_release(LzHeap *heap, LzObject *object);
+
+#endif
