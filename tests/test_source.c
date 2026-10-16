@@ -85,6 +85,27 @@ static void test_diagnostics(void) {
                            "   | ^\n"));
 }
 
+static void test_long_names_never_cut_a_diagnostic(void) {
+    char name[401];
+    memset(name, 'd', 400);
+    name[400] = '\0';
+
+    LzSource source;
+    lz_source_from_string(&source, name, "let x = @\n");
+    LzBuffer buffer = {0};
+    LzWriter writer = lz_writer_from_buffer(&buffer);
+    lz_source_write_diagnostic(&source, 8, 1, "error", "a message that must survive", &writer);
+
+    LZ_CHECK(buffer.data != NULL);
+    if (buffer.data != NULL) {
+        LZ_CHECK(strncmp(buffer.data, name, 400) == 0);
+        LZ_CHECK(strcmp(buffer.data + 400, ":1:9: error: a message that must survive\n"
+                                           " 1 | let x = @\n"
+                                           "   |         ^\n") == 0);
+    }
+    lz_buffer_free(&buffer);
+}
+
 static void test_read_file(void) {
     const char *path = "lz_test_source.tmp";
     FILE *file = fopen(path, "wb");
@@ -119,9 +140,74 @@ static void test_read_file(void) {
     }
 }
 
+static void write_file(const char *path, const char *bytes, size_t length) {
+    FILE *file = fopen(path, "wb");
+    LZ_CHECK(file != NULL);
+    if (file != NULL) {
+        LZ_CHECK(fwrite(bytes, 1, length, file) == length);
+        (void)fclose(file);
+    }
+}
+
+static void test_byte_order_mark(void) {
+    const char *path = "lz_test_bom.tmp";
+    LzSource source;
+    char error[200] = "";
+
+    write_file(path, "\xEF\xBB\xBFx = 1\n", 9);
+    LZ_CHECK(lz_source_read_file(&source, path, error, sizeof error));
+    LZ_CHECK(source.length == 6);
+    LZ_CHECK(strcmp(source.text, "x = 1\n") == 0);
+    lz_source_free(&source);
+
+    write_file(path, "\xEF\xBB\xBF", 3);
+    LZ_CHECK(lz_source_read_file(&source, path, error, sizeof error));
+    LZ_CHECK(source.length == 0 && source.text[0] == '\0');
+    lz_source_free(&source);
+
+    /* Only a complete mark at the very start is dropped. */
+    write_file(path, "\xEF\xBBx", 3);
+    LZ_CHECK(lz_source_read_file(&source, path, error, sizeof error));
+    LZ_CHECK(source.length == 3);
+    lz_source_free(&source);
+    (void)remove(path);
+}
+
+/* A file of exactly LZ_SOURCE_MAX_BYTES is accepted; one more byte is too much. */
+static void test_size_limit(void) {
+    const char *path = "lz_test_limit.tmp";
+    FILE *file = fopen(path, "wb");
+    LZ_CHECK(file != NULL);
+    if (file == NULL) {
+        return;
+    }
+    LZ_CHECK(fseek(file, (long)LZ_SOURCE_MAX_BYTES - 1, SEEK_SET) == 0);
+    LZ_CHECK(fputc('\n', file) != EOF);
+    (void)fclose(file);
+
+    LzSource source;
+    char error[200] = "";
+    LZ_CHECK(lz_source_read_file(&source, path, error, sizeof error));
+    LZ_CHECK(source.length == LZ_SOURCE_MAX_BYTES);
+    lz_source_free(&source);
+
+    file = fopen(path, "ab");
+    LZ_CHECK(file != NULL);
+    if (file != NULL) {
+        LZ_CHECK(fputc('\n', file) != EOF);
+        (void)fclose(file);
+        LZ_CHECK(!lz_source_read_file(&source, path, error, sizeof error));
+        LZ_CHECK(strstr(error, "larger than") != NULL);
+    }
+    (void)remove(path);
+}
+
 int main(void) {
     test_locate();
     test_diagnostics();
+    test_long_names_never_cut_a_diagnostic();
     test_read_file();
+    test_byte_order_mark();
+    test_size_limit();
     return LZ_TEST_RESULT();
 }

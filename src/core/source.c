@@ -8,6 +8,7 @@
 
 static void put(const LzWriter *out, const char *format, ...) LZ_PRINTF_FORMAT(2, 3);
 
+/* For short formats only: the output is cut at 255 bytes. Long text is written directly. */
 static void put(const LzWriter *out, const char *format, ...) {
     char text[256];
     va_list args;
@@ -48,6 +49,10 @@ bool lz_source_read_file(LzSource *source, const char *path, char *error, size_t
     while (text != NULL) {
         if (length == capacity) {
             if (capacity >= LZ_SOURCE_MAX_BYTES) {
+                /* The buffer holds exactly the limit: only more data makes the file too large. */
+                if (fgetc(file) == EOF) {
+                    break;
+                }
                 (void)snprintf(error, error_size, "'%s' is larger than %u bytes", path,
                                (unsigned)LZ_SOURCE_MAX_BYTES);
                 free(text);
@@ -55,6 +60,9 @@ bool lz_source_read_file(LzSource *source, const char *path, char *error, size_t
                 return false;
             }
             capacity *= 2;
+            if (capacity > LZ_SOURCE_MAX_BYTES) {
+                capacity = LZ_SOURCE_MAX_BYTES;
+            }
             char *grown = realloc(text, capacity + 1);
             if (grown == NULL) {
                 free(text);
@@ -77,6 +85,13 @@ bool lz_source_read_file(LzSource *source, const char *path, char *error, size_t
         (void)snprintf(error, error_size, "cannot read '%s'", path);
         free(text);
         return false;
+    }
+
+    /* A UTF-8 byte order mark is not program text; editors on Windows add one. */
+    if (length >= 3 && (unsigned char)text[0] == 0xEF && (unsigned char)text[1] == 0xBB &&
+        (unsigned char)text[2] == 0xBF) {
+        memmove(text, text + 3, length - 3);
+        length -= 3;
     }
 
     text[length] = '\0';
@@ -131,8 +146,14 @@ void lz_source_write_diagnostic(const LzSource *source, size_t offset, size_t le
         offset = source->length;
     }
     LzLocation location = lz_source_locate(source, offset);
-    put(out, "%s:%u:%u: %s: %s\n", source->name, (unsigned)location.line,
-        (unsigned)location.column, severity, message);
+
+    /* Piece by piece: a long file name or message must never cut the header short. */
+    (void)lz_writer_write_cstr(out, source->name);
+    put(out, ":%u:%u: ", (unsigned)location.line, (unsigned)location.column);
+    (void)lz_writer_write_cstr(out, severity);
+    (void)lz_writer_write_cstr(out, ": ");
+    (void)lz_writer_write_cstr(out, message);
+    (void)lz_writer_write(out, "\n", 1);
 
     char number[16];
     int width = snprintf(number, sizeof number, "%u", (unsigned)location.line);

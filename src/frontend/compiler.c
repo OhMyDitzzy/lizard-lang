@@ -28,6 +28,20 @@ typedef struct Symbol {
     LzValue value;
 } Symbol;
 
+/*
+ * Identical constants of a chunk are stored once, so a program that mentions one
+ * variable or literal many times does not run out of the 65536 slots of a chunk.
+ * The index is an open-addressing table of constant indexes plus one, kept at
+ * most half full. It is exact: truncating the chunk after a folded const removes
+ * the entries of the dropped constants (stale entries for a value that keeps
+ * coming back would pile up into one long probe chain).
+ */
+typedef struct ConstantIndex {
+    uint32_t *slots;
+    size_t capacity; /* a power of two, or 0 until the first constant */
+    size_t used;     /* occupied slots */
+} ConstantIndex;
+
 typedef struct Parser {
     LzVM *vm;
     const LzSource *source;
@@ -43,6 +57,7 @@ typedef struct Parser {
     size_t local_count;
     int scope_depth;
     int nesting;
+    ConstantIndex constants;
 } Parser;
 
 typedef enum Precedence {
@@ -182,16 +197,189 @@ static void emit_u16_at(Parser *parser, uint16_t operand, uint32_t offset) {
     emit_byte_at(parser, (uint8_t)(operand & 0xFF), offset);
 }
 
-static uint16_t make_constant(Parser *parser, LzValue value) {
+static uint32_t hash_constant(const LzValue *value) {
+    uint64_t bits = 0;
+    switch (value->type) {
+    case LZ_VAL_NIL:
+        break;
+    case LZ_VAL_BOOL:
+        bits = value->as.boolean ? 1u : 0u;
+        break;
+    case LZ_VAL_INT:
+        bits = (uint64_t)value->as.integer;
+        break;
+    case LZ_VAL_FLOAT:
+        memcpy(&bits, &value->as.number, sizeof bits);
+        break;
+    case LZ_VAL_OBJECT:
+        if (value->as.object->type == LZ_OBJ_STRING) {
+            return ((const LzString *)value->as.object)->hash;
+        }
+        bits = (uint64_t)(uintptr_t)value->as.object;
+        break;
+    }
+    bits += (uint64_t)value->type;
+    bits ^= bits >> 33;
+    bits *= 0xFF51AFD7ED558CCDull;
+    bits ^= bits >> 33;
+    return (uint32_t)bits;
+}
+
+/*
+ * Names must match by identity: GET_GLOBAL needs the interned string itself, and
+ * a string literal with the same text is a different object. Everything else
+ * matches by value (floats by their bits, so 0.0 and -0.0 stay apart).
+ */
+static bool constants_match(const LzValue *a, const LzValue *b, bool by_identity) {
+    if (a->type != b->type) {
+        return false;
+    }
+    switch (a->type) {
+    case LZ_VAL_NIL:
+        return true;
+    case LZ_VAL_BOOL:
+        return a->as.boolean == b->as.boolean;
+    case LZ_VAL_INT:
+        return a->as.integer == b->as.integer;
+    case LZ_VAL_FLOAT:
+        return memcmp(&a->as.number, &b->as.number, sizeof a->as.number) == 0;
+    case LZ_VAL_OBJECT:
+        if (a->as.object == b->as.object) {
+            return true;
+        }
+        if (by_identity || a->as.object->type != LZ_OBJ_STRING ||
+            b->as.object->type != LZ_OBJ_STRING) {
+            return false;
+        }
+        const LzString *x = (const LzString *)a->as.object;
+        const LzString *y = (const LzString *)b->as.object;
+        return x->length == y->length && memcmp(x->data, y->data, x->length) == 0;
+    }
+    return false;
+}
+
+static bool find_constant(const Parser *parser, const LzValue *value, bool by_identity,
+                          uint16_t *index) {
+    const ConstantIndex *table = &parser->constants;
+    if (table->capacity == 0) {
+        return false;
+    }
+    const LzChunk *chunk = parser->chunk;
+    size_t mask = table->capacity - 1;
+    for (size_t slot = hash_constant(value) & mask; table->slots[slot] != 0;
+         slot = (slot + 1) & mask) {
+        size_t candidate = table->slots[slot] - 1u;
+        if (candidate < chunk->constant_count &&
+            constants_match(&chunk->constants[candidate], value, by_identity)) {
+            *index = (uint16_t)candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool rebuild_constant_index(Parser *parser, size_t capacity) {
+    uint32_t *slots = calloc(capacity, sizeof *slots);
+    if (slots == NULL) {
+        return false;
+    }
+    const LzChunk *chunk = parser->chunk;
+    size_t mask = capacity - 1;
+    for (size_t i = 0; i < chunk->constant_count; i++) {
+        size_t slot = hash_constant(&chunk->constants[i]) & mask;
+        while (slots[slot] != 0) {
+            slot = (slot + 1) & mask;
+        }
+        slots[slot] = (uint32_t)(i + 1);
+    }
+    free(parser->constants.slots);
+    parser->constants.slots = slots;
+    parser->constants.capacity = capacity;
+    parser->constants.used = chunk->constant_count;
+    return true;
+}
+
+/* The constant at index was just added: record it so later uses share it. */
+static void remember_constant(Parser *parser, uint16_t index) {
+    ConstantIndex *table = &parser->constants;
+    if ((table->used + 1) * 2 > table->capacity) {
+        /* Grow, or build the index again after a failed allocation. It covers every live constant. */
+        size_t capacity = table->capacity != 0 ? table->capacity : 64;
+        while ((parser->chunk->constant_count + 1) * 2 > capacity) {
+            capacity *= 2;
+        }
+        if (!rebuild_constant_index(parser, capacity)) {
+            /* Sharing is only an optimization, so carry on without an index. */
+            free(table->slots);
+            table->slots = NULL;
+            table->capacity = 0;
+            table->used = 0;
+        }
+        return;
+    }
+    size_t mask = table->capacity - 1;
+    size_t slot = hash_constant(&parser->chunk->constants[index]) & mask;
+    while (table->slots[slot] != 0) {
+        slot = (slot + 1) & mask;
+    }
+    table->slots[slot] = (uint32_t)index + 1u;
+    table->used++;
+}
+
+/* Drops the entry of the constant at index (backward-shift deletion: no tombstones). */
+static void forget_constant(Parser *parser, size_t index) {
+    ConstantIndex *table = &parser->constants;
+    if (table->capacity == 0) {
+        return;
+    }
+    const LzChunk *chunk = parser->chunk;
+    size_t mask = table->capacity - 1;
+    size_t hole = hash_constant(&chunk->constants[index]) & mask;
+    while (table->slots[hole] != index + 1) {
+        if (table->slots[hole] == 0) {
+            return; /* never indexed */
+        }
+        hole = (hole + 1) & mask;
+    }
+    for (size_t next = (hole + 1) & mask; table->slots[next] != 0; next = (next + 1) & mask) {
+        size_t home = hash_constant(&chunk->constants[table->slots[next] - 1]) & mask;
+        /* The entry may move back into the hole unless its home lies in (hole, next]. */
+        bool stays = hole <= next ? (hole < home && home <= next) : (hole < home || home <= next);
+        if (!stays) {
+            table->slots[hole] = table->slots[next];
+            hole = next;
+        }
+    }
+    table->slots[hole] = 0;
+    table->used--;
+}
+
+/* Call before the chunk drops the constants from index `from` on. */
+static void forget_constants_from(Parser *parser, size_t from) {
+    for (size_t i = parser->chunk->constant_count; i > from; i--) {
+        forget_constant(parser, i - 1);
+    }
+}
+
+static uint16_t add_constant(Parser *parser, LzValue value, bool by_identity) {
+    uint16_t index = 0;
+    if (find_constant(parser, &value, by_identity, &index)) {
+        return index;
+    }
     if (parser->chunk->constant_count >= LZ_CONSTANTS_MAX) {
         error_at_previous(parser, "too many constants in one chunk");
         return 0;
     }
-    uint16_t index = 0;
     if (!lz_chunk_add_constant(parser->chunk, value, &index)) {
         fail(parser, LZ_ERR_MEMORY);
+        return index;
     }
+    remember_constant(parser, index);
     return index;
+}
+
+static uint16_t make_constant(Parser *parser, LzValue value) {
+    return add_constant(parser, value, false);
 }
 
 static void emit_constant(Parser *parser, LzValue value) {
@@ -205,13 +393,13 @@ static LzString *intern_token(Parser *parser, const LzToken *token) {
     LzString *name =
         lz_vm_intern(parser->vm, parser->source->text + token->offset, token->length);
     if (name == NULL) {
-        fail(parser, LZ_ERR_MEMORY);
+        fail(parser, lz_vm_out_of_memory(parser->vm));
     }
     return name;
 }
 
 static void emit_named(Parser *parser, LzOpCode op, LzString *name, uint32_t offset) {
-    uint16_t index = make_constant(parser, lz_value_object(&name->base));
+    uint16_t index = add_constant(parser, lz_value_object(&name->base), true);
     emit_op_at(parser, op, offset);
     emit_u16_at(parser, index, offset);
 }
@@ -307,6 +495,11 @@ static void end_scope(Parser *parser) {
 
 static void number(Parser *parser) {
     if (parser->previous.type == LZ_TOKEN_INTEGER) {
+        /* The lexer returns the magnitude 2^63 as INT64_MIN; only unary() accepts it. */
+        if (parser->previous.value.integer == INT64_MIN) {
+            error_at_previous(parser, "integer literal out of range");
+            return;
+        }
         emit_constant(parser, lz_value_int(parser->previous.value.integer));
     } else {
         emit_constant(parser, lz_value_float(parser->previous.value.number));
@@ -380,6 +573,13 @@ static void variable(Parser *parser) {
 
 static void unary(Parser *parser) {
     LzToken op = parser->previous;
+    if (op.type == LZ_TOKEN_MINUS && check(parser, LZ_TOKEN_INTEGER) &&
+        parser->current.value.integer == INT64_MIN) {
+        /* -9223372036854775808: the one literal that only exists after a minus sign. */
+        advance(parser);
+        emit_constant(parser, lz_value_int(INT64_MIN));
+        return;
+    }
     parse_precedence(parser, PREC_UNARY);
     emit_op_at(parser, op.type == LZ_TOKEN_BANG ? LZ_OP_NOT : LZ_OP_NEGATE, op.offset);
 }
@@ -536,7 +736,7 @@ static void and_(Parser *parser) {
     size_t end_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
     emit_op_at(parser, LZ_OP_POP, offset);
     skip_newlines(parser);
-    parse_precedence(parser, PREC_AND);
+    parse_precedence(parser, PREC_EQUALITY);
     patch_jump(parser, end_jump);
 }
 
@@ -545,7 +745,7 @@ static void or_(Parser *parser) {
     size_t end_jump = emit_jump(parser, LZ_OP_JUMP_IF_TRUE, offset);
     emit_op_at(parser, LZ_OP_POP, offset);
     skip_newlines(parser);
-    parse_precedence(parser, PREC_OR);
+    parse_precedence(parser, PREC_AND);
     patch_jump(parser, end_jump);
 }
 
@@ -686,6 +886,7 @@ static void variable_declaration(Parser *parser, bool is_const) {
         LzValue value = lz_value_nil();
         LzStatus status = evaluate_fragment(parser, code_mark, &value);
         if (status == LZ_OK) {
+            forget_constants_from(parser, constant_mark);
             lz_chunk_truncate(&parser->vm->heap, parser->chunk, code_mark, constant_mark);
             if (add_symbol(parser, &name_token, name, SYMBOL_CONSTANT, true, value) == NULL) {
                 lz_value_release(&parser->vm->heap, &value);
@@ -751,32 +952,61 @@ static void block(Parser *parser) {
     parser->nesting--;
 }
 
+/*
+ * An else-if chain is a loop, not recursion: a script must not be able to
+ * overflow the C stack with a long chain. Every branch ends with a jump to the
+ * end of the whole statement, collected here and patched once the chain is done.
+ */
 static void if_statement(Parser *parser) {
     uint32_t offset = parser->previous.offset;
-    expression(parser);
-    if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
-        error_at_current(parser, "expected '{' after condition");
-        return;
-    }
+    size_t *end_jumps = NULL;
+    size_t end_count = 0;
+    size_t end_capacity = 0;
 
-    size_t then_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
-    emit_op_at(parser, LZ_OP_POP, offset);
-    block(parser);
-    size_t else_jump = emit_jump(parser, LZ_OP_JUMP, offset);
-    patch_jump(parser, then_jump);
-    emit_op_at(parser, LZ_OP_POP, offset);
+    for (;;) {
+        expression(parser);
+        if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            error_at_current(parser, "expected '{' after condition");
+            break;
+        }
 
-    skip_newlines(parser);
-    if (match(parser, LZ_TOKEN_ELSE)) {
+        size_t then_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
+        emit_op_at(parser, LZ_OP_POP, offset);
+        block(parser);
+
+        if (end_count == end_capacity) {
+            size_t capacity = end_capacity != 0 ? end_capacity * 2 : 4;
+            size_t *grown = realloc(end_jumps, capacity * sizeof *grown);
+            if (grown == NULL) {
+                fail(parser, LZ_ERR_MEMORY);
+                break;
+            }
+            end_jumps = grown;
+            end_capacity = capacity;
+        }
+        end_jumps[end_count++] = emit_jump(parser, LZ_OP_JUMP, offset);
+        patch_jump(parser, then_jump);
+        emit_op_at(parser, LZ_OP_POP, offset);
+
+        skip_newlines(parser);
+        if (!match(parser, LZ_TOKEN_ELSE)) {
+            break;
+        }
         if (match(parser, LZ_TOKEN_IF)) {
-            if_statement(parser);
-        } else if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            continue;
+        }
+        if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
             block(parser);
         } else {
             error_at_current(parser, "expected '{' or 'if' after 'else'");
         }
+        break;
     }
-    patch_jump(parser, else_jump);
+
+    for (size_t i = 0; i < end_count; i++) {
+        patch_jump(parser, end_jumps[i]);
+    }
+    free(end_jumps);
 }
 
 static void while_statement(Parser *parser) {
@@ -927,6 +1157,7 @@ LzStatus lz_compile(LzVM *vm, const LzSource *source, LzChunk *chunk, LzDiagnost
             (void)lz_vm_out_of_memory(vm);
         }
     }
+    free(parser->constants.slots);
     free(parser);
     return status;
 }

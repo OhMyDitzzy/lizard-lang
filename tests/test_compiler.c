@@ -364,6 +364,269 @@ static void test_runtime_behaviour(void) {
     finish(&program);
 }
 
+/* Test programs are assembled from repeated pieces. */
+static void append(LzBuffer *text, const char *piece) {
+    LzWriter writer = lz_writer_from_buffer(text);
+    (void)lz_writer_write_cstr(&writer, piece);
+}
+
+static void test_long_boolean_chains(void) {
+    LzBuffer and_chain = {0};
+    LzBuffer or_chain = {0};
+    append(&and_chain, "println(");
+    append(&or_chain, "println(");
+    for (int i = 0; i < 600; i++) {
+        append(&and_chain, "1 and ");
+        append(&or_chain, "nil or ");
+    }
+    append(&and_chain, "2)\n");
+    append(&or_chain, "7)\n");
+    check_output(and_chain.data, "2\n");
+    check_output(or_chain.data, "7\n");
+    lz_buffer_free(&and_chain);
+    lz_buffer_free(&or_chain);
+
+    /* Parsing a chain as a loop must not change which operand is returned. */
+    check_output("println(nil or 2 and 3, 1 and nil or 5, 0 and \"s\", nil and 1 or 2 and 3)\n",
+                 "3 5 s 3\n");
+    check_output("println(false or false or 4, 1 and 2 and nil and 3, nil or nil or nil)\n",
+                 "4 nil nil\n");
+}
+
+static void else_if_chain(LzBuffer *text, size_t branches, size_t selected) {
+    char piece[96];
+    (void)snprintf(piece, sizeof piece, "let x = %zu\nif x == -1 { println(-1) }\n", selected);
+    append(text, piece);
+    for (size_t i = 0; i < branches; i++) {
+        (void)snprintf(piece, sizeof piece, "else if x == %zu { println(%zu) }\n", i, i);
+        append(text, piece);
+    }
+}
+
+static void test_long_else_if_chains(void) {
+    LzBuffer text = {0};
+    else_if_chain(&text, 2000, 1999);
+    check_output(text.data, "1999\n");
+    lz_buffer_free(&text);
+
+    /* Far past the 16-bit jump distance: a compile error, never a crash from deep recursion. */
+    memset(&text, 0, sizeof text);
+    else_if_chain(&text, 300000, 5);
+    Program program;
+    run(&program, text.data, 0, 0);
+    LZ_CHECK(program.compile_status == LZ_ERR_COMPILE);
+    finish(&program);
+    lz_buffer_free(&text);
+}
+
+static void test_int64_min_literal(void) {
+    check_output("println(-9223372036854775808)\n", "-9223372036854775808\n");
+    check_output("println(-0x8000000000000000, -0b1000000000000000000000000000000000000000000000"
+                 "000000000000000000)\n",
+                 "-9223372036854775808 -9223372036854775808\n");
+    check_output("const M = -9223372036854775808\nprintln(M, M + 1)\n",
+                 "-9223372036854775808 -9223372036854775807\n");
+    check_output("println(-9223372036854775807 - 1 == -9223372036854775808)\n", "true\n");
+    check_output("println(-1 - -9223372036854775808)\n", "9223372036854775807\n");
+
+    /* Positive 2^63 does not fit in an int. */
+    check_compile_error("println(9223372036854775808)\n", "out of range");
+    check_compile_error("println(1 - 9223372036854775808)\n", "out of range");
+    check_compile_error("println(!9223372036854775808)\n", "out of range");
+    check_compile_error("println(-9223372036854775809)\n", "out of range");
+
+    Program program;
+    run(&program, "println(-(-9223372036854775808))\n", 0, 0);
+    LZ_CHECK(program.compile_status == LZ_OK);
+    LZ_CHECK(program.run_status == LZ_ERR_RUNTIME);
+    LZ_CHECK(strstr(program.vm.error, "overflow") != NULL);
+    finish(&program);
+}
+
+static void test_constants_are_shared(void) {
+    Program program;
+    run(&program, "println(1, 1, 1, \"a\", \"a\", 1.5, 1.5, 1.0)\n", 0, 0);
+    LZ_CHECK(program.compile_status == LZ_OK);
+    LZ_CHECK(program.chunk.constant_count == 5); /* println, 1, "a", 1.5, 1.0 */
+    finish(&program);
+
+    check_output("println(1, 1.0, 1)\n", "1 1.0 1\n");
+
+    /* A string literal is not the interned name of a variable, whichever comes first. */
+    check_output("println(\"x\")\nlet x = 5\nprintln(x)\nx = 6\nprintln(x)\n", "x\n5\n6\n");
+    check_output("let y = 1\nprintln(\"y\", y)\ny = 2\nprintln(y)\n", "y 1\n2\n");
+
+    /* 0.0 and -0.0 are different constants. */
+    check_output("println(0.0)\nconst Z = -0.0\nprintln(Z, 0.0)\n", "0.0\n-0.0 0.0\n");
+}
+
+static void test_many_references_fit_in_one_chunk(void) {
+    LzBuffer text = {0};
+    append(&text, "let x = 1\n");
+    for (int i = 0; i < 70000; i++) {
+        append(&text, "x\n");
+    }
+    append(&text, "println(x)\n");
+    check_output(text.data, "1\n");
+    lz_buffer_free(&text);
+
+    memset(&text, 0, sizeof text);
+    for (int i = 0; i < 70000; i++) {
+        append(&text, "7\n\"s\"\n");
+    }
+    append(&text, "println(8)\n");
+    check_output(text.data, "8\n");
+    lz_buffer_free(&text);
+
+    /* Only distinct constants count towards the limit of a chunk. */
+    memset(&text, 0, sizeof text);
+    char piece[32];
+    for (size_t i = 0; i < 70000; i++) {
+        (void)snprintf(piece, sizeof piece, "%zu\n", i);
+        append(&text, piece);
+    }
+    check_compile_error(text.data, "too many constants");
+    lz_buffer_free(&text);
+}
+
+/* Each block folds a const whose literals are then dropped from the constant table. */
+static void test_folded_consts_with_a_shared_table(void) {
+    LzBuffer text = {0};
+    LzBuffer expected = {0};
+    char piece[96];
+    for (size_t i = 0; i < 3000; i++) {
+        (void)snprintf(piece, sizeof piece, "{ const C = %zu + 1\n  println(C) }\n", i + 1000);
+        append(&text, piece);
+        (void)snprintf(piece, sizeof piece, "%zu\n", i + 1001);
+        append(&expected, piece);
+    }
+    Program program;
+    run(&program, text.data, 0, 0);
+    LZ_CHECK(program.compile_status == LZ_OK);
+    LZ_CHECK(program.run_status == LZ_OK);
+    LZ_CHECK(program.out.data != NULL && strcmp(program.out.data, expected.data) == 0);
+    LZ_CHECK(program.chunk.constant_count == 3001); /* println and the 3000 folded values */
+    finish(&program);
+    lz_buffer_free(&text);
+    lz_buffer_free(&expected);
+}
+
+static bool same_constant(const LzValue *x, const LzValue *y) {
+    if (x->type != y->type) {
+        return false;
+    }
+    switch (x->type) {
+    case LZ_VAL_NIL:
+        return true;
+    case LZ_VAL_BOOL:
+        return x->as.boolean == y->as.boolean;
+    case LZ_VAL_INT:
+        return x->as.integer == y->as.integer;
+    case LZ_VAL_FLOAT:
+        return memcmp(&x->as.number, &y->as.number, sizeof x->as.number) == 0;
+    case LZ_VAL_OBJECT: {
+        const LzString *a = (const LzString *)x->as.object;
+        const LzString *b = (const LzString *)y->as.object;
+        return x->as.object == y->as.object ||
+               (x->as.object->type == LZ_OBJ_STRING && y->as.object->type == LZ_OBJ_STRING &&
+                a->length == b->length && memcmp(a->data, b->data, a->length) == 0);
+    }
+    }
+    return false;
+}
+
+/* Literals, names and folded consts drawn from small pools collide a lot in the index. */
+static void test_constant_table_has_no_duplicates(void) {
+    LzBuffer text = {0};
+    char piece[96];
+    uint32_t state = 12345;
+    for (int i = 0; i < 4000; i++) {
+        state = state * 1664525u + 1013904223u;
+        unsigned pick = (state >> 8) % 40;
+        unsigned other = (state >> 16) % 40;
+        switch (state % 5) {
+        case 0:
+            (void)snprintf(piece, sizeof piece, "%u\n", pick);
+            break;
+        case 1:
+            (void)snprintf(piece, sizeof piece, "{ const C = %u + %u\n  println(C) }\n", pick, other);
+            break;
+        case 2:
+            (void)snprintf(piece, sizeof piece, "\"s%u\"\n", pick);
+            break;
+        case 3:
+            (void)snprintf(piece, sizeof piece, "%u.5\n", pick);
+            break;
+        default:
+            (void)snprintf(piece, sizeof piece, "{ const S = \"a%u\" + \"b%u\"\n  println(S) }\n", pick,
+                           other);
+            break;
+        }
+        append(&text, piece);
+    }
+
+    Program program;
+    run(&program, text.data, 0, 0);
+    LZ_CHECK(program.compile_status == LZ_OK);
+    LZ_CHECK(program.run_status == LZ_OK);
+    size_t duplicates = 0;
+    for (size_t i = 0; i < program.chunk.constant_count; i++) {
+        for (size_t j = i + 1; j < program.chunk.constant_count; j++) {
+            if (same_constant(&program.chunk.constants[i], &program.chunk.constants[j])) {
+                duplicates++;
+            }
+        }
+    }
+    LZ_CHECK(duplicates == 0);
+    finish(&program);
+    lz_buffer_free(&text);
+}
+
+static void test_fuel_covers_large_strings(void) {
+    const char *doubling = "let s = \"x\"\nlet i = 0\nwhile i < 20 { s = s + s\n i = i + 1 }\n";
+
+    Program program;
+    run(&program, doubling, 5000, 0);
+    LZ_CHECK(program.compile_status == LZ_OK);
+    LZ_CHECK(program.run_status == LZ_ERR_FUEL);
+    finish(&program);
+
+    run(&program, doubling, 0, 0);
+    LZ_CHECK(program.run_status == LZ_OK);
+    finish(&program);
+}
+
+static void test_heap_limit_status_while_compiling(void) {
+    LzBuffer names = {0};
+    char piece[48];
+    for (int i = 0; i < 400; i++) {
+        (void)snprintf(piece, sizeof piece, "name_number_%d\n", i);
+        append(&names, piece);
+    }
+
+    LzBuffer out = {0};
+    LzVM vm;
+    lz_vm_init(&vm, lz_writer_from_buffer(&out), lz_writer_from_buffer(&out));
+    LZ_CHECK(lz_builtin_install(&vm) == LZ_OK);
+    lz_vm_set_heap_limit(&vm, vm.heap.live_bytes + 2000);
+
+    /* Every name is interned before it is rejected, so the limit is hit inside the lexer's callers. */
+    LzSource source;
+    lz_source_from_string(&source, "t.lz", names.data);
+    LzChunk chunk;
+    lz_chunk_init(&chunk);
+    LzDiagnostics diagnostics;
+    LZ_CHECK(lz_compile(&vm, &source, &chunk, &diagnostics) == LZ_ERR_HEAP_LIMIT);
+    LZ_CHECK(strstr(vm.error, "heap limit") != NULL);
+
+    lz_chunk_free(&vm.heap, &chunk);
+    lz_vm_release_roots(&vm);
+    LZ_CHECK(vm.heap.live_objects == 0);
+    lz_vm_free(&vm);
+    lz_buffer_free(&out);
+    lz_buffer_free(&names);
+}
+
 static void test_const_folding_leaves_no_code(void) {
     Program program;
     run(&program, "const A = 1 + 2\n", 0, 0);
@@ -394,5 +657,14 @@ int main(void) {
     test_limits_in_the_compiler();
     test_runtime_behaviour();
     test_const_folding_leaves_no_code();
+    test_long_boolean_chains();
+    test_long_else_if_chains();
+    test_int64_min_literal();
+    test_constants_are_shared();
+    test_many_references_fit_in_one_chunk();
+    test_folded_consts_with_a_shared_table();
+    test_constant_table_has_no_duplicates();
+    test_fuel_covers_large_strings();
+    test_heap_limit_status_while_compiling();
     return LZ_TEST_RESULT();
 }

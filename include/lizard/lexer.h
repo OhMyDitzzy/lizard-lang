@@ -49,8 +49,9 @@ typedef enum LzTokenType {
 
 /*
  * A token is a span of the source: [offset, offset + length). The lexeme is
- * never copied. INTEGER and FLOAT carry their value; ERROR carries a static
- * message. A string token spans both quotes; use lz_token_string_value to get
+ * never copied. INTEGER and FLOAT carry their value (an integer literal is a
+ * magnitude, and 2^63 is returned as INT64_MIN: valid only after a unary minus);
+ * ERROR carries a static message. A string token spans both quotes; use lz_token_string_value to get
  * its decoded contents.
  */
 typedef struct LzToken {

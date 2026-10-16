@@ -89,6 +89,14 @@ void lz_value_release(LzHeap *heap, const LzValue *value) {
 static bool write_float(double number, const LzWriter *writer) {
     char text[40];
 
+    /* printf spells these differently per platform (and gives NaN a sign): fix the text. */
+    if (isnan(number)) {
+        return lz_writer_write_cstr(writer, "nan");
+    }
+    if (isinf(number)) {
+        return lz_writer_write_cstr(writer, number < 0 ? "-inf" : "inf");
+    }
+
     /* Shortest precision that round-trips, so 0.1 prints as 0.1 and not 0.10000000000000001. */
     for (int precision = 15; precision <= 17; precision++) {
         (void)snprintf(text, sizeof text, "%.*g", precision, number);

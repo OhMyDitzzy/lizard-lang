@@ -125,7 +125,12 @@ static void test_integers(void) {
     check_integer("0o17", 15);
     check_integer("9223372036854775807", INT64_MAX);
     check_integer("0x7FFFFFFFFFFFFFFF", INT64_MAX);
-    check_error("9223372036854775808", "out of range");
+    /* 2^63 only exists so that -9223372036854775808 can be written: it comes back as INT64_MIN. */
+    check_integer("9223372036854775808", INT64_MIN);
+    check_integer("0x8000000000000000", INT64_MIN);
+    EXPECT("-9223372036854775808", T(MINUS), T(INTEGER), T(NEWLINE));
+    check_error("9223372036854775809", "out of range");
+    check_error("0x8000000000000001", "out of range");
     check_error("0xFFFFFFFFFFFFFFFF", "out of range");
     check_error("99999999999999999999999", "out of range");
 }

@@ -51,7 +51,9 @@ computed only when an error is shown (`lz_source_locate`), and
 `lz_source_write_diagnostic` prints `name:line:col: severity: message` with the
 source line and a caret underline. Columns count UTF-8 code points. A runtime
 error reports `vm->error_offset`, the offset of the failing instruction
-(`LZ_NO_OFFSET` when there is none). Sources are limited to 64 MiB.
+(`LZ_NO_OFFSET` when there is none). Sources are limited to 64 MiB (a file of exactly
+64 MiB is accepted), and `lz_source_read_file` drops a leading UTF-8 byte order
+mark. A long file name or message never truncates a diagnostic.
 
 ## Lexer
 
@@ -64,7 +66,7 @@ lexical rules are decided; the grammar built on them is not.
 | Comments | `#` to end of line |
 | Identifiers | ASCII letters, digits and `_`, not starting with a digit |
 | Keywords | `and`, `or`, `true`, `false`, `nil` (one table in `lexer.c`) |
-| Integers | decimal, `0x`, `0b`, `0o`; `_` between digits; above `INT64_MAX` is an error |
+| Integers | decimal, `0x`, `0b`, `0o`; `_` between digits; a literal is a magnitude (the sign is a unary minus), so above 2^63 is an error and 2^63 itself is accepted only right after a unary minus, which makes `-9223372036854775808` writable |
 | Floats | `1.5`, `1e3`, `1.5e-2`; a `.` needs a digit after it, so `1.foo` is `1`, `.`, `foo`; out-of-range is an error |
 | Strings | `"..."` or `'...'` on one line; escapes `\n \t \r \0 \\ \" \' \xHH` (00 to 7F) `\u{H..H}` |
 | Operators | `+ - * / // % ! != = == < <= > >=` and `( ) [ ] { } , . : ;` |
@@ -110,13 +112,21 @@ once in the chunk's constant table. An error while evaluating it, such as
 `1 / 0`, is a compile error. Otherwise (a call, a variable) the constant is an
 ordinary global or slot that the compiler refuses to assign to.
 
+**Constants are shared.** Identical constants of a chunk are stored once (names by
+identity, numbers by value, floats by their bits, strings by content), so a
+chunk holds up to 65536 *distinct* constants however often they are used.
+
 **Jumps.** `JUMP`, `JUMP_IF_FALSE`, `JUMP_IF_TRUE` and `LOOP` take a 16-bit
 distance, so one block body is limited to 65535 bytes. The VM bounds-checks
 every jump, local slot and operand, so malformed bytecode fails cleanly
 instead of crashing; fuel stops infinite loops.
 
 **Limits.** 255 call arguments, 256 locals, 512 declared names, and 128
-levels of expression or block nesting.
+levels of expression or block nesting. Chains are not nesting: `a and b and c`,
+`a or b or c` and `if ... else if ...` are parsed in a loop, so a long chain
+(or a hostile script) cannot overflow the C stack. A long `else if` chain is
+bounded by the 16-bit jump distance instead, because its first branch jumps
+over the whole chain.
 
 **Exit codes.** `lizard file.lz` exits 65 on compile errors, 66 if the file
 cannot be read, and 70 on a runtime error or an exhausted budget.
@@ -142,7 +152,9 @@ A native that fails to allocate returns `lz_vm_out_of_memory(vm)`, which reports
 Fuel costs one unit per instruction and persists across `lz_vm_run` calls, so
 the host sets it before each run; `vm->instructions` counts executed
 instructions even when metering is off. A native that does heavy work calls
-`lz_vm_charge_fuel(vm, cost)` so a single call cannot hide unbounded effort.
+`lz_vm_charge_fuel(vm, cost)` so a single call cannot hide unbounded effort;
+string concatenation and `print`/`println` charge one unit per 64 bytes they
+copy or write.
 Call depth gets its own limit when call frames arrive.
 
 ## Language semantics
@@ -159,6 +171,7 @@ Decided rules, implemented in stages.
 | `1 == 1.0` is true, strings compare by content, other mixed types are unequal | done |
 | `<` and `>` order numbers only; int against float is compared exactly, and anything involving NaN is false | done |
 | `+` on two strings concatenates; there is no implicit conversion (`"a" + 1` is an error) | done |
+| NaN prints as `nan` and the infinities as `inf` and `-inf` on every platform | done |
 | `//` rounds toward negative infinity and `%` takes the sign of the divisor (as in Python); with a float operand both give floats; a zero divisor is an error | done |
 
 Equality, truthiness and exact number ordering live in `value.c`

@@ -70,6 +70,13 @@ static bool is_string(const LzValue *value) {
 }
 
 static LzStatus concat(LzVM *vm, const LzValue *left, const LzValue *right, LzValue *result) {
+    /* Copying is real work: one fuel unit per 64 bytes keeps fuel a bound on time. */
+    LzStatus charged = lz_vm_charge_fuel(vm, (((const LzString *)left->as.object)->length +
+                                              ((const LzString *)right->as.object)->length) /
+                                                 64);
+    if (charged != LZ_OK) {
+        return charged;
+    }
     LzString *joined = lz_string_concat(&vm->heap, (const LzString *)left->as.object,
                                         (const LzString *)right->as.object);
     if (joined == NULL) {

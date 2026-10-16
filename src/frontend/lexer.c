@@ -18,6 +18,18 @@ static const Keyword keywords[] = {
     {"while", LZ_TOKEN_WHILE},
 };
 
+/*
+ * An integer literal is a magnitude; the sign is a unary minus. The largest valid
+ * magnitude is 2^63 so that -9223372036854775808 can be written. A literal of
+ * exactly 2^63 is returned as INT64_MIN and the compiler accepts it only right
+ * after a unary minus.
+ */
+#define INTEGER_LIMIT ((uint64_t)INT64_MAX + 1u)
+
+static int64_t integer_from_magnitude(uint64_t magnitude) {
+    return magnitude == INTEGER_LIMIT ? INT64_MIN : (int64_t)magnitude;
+}
+
 static bool is_digit(char c) {
     return c >= '0' && c <= '9';
 }
@@ -172,14 +184,14 @@ static LzToken lex_prefixed_integer(LzLexer *lexer, size_t start, unsigned base)
             continue;
         }
         uint64_t digit = (uint64_t)hex_value(text[i]);
-        if (value > ((uint64_t)INT64_MAX - digit) / base) {
+        if (value > (INTEGER_LIMIT - digit) / base) {
             return make_error(lexer, start, "integer literal out of range");
         }
         value = value * base + digit;
     }
 
     LzToken token = make_token(lexer, LZ_TOKEN_INTEGER, start);
-    token.value.integer = (int64_t)value;
+    token.value.integer = integer_from_magnitude(value);
     return token;
 }
 
@@ -267,13 +279,13 @@ static LzToken lex_number(LzLexer *lexer, size_t start) {
             continue;
         }
         uint64_t digit = (uint64_t)(text[i] - '0');
-        if (value > ((uint64_t)INT64_MAX - digit) / 10) {
+        if (value > (INTEGER_LIMIT - digit) / 10) {
             return make_error(lexer, start, "integer literal out of range");
         }
         value = value * 10 + digit;
     }
     LzToken token = make_token(lexer, LZ_TOKEN_INTEGER, start);
-    token.value.integer = (int64_t)value;
+    token.value.integer = integer_from_magnitude(value);
     return token;
 }
 

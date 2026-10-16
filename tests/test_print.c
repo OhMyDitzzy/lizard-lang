@@ -1,3 +1,5 @@
+#include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "lizard/builtin.h"
@@ -51,6 +53,37 @@ int main(void) {
     LzValue floats[] = {lz_value_float(0.1), lz_value_float(3.0), lz_value_float(-2.5)};
     LZ_CHECK(lz_native_call(&vm, print, 3, floats, &result) == LZ_OK);
     LZ_CHECK(output_is(&out, "0.1 3.0 -2.5"));
+
+    /* The text of NaN and the infinities does not depend on the platform's printf. */
+    reset(&out);
+    LzValue special[] = {lz_value_float(NAN), lz_value_float(-NAN), lz_value_float(INFINITY),
+                         lz_value_float(-INFINITY)};
+    LZ_CHECK(lz_native_call(&vm, print, 4, special, &result) == LZ_OK);
+    LZ_CHECK(output_is(&out, "nan nan inf -inf"));
+
+    /* A long string costs one fuel unit per 64 bytes, charged before anything is written. */
+    size_t big_length = 64 * 1000;
+    char *big_text = malloc(big_length);
+    LZ_CHECK(big_text != NULL);
+    if (big_text != NULL) {
+        memset(big_text, 'x', big_length);
+        LzString *big = lz_string_new(&vm.heap, big_text, big_length);
+        free(big_text);
+        LZ_CHECK(big != NULL);
+        if (big != NULL) {
+            LzValue big_value = lz_value_object(&big->base);
+            reset(&out);
+            lz_vm_set_fuel(&vm, 999);
+            LZ_CHECK(lz_native_call(&vm, print, 1, &big_value, &result) == LZ_ERR_FUEL);
+            LZ_CHECK(out.length == 0);
+            lz_vm_set_fuel(&vm, 1000);
+            LZ_CHECK(lz_native_call(&vm, print, 1, &big_value, &result) == LZ_OK);
+            LZ_CHECK(vm.fuel == 0);
+            LZ_CHECK(out.length == big_length);
+            lz_vm_set_fuel(&vm, LZ_FUEL_UNLIMITED);
+            lz_object_release(&vm.heap, &big->base);
+        }
+    }
 
     lz_object_release(&vm.heap, &greeting->base);
     lz_vm_release_roots(&vm);
