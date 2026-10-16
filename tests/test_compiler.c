@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "lizard/builtin.h"
@@ -596,6 +597,57 @@ static void test_fuel_covers_large_strings(void) {
     finish(&program);
 }
 
+static void test_fuel_covers_every_large_string_operation(void) {
+    const char *doubling = "let s = \"x\"\nlet i = 0\nwhile i < 20 { s = s + s\n i = i + 1 }\n";
+    const char *tails[] = {
+        "while true { let t = s + s }\n",
+        "while true { println(s) }\n",
+        "let copy = s + \"\"\nwhile true { let same = s == copy }\n",
+        "let copy = s + \"\"\nwhile true { let same = s != copy }\n",
+    };
+
+    for (size_t i = 0; i < sizeof tails / sizeof tails[0]; i++) {
+        size_t size = strlen(doubling) + strlen(tails[i]) + 1;
+        char *text = malloc(size);
+        (void)snprintf(text, size, "%s%s", doubling, tails[i]);
+
+        /* 1 MiB strings: far more fuel is spent on bytes than on the few instructions per turn. */
+        Program program;
+        run(&program, text, 400000, 0);
+        LZ_CHECK(program.compile_status == LZ_OK);
+        LZ_CHECK(program.run_status == LZ_ERR_FUEL);
+        LZ_CHECK(program.vm.instructions < 2000);
+        finish(&program);
+        free(text);
+    }
+
+    check_output("let s = \"x\"\nprintln(s == s, s == \"x\", s != \"y\")\n", "true true true\n");
+}
+
+static void test_else_if_branches_report_their_own_line(void) {
+    const char *text = "let i = 0\nwhile true {\n  if i == 100 { println(1) }\n"
+                       "  else if i == 200 { println(2) }\n  else if i == 300 { println(3) }\n"
+                       "  i = i + 1\n}\n";
+    Program program;
+    run(&program, text, 50, 0);
+    LZ_CHECK(program.compile_status == LZ_OK);
+
+    /* Conditional jumps in emission order: the while test, then one per if / else if branch. */
+    unsigned lines[8];
+    size_t count = 0;
+    for (size_t i = 0; i < program.chunk.count; i += lz_opcode_length(program.chunk.code[i])) {
+        if (program.chunk.code[i] == LZ_OP_JUMP_IF_FALSE && count < 8) {
+            lines[count++] =
+                lz_source_locate(&program.source, program.chunk.offsets[i]).line;
+        }
+    }
+    LZ_CHECK(count == 4);
+    if (count == 4) {
+        LZ_CHECK(lines[0] == 2 && lines[1] == 3 && lines[2] == 4 && lines[3] == 5);
+    }
+    finish(&program);
+}
+
 static void test_heap_limit_status_while_compiling(void) {
     LzBuffer names = {0};
     char piece[48];
@@ -665,6 +717,8 @@ int main(void) {
     test_folded_consts_with_a_shared_table();
     test_constant_table_has_no_duplicates();
     test_fuel_covers_large_strings();
+    test_fuel_covers_every_large_string_operation();
+    test_else_if_branches_report_their_own_line();
     test_heap_limit_status_while_compiling();
     return LZ_TEST_RESULT();
 }

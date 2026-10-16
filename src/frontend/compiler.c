@@ -958,12 +958,13 @@ static void block(Parser *parser) {
  * end of the whole statement, collected here and patched once the chain is done.
  */
 static void if_statement(Parser *parser) {
-    uint32_t offset = parser->previous.offset;
     size_t *end_jumps = NULL;
     size_t end_count = 0;
     size_t end_capacity = 0;
 
     for (;;) {
+        /* previous is this branch's "if", so each branch's jumps point at their own line. */
+        uint32_t offset = parser->previous.offset;
         expression(parser);
         if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
             error_at_current(parser, "expected '{' after condition");

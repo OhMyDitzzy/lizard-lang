@@ -107,7 +107,24 @@ static LzStatus equal(LzVM *vm) {
         return malformed(vm, "stack underflow");
     }
 
-    bool same = lz_value_equal(&vm->stack[vm->stack_count - 2], &vm->stack[vm->stack_count - 1]);
+    const LzValue *left = &vm->stack[vm->stack_count - 2];
+    const LzValue *right = &vm->stack[vm->stack_count - 1];
+
+    /* Comparing two different strings of equal length reads all of both: one fuel unit per 64 bytes. */
+    if (left->type == LZ_VAL_OBJECT && right->type == LZ_VAL_OBJECT &&
+        left->as.object != right->as.object && left->as.object->type == LZ_OBJ_STRING &&
+        right->as.object->type == LZ_OBJ_STRING) {
+        const LzString *a = (const LzString *)left->as.object;
+        const LzString *b = (const LzString *)right->as.object;
+        if (a->length == b->length) {
+            LzStatus charged = lz_vm_charge_fuel(vm, a->length / 64);
+            if (charged != LZ_OK) {
+                return charged;
+            }
+        }
+    }
+
+    bool same = lz_value_equal(left, right);
     pop(vm);
     pop(vm);
     vm->stack[vm->stack_count++] = lz_value_bool(same);
