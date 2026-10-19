@@ -1,5 +1,7 @@
 #include "lizard/lexer.h"
 
+#include "lizard/number.h"
+
 #include <errno.h>
 #include <locale.h>
 #include <math.h>
@@ -124,38 +126,29 @@ typedef enum FloatResult {
     FLOAT_NO_MEMORY
 } FloatResult;
 
-/* strtod uses the process locale, so swap in its decimal point for ours. */
+/* The lexeme may contain digit separators; the shared parser wants plain digits. */
 static FloatResult parse_float(const char *text, size_t length, double *out) {
-    const char *point = localeconv()->decimal_point;
-    size_t point_length = strlen(point);
-    char *buffer = malloc(length + point_length + 1);
+    char *buffer = malloc(length + 1);
     if (buffer == NULL) {
         return FLOAT_NO_MEMORY;
     }
-
     size_t used = 0;
     for (size_t i = 0; i < length; i++) {
-        if (text[i] == '_') {
-            continue;
-        }
-        if (text[i] == '.') {
-            memcpy(buffer + used, point, point_length);
-            used += point_length;
-        } else {
+        if (text[i] != '_') {
             buffer[used++] = text[i];
         }
     }
-    buffer[used] = '\0';
 
-    errno = 0;
-    double value = strtod(buffer, NULL);
-    bool overflow = errno == ERANGE && isinf(value);
+    LzParseResult result = lz_parse_float(buffer, used, out);
     free(buffer);
-    if (overflow) {
+    switch (result) {
+    case LZ_PARSE_OK:
+        return FLOAT_OK;
+    case LZ_PARSE_NO_MEMORY:
+        return FLOAT_NO_MEMORY;
+    default:
         return FLOAT_RANGE;
     }
-    *out = value;
-    return FLOAT_OK;
 }
 
 static LzToken lex_prefixed_integer(LzLexer *lexer, size_t start, unsigned base) {
@@ -481,6 +474,10 @@ LzToken lz_lexer_next(LzLexer *lexer) {
         return make_token(lexer, LZ_TOKEN_STAR, start);
     case '%':
         return make_token(lexer, LZ_TOKEN_PERCENT, start);
+    case '|':
+        return make_token(lexer, LZ_TOKEN_PIPE, start);
+    case '?':
+        return make_token(lexer, LZ_TOKEN_QUESTION, start);
     case '/':
         return make_token(lexer, match(lexer, '/') ? LZ_TOKEN_SLASH_SLASH : LZ_TOKEN_SLASH, start);
     case '!':
@@ -548,6 +545,10 @@ const char *lz_token_type_name(LzTokenType type) {
         return "SLASH_SLASH";
     case LZ_TOKEN_PERCENT:
         return "PERCENT";
+    case LZ_TOKEN_PIPE:
+        return "PIPE";
+    case LZ_TOKEN_QUESTION:
+        return "QUESTION";
     case LZ_TOKEN_BANG:
         return "BANG";
     case LZ_TOKEN_BANG_EQUAL:

@@ -95,6 +95,9 @@ static void check_float(const char *text, double expected) {
 }
 
 static void test_operators_and_punctuation(void) {
+    EXPECT("x: int? | nil", T(IDENTIFIER), T(COLON), T(IDENTIFIER), T(QUESTION), T(PIPE), T(NIL),
+           T(NEWLINE));
+    EXPECT("a|b?", T(IDENTIFIER), T(PIPE), T(IDENTIFIER), T(QUESTION), T(NEWLINE));
     EXPECT("+ - * / // % ( ) [ ] { } , . : ; = == != ! < <= > >=", T(PLUS), T(MINUS), T(STAR),
            T(SLASH), T(SLASH_SLASH), T(PERCENT), T(LEFT_PAREN), T(RIGHT_PAREN), T(LEFT_BRACKET),
            T(RIGHT_BRACKET), T(LEFT_BRACE), T(RIGHT_BRACE), T(COMMA), T(DOT), T(COLON),
@@ -304,6 +307,8 @@ static void test_type_names(void) {
     LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_PLUS), "PLUS") == 0);
     LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_SLASH_SLASH), "SLASH_SLASH") == 0);
     LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_EOF), "EOF") == 0);
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_PIPE), "PIPE") == 0);
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_QUESTION), "QUESTION") == 0);
 }
 
 int main(void) {

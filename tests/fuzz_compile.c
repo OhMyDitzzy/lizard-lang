@@ -32,7 +32,9 @@ static const char *const words[] = {
     "print", "println", "1", "2", "0", "3.5", "\"s\"", "\"a\\n\"", "+", "-", "*", "/", "//", "%",
     "==", "!=", "<", "<=", ">", ">=", "!", "=", "(", ")", "{", "}", ",", ";", "\n", "\n",
     "#c\n", "@", "12abc", "\"open", "x = x + 1", "let x = 1", "const K = 2", "{ let y = x }",
-    "if x { }", "while x < 3 { x = x + 1 }",
+    "if x { }", "while x < 3 { x = x + 1 }", ":", "|", "?", "int", "string", "any", "type",
+    "type T = int | nil", "let x: int? = nil", "let y: \"a\" | 1 = 1", "let z: T = nil",
+    "x = \"s\"", "true", "-1", "never", "number", "(int | string)?",
 };
 
 static void run_one(void) {
@@ -78,7 +80,8 @@ static void run_one(void) {
         lz_vm_set_fuel(&vm, 20000);
         LzStatus ran = lz_vm_run(&vm, &chunk);
         LZ_CHECK(ran == LZ_OK || ran == LZ_ERR_RUNTIME || ran == LZ_ERR_ARITY ||
-                 ran == LZ_ERR_FUEL || ran == LZ_ERR_HEAP_LIMIT || ran == LZ_ERR_STACK_OVERFLOW);
+                 ran == LZ_ERR_FUEL || ran == LZ_ERR_HEAP_LIMIT || ran == LZ_ERR_STACK_OVERFLOW ||
+                 ran == LZ_ERR_TYPE);
     }
     LZ_CHECK(vm.stack_count == 0);
 

@@ -56,6 +56,27 @@ static LzStatus read_name(LzVM *vm, const LzChunk *chunk, size_t *ip, LzString *
     return LZ_OK;
 }
 
+static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value) {
+    LzBuffer expected = {0};
+    LzBuffer actual = {0};
+    LzWriter expected_out = lz_writer_from_buffer(&expected);
+    LzWriter actual_out = lz_writer_from_buffer(&actual);
+
+    lz_type_describe(type, &expected_out);
+    if (type->literal_count > 0) {
+        lz_value_describe(value, &actual_out);
+    } else {
+        (void)lz_writer_write_cstr(&actual_out, lz_kind_name(lz_kind_of(value)));
+    }
+
+    LzStatus status = lz_vm_set_error(vm, LZ_ERR_TYPE, "type error: expected %s, got %s",
+                                      expected.data != NULL ? expected.data : "?",
+                                      actual.data != NULL ? actual.data : "?");
+    lz_buffer_free(&expected);
+    lz_buffer_free(&actual);
+    return status;
+}
+
 static LzStatus do_call(LzVM *vm, uint8_t argc) {
     if (vm->stack_count < (size_t)argc + 1) {
         return malformed(vm, "stack underflow");
@@ -325,6 +346,19 @@ static LzStatus execute(LzVM *vm, const LzChunk *chunk, size_t *failed_at) {
         case LZ_OP_NEGATE:
             status = negate(vm);
             break;
+        case LZ_OP_CHECK_TYPE: {
+            uint16_t index;
+            if (!read_u16(chunk, &ip, &index)) {
+                status = malformed(vm, "truncated operand");
+            } else if (index >= chunk->type_count) {
+                status = malformed(vm, "type index out of range");
+            } else if (vm->stack_count == 0) {
+                status = malformed(vm, "stack underflow");
+            } else if (!lz_type_matches(&chunk->types[index], &vm->stack[vm->stack_count - 1])) {
+                status = type_mismatch(vm, &chunk->types[index], &vm->stack[vm->stack_count - 1]);
+            }
+            break;
+        }
         case LZ_OP_RETURN:
             return LZ_OK;
         default:

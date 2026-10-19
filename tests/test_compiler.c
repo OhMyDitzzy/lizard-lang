@@ -4,6 +4,7 @@
 
 #include "lizard/builtin.h"
 #include "lizard/compiler.h"
+#include "lizard/debug.h"
 #include "test_util.h"
 
 typedef struct Program {
@@ -25,11 +26,27 @@ static LzStatus five(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
     return LZ_OK;
 }
 
-static void define_five(LzVM *vm) {
-    LzString *name = lz_vm_intern(vm, "five", 4);
-    LzNative *native = lz_native_new(&vm->heap, name, five, 0, 0);
-    (void)lz_vm_define_global(vm, name, lz_value_object(&native->base));
+static LzStatus text_native(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
+    (void)argc;
+    (void)argv;
+    LzString *text = lz_string_new(&vm->heap, "s", 1);
+    if (text == NULL) {
+        return lz_vm_out_of_memory(vm);
+    }
+    *result = lz_value_object(&text->base);
+    return LZ_OK;
+}
+
+static void define_host(LzVM *vm, const char *name, LzNativeFn fn) {
+    LzString *key = lz_vm_intern(vm, name, strlen(name));
+    LzNative *native = lz_native_new(&vm->heap, key, fn, 0, 0);
+    (void)lz_vm_define_global(vm, key, lz_value_object(&native->base));
     lz_object_release(&vm->heap, &native->base);
+}
+
+static void define_five(LzVM *vm) {
+    define_host(vm, "five", five);
+    define_host(vm, "text", text_native);
 }
 
 /* Fuel and heap limit of 0 mean unlimited. */
@@ -190,18 +207,18 @@ static void test_constants(void) {
     run(&program, "const A = 2 * 3 + 1\nprintln(A, A + 1)\n", 0, 0);
     LZ_CHECK(program.compile_status == LZ_OK && program.run_status == LZ_OK);
     LZ_CHECK(program.out.data != NULL && strcmp(program.out.data, "7 8\n") == 0);
-    LZ_CHECK(program.vm.globals.count == 1);
+    LZ_CHECK(program.vm.globals.count == 2);
     finish(&program);
 
     run(&program, "const G = \"he\" + \"llo\"\nprintln(G, G + \"!\")\n", 0, 0);
     LZ_CHECK(program.out.data != NULL && strcmp(program.out.data, "hello hello!\n") == 0);
-    LZ_CHECK(program.vm.globals.count == 1);
+    LZ_CHECK(program.vm.globals.count == 2);
     finish(&program);
 
     run(&program, "const C = five() + 1\nprintln(C)\n", 0, 0);
     LZ_CHECK(program.compile_status == LZ_OK && program.run_status == LZ_OK);
     LZ_CHECK(program.out.data != NULL && strcmp(program.out.data, "6\n") == 0);
-    LZ_CHECK(program.vm.globals.count == 2);
+    LZ_CHECK(program.vm.globals.count == 3);
     finish(&program);
 
     check_output("{\n  const K = 3\n  const L = K * K\n  println(K, L)\n}\n", "3 9\n");
@@ -249,7 +266,7 @@ static void test_compile_errors(void) {
     check_compile_error("let x = @\n", "unexpected character");
     check_compile_error("const Z = 1 / 0\n", "division by zero");
     check_compile_error("const Z = 9223372036854775807 + 1\n", "integer overflow");
-    check_compile_error("const Z = \"a\" + 1\n", "two numbers or two strings");
+    check_compile_error("const Z = \"a\" + 1\n", "operator '+' cannot be applied to \"a\" and 1");
     check_compile_error("{ let a = a }\n", "undefined variable 'a'");
 }
 
@@ -694,7 +711,192 @@ static void test_const_folding_leaves_no_code(void) {
     finish(&program);
 }
 
+static void test_annotations_accept_valid_programs(void) {
+    check_output("let a: int = 1\nlet s: string = \"x\"\nlet f: float = 1.5\nlet b: bool = true\n"
+                 "let n: nil = nil\nprintln(a, s, f, b, n)\n",
+                 "1 x 1.5 true nil\n");
+    check_output("let u: int | string = 5\nprintln(u)\nu = \"s\"\nprintln(u)\n", "5\ns\n");
+    check_output("let m: \"r\" | \"w\" = \"r\"\nprintln(m)\nm = \"w\"\nprintln(m)\n", "r\nw\n");
+    check_output("let o: int? = nil\nprintln(o)\no = 5\nprintln(o)\n", "nil\n5\n");
+    check_output("let x: number = 1\nx = 2.5\nprintln(x)\n", "2.5\n");
+    check_output("type Id = int | string\nlet i: Id = \"k\"\ni = 7\nprintln(i)\n", "7\n");
+    check_output("let flag: true = true\nprintln(flag)\n", "true\n");
+    check_output("let z: -1 | 0 | 1 = -1\nprintln(z)\n", "-1\n");
+    check_output("let p: (int | string)? = nil\nprintln(p)\np = \"x\"\nprintln(p)\n", "nil\nx\n");
+    check_output("let n: int?\nprintln(n)\n", "nil\n");
+    check_output("{ type Small = 1 | 2\n  let s: Small = 2\n  println(s) }\n", "2\n");
+    check_output("const MODE: \"r\" | \"w\" = \"r\"\nprintln(MODE)\n", "r\n");
+    check_output("const K: int = 1 + 2\nprintln(K)\n", "3\n");
+    check_output("let t: string = string(5) + \"!\"\nprintln(t)\n", "5!\n");
+    check_output("let n: int = int(\"12\") + 1\nprintln(n)\n", "13\n");
+    check_output("println(float(\"1.5\") * 2, bool(0), int(3.9))\n", "3.0 true 3\n");
+    check_output("let any_value: any = 1\nany_value = \"s\"\nprintln(any_value)\n", "s\n");
+}
+
+static void test_type_names_do_not_collide_with_variables(void) {
+    check_output("let type = 5\nprintln(type)\n", "5\n");
+    check_output("let type = 5\ntype = 6\nprintln(type + 1)\n", "7\n");
+    check_output("let int = 5\nlet x: int = 1\nprintln(int, x)\n", "5 1\n");
+    check_output("let string = \"s\"\nlet y: string = \"t\"\nprintln(string, y)\n", "s t\n");
+}
+
+static void test_annotation_errors(void) {
+    check_compile_error("let a: int = \"x\"\n", "type mismatch: expected int, got \"x\"");
+    check_compile_error("let s: string = 1\n", "type mismatch: expected string, got 1");
+    check_compile_error("let m: \"r\" | \"w\" = \"x\"\n", "expected \"r\" | \"w\", got \"x\"");
+    check_compile_error("let n: int\n", "variable of type int needs an initial value");
+    check_compile_error("let m: \"r\" | \"w\"\n", "needs an initial value");
+    check_compile_error("let f: float = 1\n", "expected float, got 1");
+    check_compile_error("let a: int = 1\na = \"s\"\n", "type mismatch: expected int");
+    check_compile_error("let x: foo = 1\n", "unknown type 'foo'");
+    check_compile_error("type int = string\n", "cannot redefine builtin type 'int'");
+    check_compile_error("type A = int\ntype A = string\n", "type 'A' is already declared");
+    check_compile_error("let x: = 1\n", "expected a type");
+    check_compile_error("let x: 1.5 = 1\n", "float literal types are not supported");
+    check_compile_error("let x: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 = 1\n", "too many literal types");
+    check_compile_error("const C: int = \"s\"\n", "type mismatch: expected int");
+    check_compile_error("const C: string = 1 + 2\n", "type mismatch: expected string, got 3");
+    check_compile_error("let x: (int = 1\n", "expected ')' after type");
+    check_compile_error("let x: -a = 1\n", "expected a number after '-' in a type");
+    check_compile_error("let x: 9223372036854775808 = 1\n", "integer literal out of range");
+    check_compile_error("let x: never = 1\n", "type mismatch: expected never");
+    check_compile_error("{ type S = int }\nlet x: S = 1\n", "unknown type 'S'");
+    check_compile_error("let d: int = 7 / 2\n", "expected int, got float");
+    check_compile_error("type Id = int | string\nlet i: Id = true\n", "expected int | string, got true");
+}
+
+static void test_static_operator_types(void) {
+    check_compile_error("let s: string = \"a\"\nprintln(s - 1)\n",
+                        "operator '-' cannot be applied to string and 1");
+    check_compile_error("println(1 + \"a\")\n", "operator '+' cannot be applied to 1 and \"a\"");
+    check_compile_error("println(-\"x\")\n", "operator '-' cannot be applied to \"x\"");
+    check_compile_error("println(nil < 1)\n", "operator '<' cannot be applied to nil and 1");
+    check_compile_error("println(true * 2)\n", "operator '*' cannot be applied");
+    check_compile_error("println(1())\n", "cannot call a value of type 1");
+    check_compile_error("let s: string = \"x\"\ns()\n", "cannot call a value of type string");
+    check_output("let u: int | string = 1\nprintln(u + 1)\n", "2\n");
+    check_output("println(\"a\" + \"b\", 1 + 2, 1 + 2.5, true and 1, nil or \"d\")\n", "ab 3 3.5 1 d\n");
+    check_output("let a = 5\nprintln(a + 1, a < 9, -a)\n", "6 true -5\n");
+
+    Program program;
+    run(&program, "let a = 5\nprintln(a + \"x\")\n", 0, 0);
+    LZ_CHECK(program.compile_status == LZ_OK);
+    LZ_CHECK(program.run_status == LZ_ERR_RUNTIME);
+    finish(&program);
+}
+
+static void test_run_time_type_checks(void) {
+    check_output("let n: int = five()\nprintln(n)\n", "5\n");
+    check_output("let n: int? = five()\nlet k: int = n\nprintln(k)\n", "5\n");
+    check_output("let a = 5\nlet b: number = a\nprintln(b)\n", "5\n");
+
+    Program program;
+    run(&program, "let t: int = text()\nprintln(t)\n", 0, 0);
+    LZ_CHECK(program.compile_status == LZ_OK);
+    LZ_CHECK(program.run_status == LZ_ERR_TYPE);
+    LZ_CHECK(strstr(program.vm.error, "type error: expected int, got string") != NULL);
+    LZ_CHECK(program.vm.error_offset == 4);
+    LZ_CHECK(program.source.text[program.vm.error_offset] == 't');
+    LZ_CHECK(program.out.data == NULL);
+    finish(&program);
+
+    run(&program, "let a = 5\nlet b: string = a\n", 0, 0);
+    LZ_CHECK(program.run_status == LZ_ERR_TYPE);
+    LZ_CHECK(strstr(program.vm.error, "expected string, got int") != NULL);
+    finish(&program);
+
+    run(&program, "let x: int = 1\nlet y = \"s\"\nx = y\nprintln(x)\n", 0, 0);
+    LZ_CHECK(program.run_status == LZ_ERR_TYPE);
+    LZ_CHECK(program.source.text[program.vm.error_offset] == 'x');
+    LZ_CHECK(program.out.data == NULL);
+    finish(&program);
+
+    run(&program, "let m: \"r\" | \"w\" = text()\n", 0, 0);
+    LZ_CHECK(program.run_status == LZ_ERR_TYPE);
+    LZ_CHECK(strstr(program.vm.error, "expected \"r\" | \"w\", got \"s\"") != NULL);
+    finish(&program);
+
+    run(&program, "{ let v: int = text() }\n", 0, 0);
+    LZ_CHECK(program.run_status == LZ_ERR_TYPE);
+    finish(&program);
+
+    run(&program, "const C: int = text()\n", 0, 0);
+    LZ_CHECK(program.run_status == LZ_ERR_TYPE);
+    finish(&program);
+}
+
+static size_t count_checks(const char *text) {
+    Program program;
+    run(&program, text, 0, 0);
+    LZ_CHECK(program.compile_status == LZ_OK);
+    size_t checks = 0;
+    for (size_t i = 0; i < program.chunk.count; i += lz_opcode_length(program.chunk.code[i])) {
+        if (program.chunk.code[i] == LZ_OP_CHECK_TYPE) {
+            checks++;
+        }
+    }
+    finish(&program);
+    return checks;
+}
+
+static void test_provable_types_need_no_check(void) {
+    LZ_CHECK(count_checks("let x: int = 1 + 2\n") == 0);
+    LZ_CHECK(count_checks("let x: float = 7 / 2\n") == 0);
+    LZ_CHECK(count_checks("let x: int = 7 // 2\n") == 0);
+    LZ_CHECK(count_checks("let x: number = 1 + 2.5\n") == 0);
+    LZ_CHECK(count_checks("let x: string = \"a\" + \"b\"\n") == 0);
+    LZ_CHECK(count_checks("let n: int = int(\"1\")\n") == 0);
+    LZ_CHECK(count_checks("let s: string = string(1)\n") == 0);
+    LZ_CHECK(count_checks("let x: int? = 5\n") == 0);
+    LZ_CHECK(count_checks("let x: any = five()\n") == 0);
+    LZ_CHECK(count_checks("let x: int = 1\nx = 2\n") == 0);
+    LZ_CHECK(count_checks("let x: \"r\" | \"w\" = \"r\"\n") == 0);
+    LZ_CHECK(count_checks("let x = five()\n") == 0);
+
+    LZ_CHECK(count_checks("let x: int = five()\n") == 1);
+    LZ_CHECK(count_checks("let a = 1\nlet x: int = a\n") == 1);
+    LZ_CHECK(count_checks("let x: int = 1\nlet y = 2\nx = y\n") == 1);
+    LZ_CHECK(count_checks("let x: int? = five()\nlet y: int = x\n") == 2);
+    LZ_CHECK(count_checks("let x: int? = five()\n") == 1);
+    LZ_CHECK(count_checks("let s = \"r\"\nlet m: \"r\" | \"w\" = s\n") == 1);
+}
+
+static void test_checks_show_up_in_the_disassembly(void) {
+    Program program;
+    run(&program, "let x: int? = 5\n", 0, 0);
+    LZ_CHECK(program.compile_status == LZ_OK);
+
+    LzBuffer listing = {0};
+    LzWriter writer = lz_writer_from_buffer(&listing);
+    lz_disassemble_chunk(&program.chunk, "t", &program.source, &writer);
+    LZ_CHECK(listing.data != NULL && strstr(listing.data, "OP_CHECK_TYPE") == NULL);
+    lz_buffer_free(&listing);
+    finish(&program);
+
+    run(&program, "let x: int? = five()\n", 0, 0);
+    writer = lz_writer_from_buffer(&listing);
+    lz_disassemble_chunk(&program.chunk, "t", &program.source, &writer);
+    LZ_CHECK(listing.data != NULL && strstr(listing.data, "'int | nil'") != NULL);
+    lz_buffer_free(&listing);
+    finish(&program);
+
+    run(&program, "let x: int = five()\n", 0, 0);
+    writer = lz_writer_from_buffer(&listing);
+    lz_disassemble_chunk(&program.chunk, "t", &program.source, &writer);
+    LZ_CHECK(listing.data != NULL && strstr(listing.data, "OP_CHECK_TYPE") != NULL);
+    LZ_CHECK(strstr(listing.data, "'int'") != NULL);
+    lz_buffer_free(&listing);
+    finish(&program);
+}
+
 int main(void) {
+    test_annotations_accept_valid_programs();
+    test_type_names_do_not_collide_with_variables();
+    test_annotation_errors();
+    test_static_operator_types();
+    test_run_time_type_checks();
+    test_provable_types_need_no_check();
+    test_checks_show_up_in_the_disassembly();
     test_expressions();
     test_short_circuit();
     test_globals_and_assignment();

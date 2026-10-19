@@ -57,6 +57,24 @@ static size_t jump_instruction(const LzChunk *chunk, size_t offset, bool forward
     return offset + 3;
 }
 
+static size_t type_instruction(const LzChunk *chunk, size_t offset, const LzWriter *out) {
+    const char *name = lz_opcode_name(chunk->code[offset]);
+    if (offset + 3 > chunk->count) {
+        put(out, "%s <truncated>\n", name);
+        return chunk->count;
+    }
+
+    unsigned index = (unsigned)((chunk->code[offset + 1] << 8) | chunk->code[offset + 2]);
+    put(out, "%-18s %5u '", name, index);
+    if (index < chunk->type_count) {
+        lz_type_describe(&chunk->types[index], out);
+    } else {
+        put(out, "<invalid>");
+    }
+    put(out, "'\n");
+    return offset + 3;
+}
+
 static size_t constant_instruction(const LzChunk *chunk, size_t offset, const LzWriter *out) {
     const char *name = lz_opcode_name(chunk->code[offset]);
     if (offset + 3 > chunk->count) {
@@ -99,6 +117,8 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_GET_LOCAL:
     case LZ_OP_SET_LOCAL:
         return slot_instruction(chunk, offset, out);
+    case LZ_OP_CHECK_TYPE:
+        return type_instruction(chunk, offset, out);
     case LZ_OP_JUMP:
     case LZ_OP_JUMP_IF_FALSE:
     case LZ_OP_JUMP_IF_TRUE:

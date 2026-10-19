@@ -10,6 +10,7 @@ typedef struct LzBuiltin {
     LzNativeFn fn;
     int min_args;
     int max_args;
+    uint16_t result_kinds;
 } LzBuiltin;
 
 const LzBuiltin *lz_builtin_lookup(const char *name);

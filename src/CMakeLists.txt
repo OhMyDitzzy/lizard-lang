@@ -4,10 +4,12 @@ add_library(lizard_core STATIC
     core/compare.c
     core/debug.c
     core/memory.c
+    core/number.c
     core/native.c
     core/run.c
     core/source.c
     core/table.c
+    core/type.c
     core/value.c
     core/vm.c
     core/writer.c)

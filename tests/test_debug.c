@@ -98,6 +98,19 @@ int main(void) {
     LZ_CHECK(strstr(out.data, "OP_GREATER_EQUAL") != NULL);
     lz_chunk_free(&vm.heap, &flow);
 
+    LzChunk typed;
+    lz_chunk_init(&typed);
+    LzType nullable_string = lz_type_of_kinds(LZ_KIND_STRING | LZ_KIND_NIL);
+    uint16_t type_index = 0;
+    LZ_CHECK(lz_chunk_add_type(&typed, &nullable_string, &type_index));
+    emit_u16(&typed, LZ_OP_CHECK_TYPE, type_index, 1);
+    emit_u16(&typed, LZ_OP_CHECK_TYPE, 9, 1);
+    lz_disassemble_chunk(&typed, "typed", NULL, &writer);
+    LZ_CHECK(strstr(out.data, "OP_CHECK_TYPE") != NULL);
+    LZ_CHECK(strstr(out.data, "'string | nil'") != NULL);
+    LZ_CHECK(strstr(out.data, "'<invalid>'") != NULL);
+    lz_chunk_free(&vm.heap, &typed);
+
     size_t next = lz_disassemble_instruction(&chunk, 0, NULL, &writer);
     LZ_CHECK(next == 3);
 

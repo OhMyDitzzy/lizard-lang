@@ -1,0 +1,16 @@
+# Optional, gradual types: checked at compile time when the compiler can prove
+# a mistake, and at run time where it cannot.
+type Id = int | string
+type Mode = "r" | "w"
+
+let id: Id = 7
+id = "seven"
+
+let mode: Mode = "r"
+let name: string? = nil
+name = "Lizard"
+
+let n: int = int("12") + 1
+let half: float = n / 2
+
+println(id, mode, name, n, half)

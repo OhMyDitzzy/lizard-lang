@@ -7,6 +7,7 @@
 
 #include "lizard/lexer.h"
 #include "lizard/native.h"
+#include "lizard/type.h"
 
 #define LZ_MAX_SYMBOLS 512
 #define LZ_MAX_LOCALS 256
@@ -26,7 +27,16 @@ typedef struct Symbol {
     bool is_const;
     uint16_t slot;
     LzValue value;
+    LzType type; /* declared type, or the exact type of a folded const */
 } Symbol;
+
+#define LZ_MAX_ALIASES 64
+
+typedef struct Alias {
+    LzString *name;
+    int depth;
+    LzType type;
+} Alias;
 
 /*
  * Identical constants of a chunk are stored once, so a program that mentions one
@@ -58,6 +68,8 @@ typedef struct Parser {
     int scope_depth;
     int nesting;
     ConstantIndex constants;
+    Alias aliases[LZ_MAX_ALIASES];
+    size_t alias_count;
 } Parser;
 
 typedef enum Precedence {
@@ -72,17 +84,28 @@ typedef enum Precedence {
     PREC_CALL
 } Precedence;
 
-typedef void (*ParseFn)(Parser *parser);
+/*
+ * What the compiler knows about the value an expression leaves on the stack:
+ * its static type, and the builtin when the expression is a direct reference to
+ * one, so a call can use that builtin's result type.
+ */
+typedef struct Expr {
+    LzType type;
+    const LzNative *native;
+} Expr;
+
+typedef Expr (*PrefixFn)(Parser *parser);
+typedef Expr (*InfixFn)(Parser *parser, Expr left);
 
 typedef struct ParseRule {
-    ParseFn prefix;
-    ParseFn infix;
+    PrefixFn prefix;
+    InfixFn infix;
     Precedence precedence;
 } ParseRule;
 
-static void expression(Parser *parser);
+static Expr expression(Parser *parser);
 static void declaration(Parser *parser);
-static void parse_precedence(Parser *parser, Precedence precedence);
+static Expr parse_precedence(Parser *parser, Precedence precedence);
 
 /* Diagnostics */
 
@@ -382,11 +405,12 @@ static uint16_t make_constant(Parser *parser, LzValue value) {
     return add_constant(parser, value, false);
 }
 
-static void emit_constant(Parser *parser, LzValue value) {
+static uint16_t emit_constant(Parser *parser, LzValue value) {
     uint32_t offset = parser->previous.offset;
     uint16_t index = make_constant(parser, value);
     emit_op_at(parser, LZ_OP_CONSTANT, offset);
     emit_u16_at(parser, index, offset);
+    return index;
 }
 
 static LzString *intern_token(Parser *parser, const LzToken *token) {
@@ -442,7 +466,7 @@ static Symbol *find_symbol(Parser *parser, const LzString *name) {
 }
 
 static Symbol *add_symbol(Parser *parser, const LzToken *token, LzString *name, SymbolKind kind,
-                          bool is_const, LzValue value) {
+                          bool is_const, LzValue value, const LzType *type) {
     for (size_t i = parser->symbol_count; i > 0; i--) {
         const Symbol *existing = &parser->symbols[i - 1];
         if (existing->depth < parser->scope_depth) {
@@ -469,6 +493,7 @@ static Symbol *add_symbol(Parser *parser, const LzToken *token, LzString *name, 
     symbol->is_const = is_const;
     symbol->slot = kind == SYMBOL_LOCAL ? (uint16_t)parser->local_count++ : 0;
     symbol->value = value;
+    symbol->type = *type;
     return symbol;
 }
 
@@ -488,66 +513,354 @@ static void end_scope(Parser *parser) {
             lz_value_release(&parser->vm->heap, &symbol->value);
         }
     }
+    while (parser->alias_count > 0 &&
+           parser->aliases[parser->alias_count - 1].depth == parser->scope_depth) {
+        parser->alias_count--;
+    }
     parser->scope_depth--;
+}
+
+/* Static types */
+
+static Expr expr_of(LzType type) {
+    Expr expr;
+    expr.type = type;
+    expr.native = NULL;
+    return expr;
+}
+
+static Expr any_expr(void) {
+    return expr_of(lz_type_of_kinds(LZ_KINDS_ANY));
+}
+
+static void describe_type(const LzType *type, char *out, size_t size) {
+    LzBuffer buffer = {0};
+    LzWriter writer = lz_writer_from_buffer(&buffer);
+    lz_type_describe(type, &writer);
+    (void)snprintf(out, size, "%s", buffer.data != NULL ? buffer.data : "?");
+    lz_buffer_free(&buffer);
+}
+
+static LzToken span_from(const Parser *parser, const LzToken *start) {
+    LzToken span = *start;
+    uint32_t end = parser->previous.offset + parser->previous.length;
+    span.length = end > span.offset ? end - span.offset : 0;
+    return span;
+}
+
+/* "<prefix><a><middle><b>", with b and its middle part left out when b is NULL. */
+static void error_types(Parser *parser, const LzToken *at, const char *prefix, const LzType *a,
+                        const char *middle, const LzType *b) {
+    char first[96];
+    char second[96];
+    char message[256];
+    describe_type(a, first, sizeof first);
+    second[0] = '\0';
+    if (b != NULL) {
+        describe_type(b, second, sizeof second);
+    }
+    (void)snprintf(message, sizeof message, "%s%s%s%s", prefix, first, middle, second);
+    error_at(parser, at, message);
+}
+
+static void error_operator(Parser *parser, const LzToken *op, const LzType *left,
+                           const LzType *right) {
+    char symbol[16];
+    char first[96];
+    char second[96];
+    char message[256];
+    token_text(parser, op, symbol, sizeof symbol);
+    describe_type(left, first, sizeof first);
+    if (right == NULL) {
+        (void)snprintf(message, sizeof message, "operator '%s' cannot be applied to %s", symbol,
+                       first);
+    } else {
+        describe_type(right, second, sizeof second);
+        (void)snprintf(message, sizeof message, "operator '%s' cannot be applied to %s and %s",
+                       symbol, first, second);
+    }
+    error_at(parser, op, message);
+}
+
+/*
+ * Checks a value of type from against the type it is stored under. A value that
+ * always fits needs nothing, one that never fits is a compile error, and one
+ * that might fit (any, a union, a wider type) gets a run-time check.
+ */
+static void check_assignment(Parser *parser, const LzType *from, const LzType *to,
+                             const LzToken *start, uint32_t offset) {
+    switch (lz_type_assignable(from, to)) {
+    case LZ_ASSIGN_ALWAYS:
+        return;
+    case LZ_ASSIGN_NEVER: {
+        LzToken span = span_from(parser, start);
+        error_types(parser, &span, "type mismatch: expected ", to, ", got ", from);
+        return;
+    }
+    case LZ_ASSIGN_MAYBE:
+        break;
+    }
+
+    uint16_t index = 0;
+    if (!lz_chunk_add_type(parser->chunk, to, &index)) {
+        if (parser->chunk->type_count >= LZ_TYPES_MAX) {
+            error_at_previous(parser, "too many types in one chunk");
+        } else {
+            fail(parser, LZ_ERR_MEMORY);
+        }
+        return;
+    }
+    emit_op_at(parser, LZ_OP_CHECK_TYPE, offset);
+    emit_u16_at(parser, index, offset);
+}
+
+static Expr union_expr(Expr left, Expr right) {
+    LzType merged;
+    if (!lz_type_union(&merged, &left.type, &right.type)) {
+        LzType a = lz_type_widen(&left.type);
+        LzType b = lz_type_widen(&right.type);
+        (void)lz_type_union(&merged, &a, &b);
+    }
+    return expr_of(merged);
+}
+
+/* Type syntax */
+
+static bool builtin_type(const char *name, LzType *out) {
+    if (strcmp(name, "int") == 0) {
+        *out = lz_type_of_kinds(LZ_KIND_INT);
+    } else if (strcmp(name, "float") == 0) {
+        *out = lz_type_of_kinds(LZ_KIND_FLOAT);
+    } else if (strcmp(name, "bool") == 0) {
+        *out = lz_type_of_kinds(LZ_KIND_BOOL);
+    } else if (strcmp(name, "string") == 0) {
+        *out = lz_type_of_kinds(LZ_KIND_STRING);
+    } else if (strcmp(name, "number") == 0) {
+        *out = lz_type_of_kinds(LZ_KINDS_NUMBER);
+    } else if (strcmp(name, "any") == 0) {
+        *out = lz_type_of_kinds(LZ_KINDS_ANY);
+    } else if (strcmp(name, "never") == 0) {
+        *out = lz_type_of_kinds(0);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static const Alias *find_alias(const Parser *parser, const LzString *name) {
+    for (size_t i = parser->alias_count; i > 0; i--) {
+        if (parser->aliases[i - 1].name == name) {
+            return &parser->aliases[i - 1];
+        }
+    }
+    return NULL;
+}
+
+static LzType literal_type(const LzLiteral *literal) {
+    LzType type = lz_type_of_kinds(0);
+    (void)lz_type_add_literal(&type, literal);
+    return type;
+}
+
+static bool parse_type_union(Parser *parser, LzType *out);
+
+static bool parse_type_primary(Parser *parser, LzType *out) {
+    *out = lz_type_of_kinds(LZ_KINDS_ANY);
+    if (parser->nesting >= LZ_MAX_NESTING) {
+        error_at_current(parser, "type nested too deeply");
+        return false;
+    }
+
+    switch (parser->current.type) {
+    case LZ_TOKEN_IDENTIFIER: {
+        advance(parser);
+        LzToken token = parser->previous;
+        char name[48];
+        token_text(parser, &token, name, sizeof name);
+        if (builtin_type(name, out)) {
+            return true;
+        }
+        LzString *id = intern_token(parser, &token);
+        if (id == NULL) {
+            return false;
+        }
+        const Alias *alias = find_alias(parser, id);
+        if (alias == NULL) {
+            error_with_name(parser, &token, "unknown type '", "'");
+            return false;
+        }
+        *out = alias->type;
+        return true;
+    }
+    case LZ_TOKEN_NIL:
+        advance(parser);
+        *out = lz_type_of_kinds(LZ_KIND_NIL);
+        return true;
+    case LZ_TOKEN_TRUE:
+    case LZ_TOKEN_FALSE: {
+        advance(parser);
+        LzLiteral literal = {.kind = LZ_VAL_BOOL,
+                             .as.boolean = parser->previous.type == LZ_TOKEN_TRUE};
+        *out = literal_type(&literal);
+        return true;
+    }
+    case LZ_TOKEN_STRING: {
+        advance(parser);
+        LzBuffer decoded = {0};
+        if (!lz_token_string_value(parser->source, &parser->previous, &decoded)) {
+            lz_buffer_free(&decoded);
+            fail(parser, LZ_ERR_MEMORY);
+            return false;
+        }
+        LzString *text = lz_vm_intern(parser->vm, decoded.data != NULL ? decoded.data : "",
+                                      decoded.length);
+        lz_buffer_free(&decoded);
+        if (text == NULL) {
+            fail(parser, lz_vm_out_of_memory(parser->vm));
+            return false;
+        }
+        LzLiteral literal = {.kind = LZ_VAL_OBJECT, .as.string = text};
+        *out = literal_type(&literal);
+        return true;
+    }
+    case LZ_TOKEN_INTEGER: {
+        advance(parser);
+        if (parser->previous.value.integer == INT64_MIN) {
+            error_at_previous(parser, "integer literal out of range");
+            return false;
+        }
+        LzLiteral literal = {.kind = LZ_VAL_INT, .as.integer = parser->previous.value.integer};
+        *out = literal_type(&literal);
+        return true;
+    }
+    case LZ_TOKEN_MINUS: {
+        advance(parser);
+        if (!check(parser, LZ_TOKEN_INTEGER)) {
+            error_at_current(parser, "expected a number after '-' in a type");
+            return false;
+        }
+        advance(parser);
+        int64_t magnitude = parser->previous.value.integer;
+        LzLiteral literal = {.kind = LZ_VAL_INT,
+                             .as.integer = magnitude == INT64_MIN ? INT64_MIN : -magnitude};
+        *out = literal_type(&literal);
+        return true;
+    }
+    case LZ_TOKEN_FLOAT:
+        advance(parser);
+        error_at_previous(parser, "float literal types are not supported");
+        return false;
+    case LZ_TOKEN_LEFT_PAREN: {
+        advance(parser);
+        parser->nesting++;
+        bool ok = parse_type_union(parser, out);
+        parser->nesting--;
+        consume(parser, LZ_TOKEN_RIGHT_PAREN, "expected ')' after type");
+        return ok;
+    }
+    default:
+        error_at_current(parser, "expected a type");
+        return false;
+    }
+}
+
+static bool parse_type_postfix(Parser *parser, LzType *out) {
+    bool ok = parse_type_primary(parser, out);
+    while (match(parser, LZ_TOKEN_QUESTION)) {
+        LzType nil = lz_type_of_kinds(LZ_KIND_NIL);
+        LzType merged;
+        if (lz_type_union(&merged, out, &nil)) {
+            *out = merged;
+        }
+    }
+    return ok;
+}
+
+/* type = postfix ( "|" postfix )*   where postfix = primary "?"* */
+static bool parse_type_union(Parser *parser, LzType *out) {
+    bool ok = parse_type_postfix(parser, out);
+    while (match(parser, LZ_TOKEN_PIPE)) {
+        skip_newlines(parser);
+        LzType next;
+        ok = parse_type_postfix(parser, &next) && ok;
+        LzType merged;
+        if (!lz_type_union(&merged, out, &next)) {
+            error_at_previous(parser, "too many literal types in one union (limit 8)");
+            LzType a = lz_type_widen(out);
+            LzType b = lz_type_widen(&next);
+            (void)lz_type_union(&merged, &a, &b);
+            ok = false;
+        }
+        *out = merged;
+    }
+    return ok;
 }
 
 /* Expressions */
 
-static void number(Parser *parser) {
+static Expr number(Parser *parser) {
     if (parser->previous.type == LZ_TOKEN_INTEGER) {
         /* The lexer returns the magnitude 2^63 as INT64_MIN; only unary() accepts it. */
         if (parser->previous.value.integer == INT64_MIN) {
             error_at_previous(parser, "integer literal out of range");
-            return;
+            return any_expr();
         }
-        emit_constant(parser, lz_value_int(parser->previous.value.integer));
-    } else {
-        emit_constant(parser, lz_value_float(parser->previous.value.number));
+        LzValue value = lz_value_int(parser->previous.value.integer);
+        emit_constant(parser, value);
+        return expr_of(lz_type_of_value(&value));
     }
+    emit_constant(parser, lz_value_float(parser->previous.value.number));
+    return expr_of(lz_type_of_kinds(LZ_KIND_FLOAT));
 }
 
-static void string(Parser *parser) {
+static Expr string(Parser *parser) {
     LzBuffer decoded = {0};
     if (!lz_token_string_value(parser->source, &parser->previous, &decoded)) {
         lz_buffer_free(&decoded);
         fail(parser, LZ_ERR_MEMORY);
-        return;
+        return any_expr();
     }
 
     LzString *text = lz_string_new(&parser->vm->heap, decoded.data, decoded.length);
     lz_buffer_free(&decoded);
     if (text == NULL) {
         fail(parser, lz_vm_out_of_memory(parser->vm));
-        return;
+        return any_expr();
     }
-    emit_constant(parser, lz_value_object(&text->base));
+    uint16_t index = emit_constant(parser, lz_value_object(&text->base));
     lz_object_release(&parser->vm->heap, &text->base);
+
+    if (index < parser->chunk->constant_count) {
+        return expr_of(lz_type_of_value(&parser->chunk->constants[index]));
+    }
+    return expr_of(lz_type_of_kinds(LZ_KIND_STRING));
 }
 
-static void literal(Parser *parser) {
+static Expr literal(Parser *parser) {
     switch (parser->previous.type) {
     case LZ_TOKEN_TRUE:
         emit_op(parser, LZ_OP_TRUE);
-        break;
+        return expr_of(lz_type_of_value(&(LzValue){.type = LZ_VAL_BOOL, .as.boolean = true}));
     case LZ_TOKEN_FALSE:
         emit_op(parser, LZ_OP_FALSE);
-        break;
+        return expr_of(lz_type_of_value(&(LzValue){.type = LZ_VAL_BOOL, .as.boolean = false}));
     default:
         emit_op(parser, LZ_OP_NIL);
-        break;
+        return expr_of(lz_type_of_kinds(LZ_KIND_NIL));
     }
 }
 
-static void grouping(Parser *parser) {
-    expression(parser);
+static Expr grouping(Parser *parser) {
+    Expr inner = expression(parser);
     consume(parser, LZ_TOKEN_RIGHT_PAREN, "expected ')' after expression");
+    return inner;
 }
 
-static void variable(Parser *parser) {
+static Expr variable(Parser *parser) {
     LzToken token = parser->previous;
     LzString *name = intern_token(parser, &token);
     if (name == NULL) {
-        return;
+        return any_expr();
     }
 
     Symbol *symbol = find_symbol(parser, name);
@@ -564,30 +877,52 @@ static void variable(Parser *parser) {
             emit_constant(parser, symbol->value);
             break;
         }
-    } else if (lz_vm_lookup(parser->vm, name) != NULL) {
-        emit_named(parser, LZ_OP_GET_GLOBAL, name, token.offset);
-    } else {
-        error_with_name(parser, &token, "undefined variable '", "'");
+        return expr_of(symbol->type);
     }
+
+    const LzValue *defined = lz_vm_lookup(parser->vm, name);
+    if (defined == NULL) {
+        error_with_name(parser, &token, "undefined variable '", "'");
+        return any_expr();
+    }
+
+    emit_named(parser, LZ_OP_GET_GLOBAL, name, token.offset);
+    Expr expr = any_expr();
+    if (defined->type == LZ_VAL_OBJECT && defined->as.object->type == LZ_OBJ_NATIVE) {
+        expr.type = lz_type_of_kinds(LZ_KIND_FUNCTION);
+        expr.native = (const LzNative *)defined->as.object;
+    }
+    return expr;
 }
 
-static void unary(Parser *parser) {
+static Expr unary(Parser *parser) {
     LzToken op = parser->previous;
     if (op.type == LZ_TOKEN_MINUS && check(parser, LZ_TOKEN_INTEGER) &&
         parser->current.value.integer == INT64_MIN) {
         /* -9223372036854775808: the one literal that only exists after a minus sign. */
         advance(parser);
         emit_constant(parser, lz_value_int(INT64_MIN));
-        return;
+        return expr_of(lz_type_of_kinds(LZ_KIND_INT));
     }
-    parse_precedence(parser, PREC_UNARY);
+
+    Expr operand = parse_precedence(parser, PREC_UNARY);
     emit_op_at(parser, op.type == LZ_TOKEN_BANG ? LZ_OP_NOT : LZ_OP_NEGATE, op.offset);
+    if (op.type == LZ_TOKEN_BANG) {
+        return expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
+    }
+
+    uint16_t numbers = (uint16_t)(lz_type_possible_kinds(&operand.type) & LZ_KINDS_NUMBER);
+    if (numbers == 0) {
+        error_operator(parser, &op, &operand.type, NULL);
+        return any_expr();
+    }
+    return expr_of(lz_type_of_kinds(numbers));
 }
 
-static void binary(Parser *parser);
-static void call(Parser *parser);
-static void and_(Parser *parser);
-static void or_(Parser *parser);
+static Expr binary(Parser *parser, Expr left);
+static Expr call(Parser *parser, Expr callee);
+static Expr and_(Parser *parser, Expr left);
+static Expr or_(Parser *parser, Expr left);
 
 static ParseRule rule_for(LzTokenType type) {
     switch (type) {
@@ -632,68 +967,107 @@ static ParseRule rule_for(LzTokenType type) {
     }
 }
 
-static void parse_precedence(Parser *parser, Precedence precedence) {
+static Expr parse_precedence(Parser *parser, Precedence precedence) {
     if (parser->fatal != LZ_OK) {
-        return;
+        return any_expr();
     }
     if (parser->nesting >= LZ_MAX_NESTING) {
         error_at_current(parser, "expression nested too deeply");
-        return;
+        return any_expr();
     }
 
-    ParseFn prefix = rule_for(parser->current.type).prefix;
+    PrefixFn prefix = rule_for(parser->current.type).prefix;
     if (prefix == NULL) {
         error_at_current(parser, "expected expression");
-        return;
+        return any_expr();
     }
 
     parser->nesting++;
     advance(parser);
-    prefix(parser);
+    Expr left = prefix(parser);
     while (parser->fatal == LZ_OK && precedence <= rule_for(parser->current.type).precedence) {
-        ParseFn infix = rule_for(parser->current.type).infix;
+        InfixFn infix = rule_for(parser->current.type).infix;
         advance(parser);
-        infix(parser);
+        left = infix(parser, left);
     }
     parser->nesting--;
+    return left;
 }
 
-static void expression(Parser *parser) {
-    parse_precedence(parser, PREC_OR);
+static Expr expression(Parser *parser) {
+    return parse_precedence(parser, PREC_OR);
 }
 
-static void binary(Parser *parser) {
+/* The type of an arithmetic result, or a compile error when no operand pairing can work. */
+static Expr arithmetic_result(Parser *parser, const LzToken *op, const Expr *left,
+                              const Expr *right) {
+    uint16_t a = lz_type_possible_kinds(&left->type);
+    uint16_t b = lz_type_possible_kinds(&right->type);
+    bool numbers = (a & LZ_KINDS_NUMBER) != 0 && (b & LZ_KINDS_NUMBER) != 0;
+    bool strings = op->type == LZ_TOKEN_PLUS && (a & LZ_KIND_STRING) != 0 &&
+                   (b & LZ_KIND_STRING) != 0;
+    if (!numbers && !strings) {
+        error_operator(parser, op, &left->type, &right->type);
+        return any_expr();
+    }
+
+    uint16_t kinds = 0;
+    if (numbers) {
+        uint16_t an = (uint16_t)(a & LZ_KINDS_NUMBER);
+        uint16_t bn = (uint16_t)(b & LZ_KINDS_NUMBER);
+        if (op->type == LZ_TOKEN_SLASH) {
+            kinds = LZ_KIND_FLOAT;
+        } else if (an == LZ_KIND_INT && bn == LZ_KIND_INT) {
+            kinds = LZ_KIND_INT;
+        } else if (an == LZ_KIND_FLOAT || bn == LZ_KIND_FLOAT) {
+            kinds = LZ_KIND_FLOAT;
+        } else {
+            kinds = LZ_KINDS_NUMBER;
+        }
+    }
+    if (strings) {
+        kinds = (uint16_t)(kinds | LZ_KIND_STRING);
+    }
+    return expr_of(lz_type_of_kinds(kinds));
+}
+
+static Expr binary(Parser *parser, Expr left) {
     LzToken op = parser->previous;
     ParseRule rule = rule_for(op.type);
     skip_newlines(parser);
-    parse_precedence(parser, (Precedence)(rule.precedence + 1));
+    Expr right = parse_precedence(parser, (Precedence)(rule.precedence + 1));
 
     switch (op.type) {
     case LZ_TOKEN_PLUS:
         emit_op_at(parser, LZ_OP_ADD, op.offset);
-        break;
+        return arithmetic_result(parser, &op, &left, &right);
     case LZ_TOKEN_MINUS:
         emit_op_at(parser, LZ_OP_SUBTRACT, op.offset);
-        break;
+        return arithmetic_result(parser, &op, &left, &right);
     case LZ_TOKEN_STAR:
         emit_op_at(parser, LZ_OP_MULTIPLY, op.offset);
-        break;
+        return arithmetic_result(parser, &op, &left, &right);
     case LZ_TOKEN_SLASH:
         emit_op_at(parser, LZ_OP_DIVIDE, op.offset);
-        break;
+        return arithmetic_result(parser, &op, &left, &right);
     case LZ_TOKEN_SLASH_SLASH:
         emit_op_at(parser, LZ_OP_FLOOR_DIVIDE, op.offset);
-        break;
+        return arithmetic_result(parser, &op, &left, &right);
     case LZ_TOKEN_PERCENT:
         emit_op_at(parser, LZ_OP_MODULO, op.offset);
-        break;
+        return arithmetic_result(parser, &op, &left, &right);
     case LZ_TOKEN_EQUAL_EQUAL:
         emit_op_at(parser, LZ_OP_EQUAL, op.offset);
-        break;
+        return expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
     case LZ_TOKEN_BANG_EQUAL:
         emit_op_at(parser, LZ_OP_EQUAL, op.offset);
         emit_op_at(parser, LZ_OP_NOT, op.offset);
+        return expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
+    default:
         break;
+    }
+
+    switch (op.type) {
     case LZ_TOKEN_LESS:
         emit_op_at(parser, LZ_OP_LESS, op.offset);
         break;
@@ -707,18 +1081,30 @@ static void binary(Parser *parser) {
         emit_op_at(parser, LZ_OP_GREATER_EQUAL, op.offset);
         break;
     }
+
+    uint16_t a = lz_type_possible_kinds(&left.type);
+    uint16_t b = lz_type_possible_kinds(&right.type);
+    if ((a & LZ_KINDS_NUMBER) == 0 || (b & LZ_KINDS_NUMBER) == 0) {
+        error_operator(parser, &op, &left.type, &right.type);
+    }
+    return expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
 }
 
-static void call(Parser *parser) {
-    uint32_t offset = parser->previous.offset;
+static Expr call(Parser *parser, Expr callee) {
+    LzToken paren = parser->previous;
+    uint32_t offset = paren.offset;
     unsigned count = 0;
+
+    if ((lz_type_possible_kinds(&callee.type) & LZ_KIND_FUNCTION) == 0) {
+        error_types(parser, &paren, "cannot call a value of type ", &callee.type, "", NULL);
+    }
 
     if (!check(parser, LZ_TOKEN_RIGHT_PAREN)) {
         do {
             if (check(parser, LZ_TOKEN_RIGHT_PAREN)) {
                 break;
             }
-            expression(parser);
+            (void)expression(parser);
             if (++count > LZ_MAX_ARGUMENTS) {
                 error_at_previous(parser, "too many arguments");
                 count = LZ_MAX_ARGUMENTS;
@@ -729,24 +1115,32 @@ static void call(Parser *parser) {
 
     emit_op_at(parser, LZ_OP_CALL, offset);
     emit_byte_at(parser, (uint8_t)count, offset);
+
+    if (callee.native != NULL) {
+        return expr_of(lz_type_of_kinds(callee.native->result_kinds));
+    }
+    return any_expr();
 }
 
-static void and_(Parser *parser) {
+static Expr and_(Parser *parser, Expr left) {
     uint32_t offset = parser->previous.offset;
     size_t end_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
     emit_op_at(parser, LZ_OP_POP, offset);
     skip_newlines(parser);
-    parse_precedence(parser, PREC_EQUALITY);
+    /* One level up: the caller's loop absorbs the next "and", so a long chain iterates. */
+    Expr right = parse_precedence(parser, PREC_EQUALITY);
     patch_jump(parser, end_jump);
+    return union_expr(left, right);
 }
 
-static void or_(Parser *parser) {
+static Expr or_(Parser *parser, Expr left) {
     uint32_t offset = parser->previous.offset;
     size_t end_jump = emit_jump(parser, LZ_OP_JUMP_IF_TRUE, offset);
     emit_op_at(parser, LZ_OP_POP, offset);
     skip_newlines(parser);
-    parse_precedence(parser, PREC_AND);
+    Expr right = parse_precedence(parser, PREC_AND);
     patch_jump(parser, end_jump);
+    return union_expr(left, right);
 }
 
 /* Compile-time constants */
@@ -800,13 +1194,13 @@ static LzStatus evaluate_fragment(Parser *parser, size_t start, LzValue *value) 
     offsets[size] = offsets[size - 1];
 
     /* The constant table is shared, not copied, so temp must never be freed as a chunk. */
-    LzChunk temp = {code,
-                    offsets,
-                    size + 1,
-                    size + 1,
-                    chunk->constants,
-                    chunk->constant_count,
-                    chunk->constant_count};
+    LzChunk temp = {.code = code,
+                    .offsets = offsets,
+                    .count = size + 1,
+                    .capacity = size + 1,
+                    .constants = chunk->constants,
+                    .constant_count = chunk->constant_count,
+                    .constant_capacity = chunk->constant_count};
 
     LzVM *vm = parser->vm;
     uint64_t fuel = vm->fuel;
@@ -838,15 +1232,15 @@ static void end_statement(Parser *parser) {
 }
 
 static void declare_variable(Parser *parser, const LzToken *name_token, LzString *name,
-                             bool is_const) {
+                             bool is_const, const LzType *type) {
     if (parser->scope_depth == 0) {
         Symbol *symbol = add_symbol(parser, name_token, name, SYMBOL_GLOBAL, is_const,
-                                    lz_value_nil());
+                                    lz_value_nil(), type);
         if (symbol != NULL) {
             emit_named(parser, LZ_OP_DEFINE_GLOBAL, name, name_token->offset);
         }
     } else {
-        add_symbol(parser, name_token, name, SYMBOL_LOCAL, is_const, lz_value_nil());
+        add_symbol(parser, name_token, name, SYMBOL_LOCAL, is_const, lz_value_nil(), type);
     }
 }
 
@@ -863,21 +1257,33 @@ static void variable_declaration(Parser *parser, bool is_const) {
         return;
     }
 
+    LzType declared = lz_type_of_kinds(LZ_KINDS_ANY);
+    bool annotated = false;
+    if (match(parser, LZ_TOKEN_COLON)) {
+        annotated = true;
+        (void)parse_type_union(parser, &declared);
+    }
+
     size_t code_mark = parser->chunk->count;
     size_t constant_mark = parser->chunk->constant_count;
     LzToken initializer_start = parser->current;
     bool has_initializer = false;
+    Expr initializer = expr_of(lz_type_of_kinds(LZ_KIND_NIL));
 
     if (match(parser, LZ_TOKEN_EQUAL)) {
         skip_newlines(parser);
         initializer_start = parser->current;
-        expression(parser);
+        initializer = expression(parser);
         has_initializer = true;
     } else if (is_const) {
         error_at_current(parser, "expected '=' after constant name");
         return;
     } else {
         emit_op_at(parser, LZ_OP_NIL, name_token.offset);
+        if (annotated && lz_type_assignable(&initializer.type, &declared) == LZ_ASSIGN_NEVER) {
+            error_types(parser, &name_token, "variable of type ", &declared,
+                        " needs an initial value", NULL);
+        }
     }
     end_statement(parser);
 
@@ -888,7 +1294,15 @@ static void variable_declaration(Parser *parser, bool is_const) {
         if (status == LZ_OK) {
             forget_constants_from(parser, constant_mark);
             lz_chunk_truncate(&parser->vm->heap, parser->chunk, code_mark, constant_mark);
-            if (add_symbol(parser, &name_token, name, SYMBOL_CONSTANT, true, value) == NULL) {
+
+            LzType value_type = lz_type_of_value(&value);
+            if (annotated && lz_type_assignable(&value_type, &declared) == LZ_ASSIGN_NEVER) {
+                LzToken span = span_from(parser, &initializer_start);
+                error_types(parser, &span, "type mismatch: expected ", &declared, ", got ",
+                            &value_type);
+            }
+            if (add_symbol(parser, &name_token, name, SYMBOL_CONSTANT, true, value,
+                           &value_type) == NULL) {
                 lz_value_release(&parser->vm->heap, &value);
             }
             return;
@@ -903,7 +1317,15 @@ static void variable_declaration(Parser *parser, bool is_const) {
         error_at(parser, &span, parser->vm->error);
     }
 
-    declare_variable(parser, &name_token, name, is_const);
+    if (annotated && has_initializer) {
+        check_assignment(parser, &initializer.type, &declared, &initializer_start,
+                         name_token.offset);
+    }
+    LzType stored = declared;
+    if (!annotated && is_const) {
+        stored = lz_type_widen(&initializer.type);
+    }
+    declare_variable(parser, &name_token, name, is_const, &stored);
 }
 
 static void assignment_statement(Parser *parser) {
@@ -912,7 +1334,8 @@ static void assignment_statement(Parser *parser) {
     LzString *name = intern_token(parser, &name_token);
     advance(parser);
     skip_newlines(parser);
-    expression(parser);
+    LzToken value_start = parser->current;
+    Expr value = expression(parser);
     if (name == NULL) {
         return;
     }
@@ -926,13 +1349,64 @@ static void assignment_statement(Parser *parser) {
         }
     } else if (symbol->is_const || symbol->kind == SYMBOL_CONSTANT) {
         error_with_name(parser, &name_token, "cannot assign to constant '", "'");
-    } else if (symbol->kind == SYMBOL_LOCAL) {
-        emit_op_at(parser, LZ_OP_SET_LOCAL, name_token.offset);
-        emit_u16_at(parser, symbol->slot, name_token.offset);
     } else {
-        emit_named(parser, LZ_OP_SET_GLOBAL, name, name_token.offset);
+        check_assignment(parser, &value.type, &symbol->type, &value_start, name_token.offset);
+        if (symbol->kind == SYMBOL_LOCAL) {
+            emit_op_at(parser, LZ_OP_SET_LOCAL, name_token.offset);
+            emit_u16_at(parser, symbol->slot, name_token.offset);
+        } else {
+            emit_named(parser, LZ_OP_SET_GLOBAL, name, name_token.offset);
+        }
     }
     end_statement(parser);
+}
+
+static bool is_type_keyword(const Parser *parser) {
+    return parser->current.length == 4 &&
+           memcmp(parser->source->text + parser->current.offset, "type", 4) == 0;
+}
+
+/* type Name = <type>; "type" is only a keyword when a name follows it. */
+static void type_declaration(Parser *parser) {
+    advance(parser);
+    LzToken name_token = parser->previous;
+    LzString *name = intern_token(parser, &name_token);
+    if (name == NULL) {
+        return;
+    }
+
+    char text[48];
+    LzType ignored;
+    token_text(parser, &name_token, text, sizeof text);
+    if (builtin_type(text, &ignored)) {
+        error_with_name(parser, &name_token, "cannot redefine builtin type '", "'");
+        return;
+    }
+
+    consume(parser, LZ_TOKEN_EQUAL, "expected '=' after type name");
+    skip_newlines(parser);
+    LzType type;
+    (void)parse_type_union(parser, &type);
+    end_statement(parser);
+
+    for (size_t i = parser->alias_count; i > 0; i--) {
+        const Alias *existing = &parser->aliases[i - 1];
+        if (existing->depth < parser->scope_depth) {
+            break;
+        }
+        if (existing->name == name) {
+            error_with_name(parser, &name_token, "type '", "' is already declared in this scope");
+            return;
+        }
+    }
+    if (parser->alias_count >= LZ_MAX_ALIASES) {
+        error_at(parser, &name_token, "too many type aliases");
+        return;
+    }
+    Alias *alias = &parser->aliases[parser->alias_count++];
+    alias->name = name;
+    alias->depth = parser->scope_depth;
+    alias->type = type;
 }
 
 static void block(Parser *parser) {
@@ -965,7 +1439,7 @@ static void if_statement(Parser *parser) {
     for (;;) {
         /* previous is this branch's "if", so each branch's jumps point at their own line. */
         uint32_t offset = parser->previous.offset;
-        expression(parser);
+        (void)expression(parser);
         if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
             error_at_current(parser, "expected '{' after condition");
             break;
@@ -1013,7 +1487,7 @@ static void if_statement(Parser *parser) {
 static void while_statement(Parser *parser) {
     uint32_t offset = parser->previous.offset;
     size_t loop_start = parser->chunk->count;
-    expression(parser);
+    (void)expression(parser);
     if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
         error_at_current(parser, "expected '{' after condition");
         return;
@@ -1027,15 +1501,14 @@ static void while_statement(Parser *parser) {
     emit_op_at(parser, LZ_OP_POP, offset);
 }
 
-static bool next_token_is_equal(const Parser *parser) {
+static LzTokenType next_token_type(const Parser *parser) {
     LzLexer ahead = parser->lexer;
-    LzToken token = lz_lexer_next(&ahead);
-    return token.type == LZ_TOKEN_EQUAL;
+    return lz_lexer_next(&ahead).type;
 }
 
 static void expression_statement(Parser *parser) {
     uint32_t offset = parser->current.offset;
-    expression(parser);
+    (void)expression(parser);
     emit_op_at(parser, LZ_OP_POP, offset);
     end_statement(parser);
 }
@@ -1096,7 +1569,10 @@ static void declaration(Parser *parser) {
         error_at_current(parser, "unexpected '}'");
         break;
     case LZ_TOKEN_IDENTIFIER:
-        if (next_token_is_equal(parser)) {
+        if (is_type_keyword(parser) && next_token_type(parser) == LZ_TOKEN_IDENTIFIER) {
+            advance(parser);
+            type_declaration(parser);
+        } else if (next_token_type(parser) == LZ_TOKEN_EQUAL) {
             assignment_statement(parser);
         } else {
             expression_statement(parser);

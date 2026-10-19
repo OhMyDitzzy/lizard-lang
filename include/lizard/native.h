@@ -1,6 +1,7 @@
 #ifndef LIZARD_NATIVE_H
 #define LIZARD_NATIVE_H
 
+#include "lizard/type.h"
 #include "lizard/value.h"
 
 #define LZ_VARIADIC (-1)
@@ -21,6 +22,7 @@ typedef struct LzNative {
     LzNativeFn fn;
     int min_args;
     int max_args;
+    uint16_t result_kinds; /* what a call can return; LZ_KINDS_ANY when unknown */
 } LzNative;
 
 /* The returned object holds its own reference to name. */

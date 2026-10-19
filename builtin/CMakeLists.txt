@@ -1,5 +1,6 @@
 add_library(lizard_builtin STATIC
     registry.c
+    convert/convert.c
     io/print.c)
 
 target_include_directories(lizard_builtin

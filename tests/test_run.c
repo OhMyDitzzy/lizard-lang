@@ -443,7 +443,90 @@ static void test_stage3_errors(void) {
     teardown(&vm, &zero, &out, &err);
 }
 
+static uint16_t add_type(LzChunk *chunk, const LzType *type) {
+    uint16_t index = 0;
+    LZ_CHECK(lz_chunk_add_type(chunk, type, &index));
+    return index;
+}
+
+static void test_check_type(void) {
+    LzVM vm;
+    LzBuffer out;
+    LzBuffer err;
+    setup(&vm, &out, &err);
+
+    LzType number = lz_type_of_kinds(LZ_KINDS_NUMBER);
+    LzType text = lz_type_of_kinds(LZ_KIND_STRING);
+
+    LzChunk passes;
+    lz_chunk_init(&passes);
+    emit_u16(&passes, LZ_OP_CONSTANT, constant_value(&passes, lz_value_int(5)), 1);
+    emit_u16(&passes, LZ_OP_CHECK_TYPE, add_type(&passes, &number), 1);
+    emit(&passes, LZ_OP_POP, 1);
+    emit(&passes, LZ_OP_RETURN, 1);
+    LZ_CHECK(lz_vm_run(&vm, &passes) == LZ_OK);
+
+    LzChunk fails;
+    lz_chunk_init(&fails);
+    emit_u16(&fails, LZ_OP_CONSTANT, constant_value(&fails, lz_value_int(5)), 4);
+    emit_u16(&fails, LZ_OP_CHECK_TYPE, add_type(&fails, &text), 6);
+    emit(&fails, LZ_OP_RETURN, 6);
+    LZ_CHECK(lz_vm_run(&vm, &fails) == LZ_ERR_TYPE);
+    LZ_CHECK(strstr(vm.error, "type error: expected string, got int") != NULL);
+    LZ_CHECK(vm.error_offset == 6);
+    LZ_CHECK(vm.stack_count == 0);
+
+    LzString *r = lz_vm_intern(&vm, "r", 1);
+    LzString *w = lz_vm_intern(&vm, "w", 1);
+    LzType mode = lz_type_of_kinds(0);
+    LzLiteral r_literal = {.kind = LZ_VAL_OBJECT, .as.string = r};
+    LzLiteral w_literal = {.kind = LZ_VAL_OBJECT, .as.string = w};
+    LZ_CHECK(lz_type_add_literal(&mode, &r_literal) && lz_type_add_literal(&mode, &w_literal));
+
+    LzChunk literal_ok;
+    lz_chunk_init(&literal_ok);
+    emit_u16(&literal_ok, LZ_OP_CONSTANT, constant_text(&vm, &literal_ok, "w"), 1);
+    emit_u16(&literal_ok, LZ_OP_CHECK_TYPE, add_type(&literal_ok, &mode), 1);
+    emit(&literal_ok, LZ_OP_RETURN, 1);
+    LZ_CHECK(lz_vm_run(&vm, &literal_ok) == LZ_OK);
+
+    LzChunk literal_bad;
+    lz_chunk_init(&literal_bad);
+    emit_u16(&literal_bad, LZ_OP_CONSTANT, constant_text(&vm, &literal_bad, "x"), 1);
+    emit_u16(&literal_bad, LZ_OP_CHECK_TYPE, add_type(&literal_bad, &mode), 1);
+    emit(&literal_bad, LZ_OP_RETURN, 1);
+    LZ_CHECK(lz_vm_run(&vm, &literal_bad) == LZ_ERR_TYPE);
+    LZ_CHECK(strstr(vm.error, "expected \"r\" | \"w\", got \"x\"") != NULL);
+
+    LzChunk bad_index;
+    lz_chunk_init(&bad_index);
+    emit(&bad_index, LZ_OP_NIL, 1);
+    emit_u16(&bad_index, LZ_OP_CHECK_TYPE, 3, 1);
+    LZ_CHECK(lz_vm_run(&vm, &bad_index) == LZ_ERR_RUNTIME);
+    LZ_CHECK(strstr(vm.error, "type index out of range") != NULL);
+
+    LzChunk empty_stack;
+    lz_chunk_init(&empty_stack);
+    emit_u16(&empty_stack, LZ_OP_CHECK_TYPE, add_type(&empty_stack, &text), 1);
+    LZ_CHECK(lz_vm_run(&vm, &empty_stack) == LZ_ERR_RUNTIME);
+    LZ_CHECK(strstr(vm.error, "malformed bytecode") != NULL);
+
+    LzChunk truncated;
+    lz_chunk_init(&truncated);
+    emit(&truncated, LZ_OP_CHECK_TYPE, 1);
+    LZ_CHECK(lz_vm_run(&vm, &truncated) == LZ_ERR_RUNTIME);
+
+    lz_chunk_free(&vm.heap, &passes);
+    lz_chunk_free(&vm.heap, &fails);
+    lz_chunk_free(&vm.heap, &literal_ok);
+    lz_chunk_free(&vm.heap, &literal_bad);
+    lz_chunk_free(&vm.heap, &bad_index);
+    lz_chunk_free(&vm.heap, &empty_stack);
+    teardown(&vm, &truncated, &out, &err);
+}
+
 int main(void) {
+    test_check_type();
     test_println_call();
     test_globals();
     test_native_result_is_owned();

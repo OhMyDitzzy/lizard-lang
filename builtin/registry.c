@@ -1,11 +1,16 @@
 #include <string.h>
 
+#include "convert/convert.h"
 #include "io/io.h"
 #include "lizard/builtin.h"
 
 static const LzBuiltin builtins[] = {
-    {"print", lz_builtin_print, 0, LZ_VARIADIC},
-    {"println", lz_builtin_println, 0, LZ_VARIADIC},
+    {"print", lz_builtin_print, 0, LZ_VARIADIC, LZ_KIND_NIL},
+    {"println", lz_builtin_println, 0, LZ_VARIADIC, LZ_KIND_NIL},
+    {"int", lz_builtin_int, 1, 1, LZ_KIND_INT},
+    {"float", lz_builtin_float, 1, 1, LZ_KIND_FLOAT},
+    {"string", lz_builtin_string, 1, 1, LZ_KIND_STRING},
+    {"bool", lz_builtin_bool, 1, 1, LZ_KIND_BOOL},
 };
 
 #define BUILTIN_COUNT (sizeof builtins / sizeof builtins[0])
@@ -39,6 +44,7 @@ LzStatus lz_builtin_install(LzVM *vm) {
             return lz_vm_out_of_memory(vm);
         }
 
+        native->result_kinds = builtin->result_kinds;
         bool defined = lz_vm_define_builtin(vm, name, lz_value_object(&native->base));
         lz_object_release(&vm->heap, &native->base);
         if (!defined) {

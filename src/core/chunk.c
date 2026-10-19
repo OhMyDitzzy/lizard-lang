@@ -10,6 +10,11 @@ void lz_chunk_init(LzChunk *chunk) {
     chunk->constants = NULL;
     chunk->constant_count = 0;
     chunk->constant_capacity = 0;
+    chunk->types = NULL;
+    chunk->type_count = 0;
+    chunk->type_capacity = 0;
+    chunk->type_slots = NULL;
+    chunk->type_slot_capacity = 0;
 }
 
 void lz_chunk_free(LzHeap *heap, LzChunk *chunk) {
@@ -19,6 +24,8 @@ void lz_chunk_free(LzHeap *heap, LzChunk *chunk) {
     free(chunk->code);
     free(chunk->offsets);
     free(chunk->constants);
+    free(chunk->types);
+    free(chunk->type_slots);
     lz_chunk_init(chunk);
 }
 
@@ -88,6 +95,69 @@ bool lz_chunk_add_constant(LzChunk *chunk, LzValue value, uint16_t *index) {
     return true;
 }
 
+static void insert_type_slot(uint32_t *slots, size_t capacity, uint32_t hash, size_t index) {
+    size_t i = hash & (capacity - 1);
+    while (slots[i] != 0) {
+        i = (i + 1) & (capacity - 1);
+    }
+    slots[i] = (uint32_t)index + 1;
+}
+
+static bool rebuild_type_slots(LzChunk *chunk) {
+    size_t capacity = 16;
+    while (capacity < (chunk->type_count + 1) * 2) {
+        capacity *= 2;
+    }
+    uint32_t *slots = calloc(capacity, sizeof *slots);
+    if (slots == NULL) {
+        return false;
+    }
+    for (size_t i = 0; i < chunk->type_count; i++) {
+        insert_type_slot(slots, capacity, lz_type_hash(&chunk->types[i]), i);
+    }
+    free(chunk->type_slots);
+    chunk->type_slots = slots;
+    chunk->type_slot_capacity = capacity;
+    return true;
+}
+
+bool lz_chunk_add_type(LzChunk *chunk, const LzType *type, uint16_t *index) {
+    uint32_t hash = lz_type_hash(type);
+    if (chunk->type_slots != NULL) {
+        size_t i = hash & (chunk->type_slot_capacity - 1);
+        while (chunk->type_slots[i] != 0) {
+            size_t candidate = chunk->type_slots[i] - 1;
+            if (lz_type_equal(&chunk->types[candidate], type)) {
+                *index = (uint16_t)candidate;
+                return true;
+            }
+            i = (i + 1) & (chunk->type_slot_capacity - 1);
+        }
+    }
+    if (chunk->type_count >= LZ_TYPES_MAX) {
+        return false;
+    }
+
+    if (chunk->type_count == chunk->type_capacity) {
+        size_t capacity = chunk->type_capacity != 0 ? chunk->type_capacity * 2 : 4;
+        LzType *grown = realloc(chunk->types, capacity * sizeof *grown);
+        if (grown == NULL) {
+            return false;
+        }
+        chunk->types = grown;
+        chunk->type_capacity = capacity;
+    }
+    chunk->types[chunk->type_count] = *type;
+    *index = (uint16_t)chunk->type_count;
+    chunk->type_count++;
+
+    if (chunk->type_slots == NULL || chunk->type_count * 2 > chunk->type_slot_capacity) {
+        return rebuild_type_slots(chunk);
+    }
+    insert_type_slot(chunk->type_slots, chunk->type_slot_capacity, hash, chunk->type_count - 1);
+    return true;
+}
+
 const char *lz_opcode_name(uint8_t opcode) {
     switch (opcode) {
     case LZ_OP_CONSTANT:
@@ -146,6 +216,8 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_JUMP_IF_TRUE";
     case LZ_OP_LOOP:
         return "OP_LOOP";
+    case LZ_OP_CHECK_TYPE:
+        return "OP_CHECK_TYPE";
     case LZ_OP_RETURN:
         return "OP_RETURN";
     default:
@@ -165,6 +237,7 @@ size_t lz_opcode_length(uint8_t opcode) {
     case LZ_OP_JUMP_IF_FALSE:
     case LZ_OP_JUMP_IF_TRUE:
     case LZ_OP_LOOP:
+    case LZ_OP_CHECK_TYPE:
         return 3;
     case LZ_OP_CALL:
         return 2;

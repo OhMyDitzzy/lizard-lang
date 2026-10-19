@@ -4,14 +4,19 @@ An interpreted programming language written in C. Source files use the `.lz`
 extension.
 
 Status: early. Scripts run: variables, constants, arithmetic, strings, `if`,
-`while`, blocks and the builtins `print` and `println`. Functions and `for`
-are next.
+`while`, blocks, optional type annotations and the builtins `print`,
+`println`, `int`, `float`, `string` and `bool`. Collections and functions are
+next.
 
 ```
 const GREETING = "Hello" + ", " + "Lizard"
-let i = 1
+type Mode = "r" | "w"
+
+let mode: Mode = "r"
+let name: string? = nil
+let i: int = 1
 while i <= 3 {
-  println(GREETING, i)
+  println(GREETING, i, mode)
   i = i + 1
 }
 ```

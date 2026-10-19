@@ -1,6 +1,7 @@
 #ifndef LIZARD_CHUNK_H
 #define LIZARD_CHUNK_H
 
+#include "lizard/type.h"
 #include "lizard/value.h"
 
 /*
@@ -37,10 +38,12 @@ typedef enum LzOpCode {
     LZ_OP_JUMP_IF_FALSE, /* u16 distance: skip forward if the top is falsy; does not pop */
     LZ_OP_JUMP_IF_TRUE,  /* u16 distance: skip forward if the top is truthy; does not pop */
     LZ_OP_LOOP,          /* u16 distance: jump backward */
+    LZ_OP_CHECK_TYPE,    /* u16 type index: fail with LZ_ERR_TYPE unless the top value matches */
     LZ_OP_RETURN         /* stop executing the chunk */
 } LzOpCode;
 
 #define LZ_CONSTANTS_MAX 65536
+#define LZ_TYPES_MAX 65536
 
 typedef struct LzChunk {
     uint8_t *code;
@@ -50,6 +53,11 @@ typedef struct LzChunk {
     LzValue *constants;
     size_t constant_count;
     size_t constant_capacity;
+    LzType *types; /* referenced by OP_CHECK_TYPE */
+    size_t type_count;
+    size_t type_capacity;
+    uint32_t *type_slots; /* open-addressing index into types, 0 = empty, else index + 1 */
+    size_t type_slot_capacity;
 } LzChunk;
 
 void lz_chunk_init(LzChunk *chunk);
@@ -62,6 +70,9 @@ bool lz_chunk_write_u16(LzChunk *chunk, uint16_t operand, uint32_t source_offset
 
 /* The chunk retains the value. Fails when out of memory or past LZ_CONSTANTS_MAX. */
 bool lz_chunk_add_constant(LzChunk *chunk, LzValue value, uint16_t *index);
+
+/* Stores a type once; an identical type already in the table is reused. */
+bool lz_chunk_add_type(LzChunk *chunk, const LzType *type, uint16_t *index);
 
 const char *lz_opcode_name(uint8_t opcode);
 

@@ -69,7 +69,7 @@ lexical rules are decided; the grammar built on them is not.
 | Integers | decimal, `0x`, `0b`, `0o`; `_` between digits; a literal is a magnitude (the sign is a unary minus), so above 2^63 is an error and 2^63 itself is accepted only right after a unary minus, which makes `-9223372036854775808` writable |
 | Floats | `1.5`, `1e3`, `1.5e-2`; a `.` needs a digit after it, so `1.foo` is `1`, `.`, `foo`; out-of-range is an error |
 | Strings | `"..."` or `'...'` on one line; escapes `\n \t \r \0 \\ \" \' \xHH` (00 to 7F) `\u{H..H}` |
-| Operators | `+ - * / // % ! != = == < <= > >=` and `( ) [ ] { } , . : ;` |
+| Operators | `+ - * / // % ! != = == < <= > >= \| ?` and `( ) [ ] { } , . : ;` |
 | Newlines | a token; blank or comment-only lines collapse into one, none at the file start, one is added before EOF, and line breaks inside `( )` and `[ ]` are ignored |
 
 `strtod` is locale dependent, so float literals swap in the locale's decimal
@@ -83,8 +83,9 @@ statement boundaries, and the CLI prints them with source lines.
 
 ```
 statement  = let | const | if | while | block | assignment | expression
-let        = "let" IDENT [ "=" expr ]
-const      = "const" IDENT "=" expr
+let        = "let" IDENT [ ":" type ] [ "=" expr ]
+const      = "const" IDENT [ ":" type ] "=" expr
+typedecl   = "type" IDENT "=" type     "type" is only a keyword when a name follows
 assignment = IDENT "=" expr            a statement, never an expression
 if         = "if" expr block [ "else" ( if | block ) ]
 while      = "while" expr block
@@ -130,6 +131,58 @@ over the whole chain.
 
 **Exit codes.** `lizard file.lz` exits 65 on compile errors, 66 if the file
 cannot be read, and 70 on a runtime error or an exhausted budget.
+
+## Types
+
+Types are optional and gradual. Code with no annotations behaves exactly as
+before: an unannotated `let` has the type `any`.
+
+```
+type      = postfix ( "|" postfix )*
+postfix   = primary "?"*                     T? is T | nil
+primary   = int | float | bool | string | number | any | never | nil
+          | alias | "string" | integer | "-" integer | true | false | "(" type ")"
+```
+
+`number` is `int | float`, `any` accepts every value and `never` none. A literal
+is a type of its own, so `"r" | "w"` or `-1 | 0 | 1` act as small enums (at most
+8 literals per union). Float literal types are not supported. Names such as
+`int` are only types in a type position, so `let int = 5` still works. An alias
+(`type Id = int | string`) is lexically scoped, must be declared before use,
+and cannot reuse a builtin type name.
+
+**How a value is checked.** Every expression gets a static type and the
+compiler compares it with the type the value is stored under (an annotated
+`let` or `const`, or an assignment to one):
+
+| Source type vs. target | Result |
+| --- | --- |
+| every value of the source fits | nothing is emitted |
+| none fits (`let a: int = "x"`) | compile error |
+| some fit (`any`, a union, a wider type) | `OP_CHECK_TYPE`, a run-time check |
+
+A failed run-time check stops the script with `LZ_ERR_TYPE` and the offset of
+the declaration or assignment. The check looks only at the value's kind and, for
+literal types, its value, so it costs one instruction. A `const` the compiler
+folds is checked against its exact value at compile time.
+
+**Static rules.** `int op int` is `int`, anything with a `float` is `float`,
+`/` is always `float`, `"a" + "b"` is `string`, comparisons and `!` are `bool`.
+An operator whose operands can never work (`"a" - 1`, `1 + "a"`, `-"x"`,
+`nil < 1`) is a compile error, and so is calling a value that can never be a
+function. When the compiler cannot tell (an `any` operand) it does not guess:
+the operation is still checked when it runs.
+
+There is no implicit conversion, so `let x: float = 1` is an error. Convert
+explicitly with the builtins `int()`, `float()`, `string()` and `bool()`; their
+result types are known to the compiler, so `let n: int = int("12")` needs no
+run-time check. A host native gets the result type `any` unless it sets
+`result_kinds`.
+
+**Not yet.** Narrowing (`if x != nil { ... }` does not refine `x`, so `int?`
+used as `int` costs a run-time check), `unknown`, `bytes`, collection and
+function types, generics, and parameter and return annotations (they arrive
+with `fn`). Type literals hold interned strings, which live as long as the VM.
 
 ## Resource limits
 
@@ -217,5 +270,5 @@ area's header, add one row to the table in `registry.c`, and add the source to
 
 ## Not decided yet
 
-Functions (`fn`), `for`, `break`/`continue`, and call frames. Removing entries from `LzTable`.
+Functions (`fn`) with typed parameters and results, `for`, `break`/`continue`, collections and their types, narrowing, the error model, and call frames. Removing entries from `LzTable`.
 Garbage collection beyond reference counting (cycles).

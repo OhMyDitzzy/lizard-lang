@@ -91,6 +91,22 @@ static void run_one(void) {
         add_random_constant(&vm, &chunk);
     }
 
+    uint32_t type_count = below(4);
+    for (uint32_t i = 0; i < type_count; i++) {
+        LzType type = lz_type_of_kinds((uint16_t)below(64));
+        if (below(2) == 0) {
+            LzLiteral literal = {.kind = LZ_VAL_INT, .as.integer = (int64_t)below(4)};
+            (void)lz_type_add_literal(&type, &literal);
+        }
+        if (below(3) == 0) {
+            LzLiteral literal = {.kind = LZ_VAL_OBJECT,
+                                 .as.string = lz_vm_intern(&vm, "abc", 3)};
+            (void)lz_type_add_literal(&type, &literal);
+        }
+        uint16_t index;
+        (void)lz_chunk_add_type(&chunk, &type, &index);
+    }
+
     uint32_t length = below(96);
     for (uint32_t i = 0; i < length; i++) {
         uint8_t byte = below(2) == 0 ? (uint8_t)below(LZ_OP_RETURN + 1) : (uint8_t)below(256);
@@ -101,7 +117,7 @@ static void run_one(void) {
     LzStatus status = lz_vm_run(&vm, &chunk);
     LZ_CHECK(status == LZ_OK || status == LZ_ERR_RUNTIME || status == LZ_ERR_ARITY ||
              status == LZ_ERR_MEMORY || status == LZ_ERR_IO || status == LZ_ERR_STACK_OVERFLOW ||
-             status == LZ_ERR_FUEL || status == LZ_ERR_HEAP_LIMIT);
+             status == LZ_ERR_FUEL || status == LZ_ERR_HEAP_LIMIT || status == LZ_ERR_TYPE);
     LZ_CHECK(vm.stack_count == 0);
 
     lz_chunk_free(&vm.heap, &chunk);
