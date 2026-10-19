@@ -18,9 +18,8 @@ target_include_directories(lizard_core PUBLIC
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_BINARY_DIR}/generated)
 
-find_library(LZ_MATH_LIBRARY m)
-if(LZ_MATH_LIBRARY)
-    target_link_libraries(lizard_core PUBLIC ${LZ_MATH_LIBRARY})
+if(NOT MSVC)
+    target_link_libraries(lizard_core PUBLIC m)
 endif()
 
 lz_enable_warnings(lizard_core)
