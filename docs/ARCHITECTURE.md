@@ -5,7 +5,7 @@
 | Path | Responsibility |
 | --- | --- |
 | `include/lizard/` | Public headers of the core (values, heap, VM, writer) |
-| `src/core/` | Core implementation, no knowledge of any builtin |
+| `src/core/` | Core implementation, no knowledge of any builtin (`array.c` holds the array operations) |
 | `src/frontend/` | Lexer and the single-pass compiler |
 | `src/cli/` | The `lizard` binary: argument parsing and process entry point |
 | `builtin/` | Builtin functions and their registry, one subfolder per area (`io/`, ...) |
@@ -22,6 +22,20 @@ tracks live objects and bytes, counts allocations, and records the peak.
 Ownership is by reference count (`lz_object_retain` / `lz_object_release`).
 Objects still alive when the VM shuts down are visible through
 `--heap-stats` and `--trace-memory`.
+
+Arrays (`LzArray`) own a separately allocated item buffer. The buffer is
+charged to the heap (`lz_heap_charge` / `lz_heap_uncharge`), so `--max-heap`
+covers it and `live_bytes` returns to zero when everything is released. Items
+are retained when stored and released when removed or when the array dies.
+Releasing is iterative: a release that happens while another object is being
+finalized is queued, so freeing an array nested a million levels deep cannot
+overflow the C stack.
+
+Reference counting cannot free a cycle, so storing an array inside itself,
+directly or through other arrays, is a runtime error. Each array counts how many
+arrays hold it (`holders`); an array held by nobody cannot be inside the value
+being stored, so the check is free in the common case, and otherwise walks only
+arrays that contain arrays, once each (`mark` plus a heap epoch).
 
 Scalars (nil, bool, int, float) live inline in `LzValue` and never touch the
 heap.
@@ -82,11 +96,12 @@ AST). It collects up to `LZ_MAX_DIAGNOSTICS` errors per run, recovering at
 statement boundaries, and the CLI prints them with source lines.
 
 ```
-statement  = let | const | if | while | block | assignment | expression
+statement  = let | const | if | while | block | assignment | index_assign | expression
 let        = "let" IDENT [ ":" type ] [ "=" expr ]
 const      = "const" IDENT [ ":" type ] "=" expr
 typedecl   = "type" IDENT "=" type     "type" is only a keyword when a name follows
 assignment = IDENT "=" expr            a statement, never an expression
+index_assign = postfix "[" expr "]" "=" expr   a statement; the target must end in an index
 if         = "if" expr block [ "else" ( if | block ) ]
 while      = "while" expr block
 block      = "{" statement* "}"
@@ -96,7 +111,7 @@ A statement ends at a newline or `;`, or just before `}` or the end of the
 file. A newline after a binary operator, `and`, `or` or `=` is ignored, and
 `else` may sit on the line after `}`. Expressions, lowest to highest
 precedence: `or`, `and`, `== !=`, `< <= > >=`, `+ -`, `* / // %`, unary `! -`,
-call. `and` and `or` short-circuit and return the deciding operand.
+call and subscript (`f(x)`, `a[i]`, `a[i:j]`). `[a, b]` at the start of an expression is an array literal (a trailing comma is allowed). `and` and `or` short-circuit and return the deciding operand.
 
 **Names.** Every name must be declared before use, and an unknown name is a
 compile error. Declaring a name twice in one scope is an error; an inner
@@ -112,6 +127,14 @@ no storage at all: each use compiles to one `OP_CONSTANT`, and the value lives
 once in the chunk's constant table. An error while evaluating it, such as
 `1 / 0`, is a compile error. Otherwise (a call, a variable) the constant is an
 ordinary global or slot that the compiler refuses to assign to.
+
+**Arrays.** A literal compiles to `ARRAY_NEW` and one `ARRAY_PUSH` per item, so
+its size is not limited by the value stack. `a[i]` is `INDEX`, `a[i:j]` is
+`SLICE` (an omitted bound is `nil`), and `a[i] = v` turns the trailing `INDEX`
+into `SET_INDEX`. A literal is never folded into a `const`: each evaluation must
+build a fresh array, so `const xs = [1]` is an ordinary variable that cannot be
+reassigned (its items can change). Arrays are limited to `LZ_ARRAY_MAX_LENGTH`
+(16,777,216) items.
 
 **Constants are shared.** Identical constants of a chunk are stored once (names by
 identity, numbers by value, floats by their bits, strings by content), so a
@@ -140,6 +163,7 @@ before: an unannotated `let` has the type `any`.
 ```
 type      = postfix ( "|" postfix )*
 postfix   = primary "?"*                     T? is T | nil
+postfix   = primary ( "?" | "[" "]" )*     T[] is an array of T
 primary   = int | float | bool | string | number | any | never | nil
           | alias | "string" | integer | "-" integer | true | false | "(" type ")"
 ```
@@ -179,6 +203,27 @@ result types are known to the compiler, so `let n: int = int("12")` needs no
 run-time check. A host native gets the result type `any` unless it sets
 `result_kinds`.
 
+**Arrays.** `T[]` is an array whose items all match `T`; `int[]?` is `int[] | nil`
+and `int?[]` an array of `int | nil`. `T` can be any type, including another
+array type. Item types are interned in the VM (`lz_vm_array_of`), so equal item
+types are the same pointer. Assignability looks inside: `int[]` fits `number[]`
+and `any[]`, `(int | string)[]` to `int[]` needs a run-time check, and `int[]` to
+`string[]` is a compile error. A union of two different array types such as
+`int[] | string[]` is rejected in written types (write `(int | string)[]`); in the
+type of an expression it widens to `any[]`.
+
+An array object carries the item type it was last stored under. Storing an
+array under `T[]` always emits `CHECK_TYPE`, even when it fits statically: the
+check scans the items once (skipped when the array's own type already fits) and
+then restricts the array, and from then on `push`, `insert`, `a[i] = v` and
+nested stores check against it, so the annotation holds after the declaration.
+Rows of an `int[][]` are restricted too. An array already restricted to an
+unrelated type cannot be stored under another (`int[]` as `string[]` fails even
+when empty); restricting to a wider type is harmless and to a narrower one
+narrows the array. `+` and slices of arrays keep the type when both sides agree.
+Unannotated arrays hold anything (`any`), and `sort`, `sum` and the like check
+their items when they run.
+
 **Not yet.** Narrowing (`if x != nil { ... }` does not refine `x`, so `int?`
 used as `int` costs a run-time check), `unknown`, `bytes`, collection and
 function types, generics, and parameter and return annotations (they arrive
@@ -207,7 +252,10 @@ the host sets it before each run; `vm->instructions` counts executed
 instructions even when metering is off. A native that does heavy work calls
 `lz_vm_charge_fuel(vm, cost)` so a single call cannot hide unbounded effort;
 string concatenation and `print`/`println` charge one unit per 64 bytes they
-copy or write.
+copy or write. Array work charges one unit per 8 items (copying, slicing,
+`+`, searching, sorting with its passes, scanning for a type check, comparing);
+an `==` on arrays stops at the fuel that is left, so a hostile diamond-shaped
+structure cannot run forever.
 Call depth gets its own limit when call frames arrive.
 
 ## Language semantics
@@ -224,6 +272,7 @@ Decided rules, implemented in stages.
 | `1 == 1.0` is true, strings compare by content, other mixed types are unequal | done |
 | `<` and `>` order numbers only; int against float is compared exactly, and anything involving NaN is false | done |
 | `+` on two strings concatenates; there is no implicit conversion (`"a" + 1` is an error) | done |
+| `+` on two arrays builds a new array; arrays compare by content, other objects by identity; `[]` is truthy | done |
 | NaN prints as `nan` and the infinities as `inf` and `-inf` on every platform | done |
 | `//` rounds toward negative infinity and `%` takes the sign of the divisor (as in Python); with a float operand both give floats; a zero divisor is an error | done |
 
@@ -264,11 +313,17 @@ Builtins write through `vm->out` / `vm->err` (`LzWriter`), never through
 `stdout`, so tests can capture output. Call one with `lz_native_call`, which
 checks arity first.
 
+The array builtins (`len`, `push`, `sort`, `range`, ...) live in
+`builtin/array/`. Natives receive their arguments on the VM stack, so a native
+that mutates an array mutates the caller's object; every store goes through
+`lz_array_push` / `lz_array_check_store`, which apply the item type, the cycle
+check and the fuel charge.
+
 To add a builtin: implement it under `builtin/<area>/`, declare it in that
 area's header, add one row to the table in `registry.c`, and add the source to
 `builtin/CMakeLists.txt`.
 
 ## Not decided yet
 
-Functions (`fn`) with typed parameters and results, `for`, `break`/`continue`, collections and their types, narrowing, the error model, and call frames. Removing entries from `LzTable`.
+Functions (`fn`) with typed parameters and results, `for` (so `range` is only useful with `while` for now), `break`/`continue`, maps and other collections, indexing and slicing strings, narrowing, the error model, and call frames. Removing entries from `LzTable`.
 Garbage collection beyond reference counting (cycles).

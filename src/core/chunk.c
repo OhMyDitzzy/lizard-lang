@@ -218,6 +218,16 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_LOOP";
     case LZ_OP_CHECK_TYPE:
         return "OP_CHECK_TYPE";
+    case LZ_OP_ARRAY_NEW:
+        return "OP_ARRAY_NEW";
+    case LZ_OP_ARRAY_PUSH:
+        return "OP_ARRAY_PUSH";
+    case LZ_OP_INDEX:
+        return "OP_INDEX";
+    case LZ_OP_SET_INDEX:
+        return "OP_SET_INDEX";
+    case LZ_OP_SLICE:
+        return "OP_SLICE";
     case LZ_OP_RETURN:
         return "OP_RETURN";
     default:
@@ -258,6 +268,11 @@ size_t lz_opcode_length(uint8_t opcode) {
     case LZ_OP_LESS_EQUAL:
     case LZ_OP_GREATER_EQUAL:
     case LZ_OP_NOT:
+    case LZ_OP_ARRAY_NEW:
+    case LZ_OP_ARRAY_PUSH:
+    case LZ_OP_INDEX:
+    case LZ_OP_SET_INDEX:
+    case LZ_OP_SLICE:
     case LZ_OP_RETURN:
         return 1;
     default:

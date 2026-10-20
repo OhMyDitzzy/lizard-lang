@@ -1,5 +1,7 @@
 #include "lizard/arith.h"
 
+#include "lizard/array.h"
+
 #include <math.h>
 
 static bool is_number(const LzValue *value) {
@@ -212,12 +214,15 @@ static LzStatus float_arith(LzVM *vm, LzOpCode op, double a, double b, LzValue *
 
 LzStatus lz_arith_binary(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right,
                          LzValue *result) {
+    if (op == LZ_OP_ADD && lz_value_is_array(left) && lz_value_is_array(right)) {
+        return lz_array_concat(vm, lz_value_as_array(left), lz_value_as_array(right), result);
+    }
     if (op == LZ_OP_ADD && is_string(left) && is_string(right)) {
         return concat(vm, left, right, result);
     }
     if (!is_number(left) || !is_number(right)) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME,
-                               op == LZ_OP_ADD ? "operands must be two numbers or two strings"
+                               op == LZ_OP_ADD ? "operands must be two numbers or two strings (or two arrays)"
                                                : "operands must be numbers");
     }
 

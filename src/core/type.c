@@ -1,5 +1,7 @@
 #include "lizard/type.h"
 
+#include "lizard/array.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -16,7 +18,15 @@ uint16_t lz_kind_of(const LzValue *value) {
     case LZ_VAL_FLOAT:
         return LZ_KIND_FLOAT;
     case LZ_VAL_OBJECT:
-        return value->as.object->type == LZ_OBJ_STRING ? LZ_KIND_STRING : LZ_KIND_FUNCTION;
+        switch (value->as.object->type) {
+        case LZ_OBJ_STRING:
+            return LZ_KIND_STRING;
+        case LZ_OBJ_ARRAY:
+            return LZ_KIND_ARRAY;
+        case LZ_OBJ_NATIVE:
+            return LZ_KIND_FUNCTION;
+        }
+        return 0;
     }
     return 0;
 }
@@ -35,6 +45,8 @@ const char *lz_kind_name(uint16_t kind) {
         return "string";
     case LZ_KIND_FUNCTION:
         return "function";
+    case LZ_KIND_ARRAY:
+        return "array";
     default:
         return "value";
     }
@@ -121,6 +133,9 @@ LzType lz_type_of_value(const LzValue *value) {
         type.literal_count = 1;
     } else {
         type.kinds = lz_kind_of(value);
+        if (lz_value_is_array(value)) {
+            type.element = lz_value_as_array(value)->element;
+        }
     }
     return type;
 }
@@ -134,7 +149,9 @@ uint16_t lz_type_possible_kinds(const LzType *type) {
 }
 
 LzType lz_type_widen(const LzType *type) {
-    return lz_type_of_kinds(lz_type_possible_kinds(type));
+    LzType widened = lz_type_of_kinds(lz_type_possible_kinds(type));
+    widened.element = type->element;
+    return widened;
 }
 
 static bool literal_accepted(const LzType *type, const LzLiteral *literal) {
@@ -162,6 +179,13 @@ bool lz_type_add_literal(LzType *type, const LzLiteral *literal) {
 
 bool lz_type_union(LzType *out, const LzType *a, const LzType *b) {
     LzType result = lz_type_of_kinds((uint16_t)(a->kinds | b->kinds));
+    if ((a->kinds & LZ_KIND_ARRAY) != 0 && (b->kinds & LZ_KIND_ARRAY) != 0) {
+        result.element = a->element == b->element ? a->element : NULL;
+    } else if ((a->kinds & LZ_KIND_ARRAY) != 0) {
+        result.element = a->element;
+    } else if ((b->kinds & LZ_KIND_ARRAY) != 0) {
+        result.element = b->element;
+    }
     for (size_t i = 0; i < a->literal_count; i++) {
         if (!lz_type_add_literal(&result, &a->literals[i])) {
             return false;
@@ -178,6 +202,9 @@ bool lz_type_union(LzType *out, const LzType *a, const LzType *b) {
 
 bool lz_type_equal(const LzType *a, const LzType *b) {
     if (a->kinds != b->kinds || a->literal_count != b->literal_count) {
+        return false;
+    }
+    if ((a->kinds & LZ_KIND_ARRAY) != 0 && a->element != b->element) {
         return false;
     }
     for (size_t i = 0; i < a->literal_count; i++) {
@@ -199,6 +226,9 @@ static uint32_t mix(uint64_t value) {
 
 uint32_t lz_type_hash(const LzType *type) {
     uint32_t hash = mix(type->kinds + 1u);
+    if ((type->kinds & LZ_KIND_ARRAY) != 0) {
+        hash ^= mix((uint64_t)(uintptr_t)type->element);
+    }
     for (size_t i = 0; i < type->literal_count; i++) {
         const LzLiteral *literal = &type->literals[i];
         uint32_t part;
@@ -219,6 +249,25 @@ uint32_t lz_type_hash(const LzType *type) {
 }
 
 bool lz_type_matches(const LzType *type, const LzValue *value) {
+    if (lz_value_is_array(value)) {
+        if ((type->kinds & LZ_KIND_ARRAY) == 0) {
+            return false;
+        }
+        const LzArray *array = lz_value_as_array(value);
+        const LzType *wanted = type->element;
+        if (wanted == NULL || array->element == wanted) {
+            return true;
+        }
+        if (array->element != NULL && lz_type_assignable(array->element, wanted) == LZ_ASSIGN_ALWAYS) {
+            return true; /* every item already fits the tag, and the tag fits the target */
+        }
+        for (size_t i = 0; i < array->count; i++) {
+            if (!lz_type_matches(wanted, &array->items[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
     if ((lz_kind_of(value) & type->kinds) != 0) {
         return true;
     }
@@ -230,9 +279,36 @@ bool lz_type_matches(const LzType *type, const LzValue *value) {
     return false;
 }
 
+/* How an array of items `from` can be stored as an array of items `to` (NULL = any). */
+static LzAssign element_assignable(const LzType *from, const LzType *to) {
+    if (to == NULL) {
+        return LZ_ASSIGN_ALWAYS;
+    }
+    if (from == NULL) {
+        LzType any = lz_type_of_kinds(LZ_KINDS_ANY);
+        return lz_type_assignable(&any, to);
+    }
+    return lz_type_assignable(from, to);
+}
+
 LzAssign lz_type_assignable(const LzType *from, const LzType *to) {
-    bool always = (from->kinds & ~to->kinds & LZ_KINDS_ANY) == 0;
-    bool overlap = (from->kinds & to->kinds) != 0;
+    uint16_t scalar = (uint16_t)~LZ_KIND_ARRAY;
+    bool always = (from->kinds & ~to->kinds & LZ_KINDS_ANY & scalar) == 0;
+    bool overlap = (from->kinds & to->kinds & scalar) != 0;
+
+    if ((from->kinds & LZ_KIND_ARRAY) != 0) {
+        if ((to->kinds & LZ_KIND_ARRAY) == 0) {
+            always = false;
+        } else {
+            LzAssign items = element_assignable(from->element, to->element);
+            if (items != LZ_ASSIGN_ALWAYS) {
+                always = false;
+            }
+            if (items != LZ_ASSIGN_NEVER) {
+                overlap = true;
+            }
+        }
+    }
 
     for (size_t i = 0; i < from->literal_count; i++) {
         if (literal_accepted(to, &from->literals[i])) {
@@ -284,7 +360,7 @@ static void write_literal(const LzWriter *out, const LzLiteral *literal) {
 }
 
 void lz_type_describe(const LzType *type, const LzWriter *out) {
-    if (type->kinds == LZ_KINDS_ANY) {
+    if (type->kinds == LZ_KINDS_ANY && type->element == NULL) {
         write_text(out, "any");
         return;
     }
@@ -326,6 +402,25 @@ void lz_type_describe(const LzType *type, const LzWriter *out) {
     if ((kinds & LZ_KIND_FUNCTION) != 0) {
         PART("function");
     }
+    if ((kinds & LZ_KIND_ARRAY) != 0) {
+        if (!first) {
+            write_text(out, " | ");
+        }
+        first = false;
+        if (type->element == NULL) {
+            write_text(out, "any[]");
+        } else {
+            /* A union item type needs parentheses: (int | string)[]. */
+            LzBuffer item = {0};
+            LzWriter item_out = lz_writer_from_buffer(&item);
+            lz_type_describe(type->element, &item_out);
+            bool compound = item.data != NULL && strstr(item.data, " | ") != NULL;
+            write_text(out, compound ? "(" : "");
+            write_text(out, item.data != NULL ? item.data : "?");
+            write_text(out, compound ? ")[]" : "[]");
+            lz_buffer_free(&item);
+        }
+    }
 #undef PART
 
     for (size_t i = 0; i < type->literal_count; i++) {
@@ -342,7 +437,7 @@ void lz_value_describe(const LzValue *value, const LzWriter *out) {
     if (literal_from_value(value, &literal)) {
         write_literal(out, &literal);
     } else if (value->type == LZ_VAL_OBJECT) {
-        write_text(out, "function");
+        write_text(out, lz_value_is_array(value) ? "array" : "function");
     } else {
         (void)lz_value_write(value, out);
     }

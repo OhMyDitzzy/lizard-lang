@@ -1,6 +1,7 @@
 #include "lizard/vm.h"
 
 #include "lizard/arith.h"
+#include "lizard/array.h"
 #include "lizard/compare.h"
 #include "lizard/native.h"
 
@@ -63,7 +64,10 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
     LzWriter actual_out = lz_writer_from_buffer(&actual);
 
     lz_type_describe(type, &expected_out);
-    if (type->literal_count > 0) {
+    if (lz_value_is_array(value)) {
+        LzType shown = lz_type_of_value(value);
+        lz_type_describe(&shown, &actual_out);
+    } else if (type->literal_count > 0) {
         lz_value_describe(value, &actual_out);
     } else {
         (void)lz_writer_write_cstr(&actual_out, lz_kind_name(lz_kind_of(value)));
@@ -102,6 +106,100 @@ static LzStatus do_call(LzVM *vm, uint8_t argc) {
     return LZ_OK;
 }
 
+static LzStatus array_new(LzVM *vm) {
+    LzArray *array = lz_array_new(&vm->heap, 0);
+    if (array == NULL) {
+        return lz_vm_out_of_memory(vm);
+    }
+    LzStatus status = push(vm, lz_value_object(&array->base));
+    lz_object_release(&vm->heap, &array->base); /* the stack holds its own reference now */
+    return status;
+}
+
+static LzStatus array_push(LzVM *vm) {
+    if (vm->stack_count < 2) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *target = &vm->stack[vm->stack_count - 2];
+    if (!lz_value_is_array(target)) {
+        return malformed(vm, "array expected");
+    }
+    LzStatus status = lz_array_push(vm, lz_value_as_array(target), &vm->stack[vm->stack_count - 1]);
+    if (status == LZ_OK) {
+        pop(vm);
+    }
+    return status;
+}
+
+static LzStatus not_indexable(LzVM *vm, const LzValue *value) {
+    return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot index a value of type %s",
+                           lz_kind_name(lz_kind_of(value)));
+}
+
+static LzStatus index_op(LzVM *vm) {
+    if (vm->stack_count < 2) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *container = &vm->stack[vm->stack_count - 2];
+    const LzValue *index = &vm->stack[vm->stack_count - 1];
+    if (!lz_value_is_array(container)) {
+        return not_indexable(vm, container);
+    }
+    const LzArray *array = lz_value_as_array(container);
+    size_t position = 0;
+    LzStatus status = lz_array_resolve_index(vm, index, array->count, &position);
+    if (status != LZ_OK) {
+        return status;
+    }
+    LzValue item = array->items[position];
+    lz_value_retain(&item); /* keep it alive across the pops, which may free the array */
+    pop(vm);
+    pop(vm);
+    vm->stack[vm->stack_count++] = item;
+    return LZ_OK;
+}
+
+static LzStatus set_index_op(LzVM *vm) {
+    if (vm->stack_count < 3) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *container = &vm->stack[vm->stack_count - 3];
+    if (!lz_value_is_array(container)) {
+        return not_indexable(vm, container);
+    }
+    LzStatus status = lz_array_set(vm, lz_value_as_array(container),
+                                   &vm->stack[vm->stack_count - 2], &vm->stack[vm->stack_count - 1]);
+    if (status != LZ_OK) {
+        return status;
+    }
+    pop(vm);
+    pop(vm);
+    pop(vm);
+    return LZ_OK;
+}
+
+static LzStatus slice_op(LzVM *vm) {
+    if (vm->stack_count < 3) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *container = &vm->stack[vm->stack_count - 3];
+    if (!lz_value_is_array(container)) {
+        return not_indexable(vm, container);
+    }
+    LzValue result = lz_value_nil();
+    LzStatus status = lz_array_slice(vm, lz_value_as_array(container),
+                                     &vm->stack[vm->stack_count - 2],
+                                     &vm->stack[vm->stack_count - 1], &result);
+    if (status != LZ_OK) {
+        return status;
+    }
+    pop(vm);
+    pop(vm);
+    pop(vm);
+    vm->stack[vm->stack_count++] = result;
+    return LZ_OK;
+}
+
 static LzStatus binary_op(LzVM *vm, LzOpCode op) {
     if (vm->stack_count < 2) {
         return malformed(vm, "stack underflow");
@@ -131,21 +229,11 @@ static LzStatus equal(LzVM *vm) {
     const LzValue *left = &vm->stack[vm->stack_count - 2];
     const LzValue *right = &vm->stack[vm->stack_count - 1];
 
-    /* Comparing two different strings of equal length reads all of both: one fuel unit per 64 bytes. */
-    if (left->type == LZ_VAL_OBJECT && right->type == LZ_VAL_OBJECT &&
-        left->as.object != right->as.object && left->as.object->type == LZ_OBJ_STRING &&
-        right->as.object->type == LZ_OBJ_STRING) {
-        const LzString *a = (const LzString *)left->as.object;
-        const LzString *b = (const LzString *)right->as.object;
-        if (a->length == b->length) {
-            LzStatus charged = lz_vm_charge_fuel(vm, a->length / 64);
-            if (charged != LZ_OK) {
-                return charged;
-            }
-        }
+    bool same = false;
+    LzStatus status = lz_vm_values_equal(vm, left, right, &same);
+    if (status != LZ_OK) {
+        return status;
     }
-
-    bool same = lz_value_equal(left, right);
     pop(vm);
     pop(vm);
     vm->stack[vm->stack_count++] = lz_value_bool(same);
@@ -354,11 +442,39 @@ static LzStatus execute(LzVM *vm, const LzChunk *chunk, size_t *failed_at) {
                 status = malformed(vm, "type index out of range");
             } else if (vm->stack_count == 0) {
                 status = malformed(vm, "stack underflow");
-            } else if (!lz_type_matches(&chunk->types[index], &vm->stack[vm->stack_count - 1])) {
-                status = type_mismatch(vm, &chunk->types[index], &vm->stack[vm->stack_count - 1]);
+            } else {
+                const LzType *type = &chunk->types[index];
+                const LzValue *top = &vm->stack[vm->stack_count - 1];
+                bool fits;
+                if (lz_value_is_array(top)) {
+                    /* An array is checked item by item, and then restricted to the item type. */
+                    status = lz_vm_charge_fuel(vm, lz_array_cost(lz_value_as_array(top)->count));
+                    fits = (type->kinds & LZ_KIND_ARRAY) != 0 &&
+                           lz_array_conform(lz_value_as_array(top), type->element);
+                } else {
+                    fits = lz_type_matches(type, top);
+                }
+                if (status == LZ_OK && !fits) {
+                    status = type_mismatch(vm, type, top);
+                }
             }
             break;
         }
+        case LZ_OP_ARRAY_NEW:
+            status = array_new(vm);
+            break;
+        case LZ_OP_ARRAY_PUSH:
+            status = array_push(vm);
+            break;
+        case LZ_OP_INDEX:
+            status = index_op(vm);
+            break;
+        case LZ_OP_SET_INDEX:
+            status = set_index_op(vm);
+            break;
+        case LZ_OP_SLICE:
+            status = slice_op(vm);
+            break;
         case LZ_OP_RETURN:
             return LZ_OK;
         default:

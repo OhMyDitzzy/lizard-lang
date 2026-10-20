@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "lizard/array.h"
 #include "lizard/lexer.h"
 #include "lizard/native.h"
 #include "lizard/type.h"
@@ -92,6 +93,8 @@ typedef enum Precedence {
 typedef struct Expr {
     LzType type;
     const LzNative *native;
+    bool is_index;  /* the expression is `a[i]` and its last instruction is OP_INDEX... */
+    size_t op_pos;  /* ...at this code offset, so a following '=' can turn it into OP_SET_INDEX */
 } Expr;
 
 typedef Expr (*PrefixFn)(Parser *parser);
@@ -526,6 +529,8 @@ static Expr expr_of(LzType type) {
     Expr expr;
     expr.type = type;
     expr.native = NULL;
+    expr.is_index = false;
+    expr.op_pos = 0;
     return expr;
 }
 
@@ -591,7 +596,15 @@ static void check_assignment(Parser *parser, const LzType *from, const LzType *t
                              const LzToken *start, uint32_t offset) {
     switch (lz_type_assignable(from, to)) {
     case LZ_ASSIGN_ALWAYS:
-        return;
+        /*
+         * An array stored under `T[]` is checked and restricted to T even when it
+         * fits statically, so later pushes and stores into it are checked too.
+         */
+        if ((from->kinds & LZ_KIND_ARRAY) == 0 || (to->kinds & LZ_KIND_ARRAY) == 0 ||
+            to->element == NULL) {
+            return;
+        }
+        break;
     case LZ_ASSIGN_NEVER: {
         LzToken span = span_from(parser, start);
         error_types(parser, &span, "type mismatch: expected ", to, ", got ", from);
@@ -622,6 +635,21 @@ static Expr union_expr(Expr left, Expr right) {
         (void)lz_type_union(&merged, &a, &b);
     }
     return expr_of(merged);
+}
+
+/* The type `item[]`; a limit or memory error is reported once and gives `any[]`. */
+static LzType array_type(Parser *parser, const LzType *item) {
+    LzType out = lz_type_of_kinds(LZ_KIND_ARRAY);
+    LzStatus status = lz_vm_array_of(parser->vm, item, &out);
+    if (status == LZ_ERR_MEMORY || status == LZ_ERR_HEAP_LIMIT) {
+        fail(parser, status);
+    } else if (status != LZ_OK) {
+        error_at_previous(parser, parser->vm->error);
+    }
+    if (status != LZ_OK) {
+        out = lz_type_of_kinds(LZ_KIND_ARRAY);
+    }
+    return out;
 }
 
 /* Type syntax */
@@ -766,11 +794,20 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
 
 static bool parse_type_postfix(Parser *parser, LzType *out) {
     bool ok = parse_type_primary(parser, out);
-    while (match(parser, LZ_TOKEN_QUESTION)) {
-        LzType nil = lz_type_of_kinds(LZ_KIND_NIL);
-        LzType merged;
-        if (lz_type_union(&merged, out, &nil)) {
-            *out = merged;
+    for (;;) {
+        if (match(parser, LZ_TOKEN_QUESTION)) {
+            LzType nil = lz_type_of_kinds(LZ_KIND_NIL);
+            LzType merged;
+            if (lz_type_union(&merged, out, &nil)) {
+                *out = merged;
+            }
+        } else if (check(parser, LZ_TOKEN_LEFT_BRACKET)) {
+            advance(parser);
+            consume(parser, LZ_TOKEN_RIGHT_BRACKET, "expected ']' in an array type");
+            LzType item = *out;
+            *out = array_type(parser, &item);
+        } else {
+            break;
         }
     }
     return ok;
@@ -784,6 +821,11 @@ static bool parse_type_union(Parser *parser, LzType *out) {
         LzType next;
         ok = parse_type_postfix(parser, &next) && ok;
         LzType merged;
+        if ((out->kinds & next.kinds & LZ_KIND_ARRAY) != 0 && out->element != next.element) {
+            error_at_previous(parser, "a union cannot hold two different array types; "
+                                      "write (A | B)[] instead");
+            ok = false;
+        }
         if (!lz_type_union(&merged, out, &next)) {
             error_at_previous(parser, "too many literal types in one union (limit 8)");
             LzType a = lz_type_widen(out);
@@ -919,6 +961,93 @@ static Expr unary(Parser *parser) {
     return expr_of(lz_type_of_kinds(numbers));
 }
 
+/* [a, b, c]: every literal builds a fresh array, so it is never folded into a constant. */
+static Expr array_literal(Parser *parser) {
+    uint32_t offset = parser->previous.offset;
+    emit_op_at(parser, LZ_OP_ARRAY_NEW, offset);
+
+    LzType item = lz_type_of_kinds(0);
+    if (!check(parser, LZ_TOKEN_RIGHT_BRACKET)) {
+        do {
+            if (check(parser, LZ_TOKEN_RIGHT_BRACKET)) {
+                break; /* trailing comma */
+            }
+            Expr value = expression(parser);
+            emit_op_at(parser, LZ_OP_ARRAY_PUSH, offset);
+            LzType widened = lz_type_widen(&value.type);
+            LzType merged;
+            if (lz_type_union(&merged, &item, &widened)) {
+                item = merged;
+            }
+        } while (match(parser, LZ_TOKEN_COMMA));
+    }
+    consume(parser, LZ_TOKEN_RIGHT_BRACKET, "expected ']' after array items");
+    return expr_of(array_type(parser, &item));
+}
+
+/* The static type of one item of an array expression. */
+static LzType item_type_of(const LzType *container) {
+    if ((container->kinds & LZ_KIND_ARRAY) != 0 && container->element != NULL) {
+        return *container->element;
+    }
+    return lz_type_of_kinds(LZ_KINDS_ANY);
+}
+
+static void check_bound(Parser *parser, const LzToken *at, const Expr *bound, bool slice) {
+    uint16_t allowed = slice ? (uint16_t)(LZ_KIND_INT | LZ_KIND_NIL) : (uint16_t)LZ_KIND_INT;
+    if ((lz_type_possible_kinds(&bound->type) & allowed) == 0) {
+        error_types(parser, at,
+                    slice ? "a slice bound must be an int, got " : "an array index must be an int, got ",
+                    &bound->type, "", NULL);
+    }
+}
+
+/* a[i] and a[i:j]; either bound of a slice may be left out. */
+static Expr subscript(Parser *parser, Expr left) {
+    LzToken bracket = parser->previous;
+    uint32_t offset = bracket.offset;
+
+    if ((lz_type_possible_kinds(&left.type) & LZ_KIND_ARRAY) == 0) {
+        error_types(parser, &bracket, "cannot index a value of type ", &left.type, "", NULL);
+    }
+
+    bool has_first = !check(parser, LZ_TOKEN_COLON);
+    Expr first = expr_of(lz_type_of_kinds(LZ_KIND_NIL));
+    if (has_first) {
+        first = expression(parser);
+    } else {
+        emit_op_at(parser, LZ_OP_NIL, offset);
+    }
+
+    if (match(parser, LZ_TOKEN_COLON)) {
+        if (has_first) {
+            check_bound(parser, &bracket, &first, true);
+        }
+        if (check(parser, LZ_TOKEN_RIGHT_BRACKET)) {
+            emit_op_at(parser, LZ_OP_NIL, offset);
+        } else {
+            Expr last = expression(parser);
+            check_bound(parser, &bracket, &last, true);
+        }
+        consume(parser, LZ_TOKEN_RIGHT_BRACKET, "expected ']' after slice");
+        emit_op_at(parser, LZ_OP_SLICE, offset);
+        if ((left.type.kinds & LZ_KIND_ARRAY) == 0) {
+            return any_expr();
+        }
+        LzType slice = lz_type_of_kinds(LZ_KIND_ARRAY);
+        slice.element = left.type.element;
+        return expr_of(slice);
+    }
+
+    check_bound(parser, &bracket, &first, false);
+    consume(parser, LZ_TOKEN_RIGHT_BRACKET, "expected ']' after index");
+    Expr result = expr_of(item_type_of(&left.type));
+    result.is_index = true;
+    result.op_pos = parser->chunk->count;
+    emit_op_at(parser, LZ_OP_INDEX, offset);
+    return result;
+}
+
 static Expr binary(Parser *parser, Expr left);
 static Expr call(Parser *parser, Expr callee);
 static Expr and_(Parser *parser, Expr left);
@@ -939,6 +1068,8 @@ static ParseRule rule_for(LzTokenType type) {
         return (ParseRule){variable, NULL, PREC_NONE};
     case LZ_TOKEN_LEFT_PAREN:
         return (ParseRule){grouping, call, PREC_CALL};
+    case LZ_TOKEN_LEFT_BRACKET:
+        return (ParseRule){array_literal, subscript, PREC_CALL};
     case LZ_TOKEN_BANG:
         return (ParseRule){unary, NULL, PREC_NONE};
     case LZ_TOKEN_MINUS:
@@ -1006,7 +1137,9 @@ static Expr arithmetic_result(Parser *parser, const LzToken *op, const Expr *lef
     bool numbers = (a & LZ_KINDS_NUMBER) != 0 && (b & LZ_KINDS_NUMBER) != 0;
     bool strings = op->type == LZ_TOKEN_PLUS && (a & LZ_KIND_STRING) != 0 &&
                    (b & LZ_KIND_STRING) != 0;
-    if (!numbers && !strings) {
+    bool arrays = op->type == LZ_TOKEN_PLUS && (a & LZ_KIND_ARRAY) != 0 &&
+                  (b & LZ_KIND_ARRAY) != 0;
+    if (!numbers && !strings && !arrays) {
         error_operator(parser, op, &left->type, &right->type);
         return any_expr();
     }
@@ -1028,7 +1161,22 @@ static Expr arithmetic_result(Parser *parser, const LzToken *op, const Expr *lef
     if (strings) {
         kinds = (uint16_t)(kinds | LZ_KIND_STRING);
     }
-    return expr_of(lz_type_of_kinds(kinds));
+    LzType result = lz_type_of_kinds(kinds);
+    if (arrays) {
+        result.kinds = (uint16_t)(result.kinds | LZ_KIND_ARRAY);
+        const LzType *x = left->type.element;
+        const LzType *y = right->type.element;
+        if (x == y) {
+            result.element = x;
+        } else if (x != NULL && y != NULL) {
+            /* int[] + string[] holds both: (int | string)[] */
+            LzType merged;
+            if (lz_type_union(&merged, x, y)) {
+                result.element = array_type(parser, &merged).element;
+            }
+        }
+    }
+    return expr_of(result);
 }
 
 static Expr binary(Parser *parser, Expr left) {
@@ -1508,7 +1656,28 @@ static LzTokenType next_token_type(const Parser *parser) {
 
 static void expression_statement(Parser *parser) {
     uint32_t offset = parser->current.offset;
-    (void)expression(parser);
+    Expr target = expression(parser);
+
+    /* a[i] = v: the expression just compiled ends in OP_INDEX, which becomes OP_SET_INDEX. */
+    if (check(parser, LZ_TOKEN_EQUAL) && target.is_index && parser->fatal == LZ_OK &&
+        parser->chunk->count == target.op_pos + 1) {
+        uint32_t index_offset = parser->chunk->offsets[target.op_pos];
+        lz_chunk_truncate(&parser->vm->heap, parser->chunk, target.op_pos,
+                          parser->chunk->constant_count);
+        advance(parser);
+        skip_newlines(parser);
+        LzToken value_start = parser->current;
+        Expr value = expression(parser);
+        if (lz_type_assignable(&value.type, &target.type) == LZ_ASSIGN_NEVER) {
+            LzToken span = span_from(parser, &value_start);
+            error_types(parser, &span, "type mismatch: expected ", &target.type, ", got ",
+                        &value.type);
+        }
+        emit_op_at(parser, LZ_OP_SET_INDEX, index_offset);
+        end_statement(parser);
+        return;
+    }
+
     emit_op_at(parser, LZ_OP_POP, offset);
     end_statement(parser);
 }

@@ -265,7 +265,7 @@ static void test_descriptions(void) {
     LzType everything_but_nil = kinds(LZ_KINDS_ANY & ~LZ_KIND_NIL);
     LZ_CHECK(described_as(&string_or_int, "int | string"));
     LZ_CHECK(described_as(&nullable, "string | nil"));
-    LZ_CHECK(described_as(&everything_but_nil, "number | string | bool | function"));
+    LZ_CHECK(described_as(&everything_but_nil, "number | string | bool | function | any[]"));
 
     LzType mode = modes();
     LZ_CHECK(described_as(&mode, "\"r\" | \"w\""));

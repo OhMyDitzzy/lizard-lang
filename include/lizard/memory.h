@@ -5,7 +5,8 @@
 
 typedef enum LzObjType {
     LZ_OBJ_STRING,
-    LZ_OBJ_NATIVE
+    LZ_OBJ_NATIVE,
+    LZ_OBJ_ARRAY
 } LzObjType;
 
 /*
@@ -37,6 +38,9 @@ typedef struct LzHeap {
     size_t limit_bytes;
     bool limit_hit;
     bool trace;
+    LzObject *pending; /* dead objects whose release is deferred, see lz_object_release */
+    bool draining;
+    uint32_t epoch; /* visit stamp for graph walks over arrays, see lz_heap_next_epoch */
 } LzHeap;
 
 void lz_heap_init(LzHeap *heap);
@@ -52,6 +56,17 @@ void *lz_heap_alloc(LzHeap *heap, LzObjType type, size_t size);
  * which knows every object layout; the heap itself stays layout-agnostic.
  */
 void lz_object_finalize(LzHeap *heap, LzObject *object);
+
+/*
+ * Accounts for memory a heap object owns outside its own block (an array's
+ * item buffer). Fails, and sets limit_hit, when it would pass the limit.
+ * Every successful charge is paired with an uncharge of the same size.
+ */
+bool lz_heap_charge(LzHeap *heap, size_t bytes);
+void lz_heap_uncharge(LzHeap *heap, size_t bytes);
+
+/* A fresh stamp for a walk over arrays; arrays marked with it have been visited. */
+uint32_t lz_heap_next_epoch(LzHeap *heap);
 
 void lz_object_retain(LzObject *object);
 void lz_object_release(LzHeap *heap, LzObject *object);

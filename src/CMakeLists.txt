@@ -1,5 +1,6 @@
 add_library(lizard_core STATIC
     core/arith.c
+    core/array.c
     core/chunk.c
     core/compare.c
     core/debug.c

@@ -11,12 +11,14 @@ typedef enum LzKind {
     LZ_KIND_INT = 1 << 2,
     LZ_KIND_FLOAT = 1 << 3,
     LZ_KIND_STRING = 1 << 4,
-    LZ_KIND_FUNCTION = 1 << 5
+    LZ_KIND_FUNCTION = 1 << 5,
+    LZ_KIND_ARRAY = 1 << 6
 } LzKind;
 
 #define LZ_KINDS_NUMBER (LZ_KIND_INT | LZ_KIND_FLOAT)
 #define LZ_KINDS_ANY                                                                               \
-    (LZ_KIND_NIL | LZ_KIND_BOOL | LZ_KIND_INT | LZ_KIND_FLOAT | LZ_KIND_STRING | LZ_KIND_FUNCTION)
+    (LZ_KIND_NIL | LZ_KIND_BOOL | LZ_KIND_INT | LZ_KIND_FLOAT | LZ_KIND_STRING | LZ_KIND_FUNCTION |   \
+     LZ_KIND_ARRAY)
 
 #define LZ_TYPE_MAX_LITERALS 8
 
@@ -40,6 +42,12 @@ typedef struct LzType {
     uint16_t kinds;
     uint8_t literal_count;
     LzLiteral literals[LZ_TYPE_MAX_LITERALS];
+    /*
+     * Only meaningful when kinds has LZ_KIND_ARRAY: the type of the items, or
+     * NULL for any. Points at a type interned by the VM (lz_vm_array_of), so
+     * two equal element types are the same pointer.
+     */
+    const struct LzType *element;
 } LzType;
 
 typedef enum LzAssign {
@@ -64,6 +72,11 @@ LzType lz_type_widen(const LzType *type);
 
 /* False when the union would need more than LZ_TYPE_MAX_LITERALS literals. */
 bool lz_type_add_literal(LzType *type, const LzLiteral *literal);
+/*
+ * Two different array types in a union merge into an array of any (`int[] |
+ * string[]` becomes `any[]`), which is a safe over-approximation for the type
+ * of an expression; the compiler rejects such a union in a written type.
+ */
 bool lz_type_union(LzType *out, const LzType *a, const LzType *b);
 
 bool lz_type_equal(const LzType *a, const LzType *b);

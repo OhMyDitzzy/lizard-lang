@@ -39,6 +39,11 @@ typedef enum LzOpCode {
     LZ_OP_JUMP_IF_TRUE,  /* u16 distance: skip forward if the top is truthy; does not pop */
     LZ_OP_LOOP,          /* u16 distance: jump backward */
     LZ_OP_CHECK_TYPE,    /* u16 type index: fail with LZ_ERR_TYPE unless the top value matches */
+    LZ_OP_ARRAY_NEW,     /* push a new empty array */
+    LZ_OP_ARRAY_PUSH,    /* pop a value and append it to the array below it (which stays) */
+    LZ_OP_INDEX,         /* pop index, pop array, push array[index] (negative counts from the end) */
+    LZ_OP_SET_INDEX,     /* pop value, pop index, pop array: array[index] = value */
+    LZ_OP_SLICE,         /* pop end, pop start, pop array, push a new array (nil bound = open) */
     LZ_OP_RETURN         /* stop executing the chunk */
 } LzOpCode;
 

@@ -1,5 +1,6 @@
 #include "lizard/value.h"
 
+#include "lizard/array.h"
 #include "lizard/native.h"
 
 #include <inttypes.h>
@@ -112,12 +113,110 @@ static bool write_float(double number, const LzWriter *writer) {
     return !looks_integral || lz_writer_write_cstr(writer, ".0");
 }
 
+typedef struct WriteFrame {
+    const LzArray *array;
+    size_t next;
+} WriteFrame;
+
+static bool write_quoted(const LzString *string, const LzWriter *writer) {
+    if (!lz_writer_write_cstr(writer, "\"")) {
+        return false;
+    }
+    for (size_t i = 0; i < string->length; i++) {
+        unsigned char c = (unsigned char)string->data[i];
+        char escape[8];
+        const char *text = NULL;
+        switch (c) {
+        case '"':
+            text = "\\\"";
+            break;
+        case '\\':
+            text = "\\\\";
+            break;
+        case '\n':
+            text = "\\n";
+            break;
+        case '\t':
+            text = "\\t";
+            break;
+        case '\r':
+            text = "\\r";
+            break;
+        default:
+            if (c < 0x20 || c == 0x7F) {
+                (void)snprintf(escape, sizeof escape, "\\x%02X", (unsigned)c);
+                text = escape;
+            }
+            break;
+        }
+        bool ok = text != NULL ? lz_writer_write_cstr(writer, text)
+                               : lz_writer_write(writer, string->data + i, 1);
+        if (!ok) {
+            return false;
+        }
+    }
+    return lz_writer_write_cstr(writer, "\"");
+}
+
+/*
+ * Iterative, so an array nested a million levels deep cannot overflow the C
+ * stack. Strings inside an array are quoted; at the top level they are not.
+ */
+static bool write_array(const LzArray *root, const LzWriter *writer) {
+    size_t capacity = 16;
+    size_t depth = 0;
+    WriteFrame *frames = malloc(capacity * sizeof *frames);
+    if (frames == NULL) {
+        return false;
+    }
+    bool ok = lz_writer_write_cstr(writer, "[");
+    frames[depth++] = (WriteFrame){root, 0};
+
+    while (ok && depth > 0) {
+        WriteFrame *frame = &frames[depth - 1];
+        if (frame->next == frame->array->count) {
+            ok = lz_writer_write_cstr(writer, "]");
+            depth--;
+            continue;
+        }
+        const LzValue *item = &frame->array->items[frame->next];
+        if (frame->next > 0) {
+            ok = lz_writer_write_cstr(writer, ", ");
+        }
+        frame->next++;
+        if (!ok) {
+            break;
+        }
+        if (lz_value_is_array(item)) {
+            if (depth == capacity) {
+                WriteFrame *grown = realloc(frames, capacity * 2 * sizeof *frames);
+                if (grown == NULL) {
+                    ok = false;
+                    break;
+                }
+                frames = grown;
+                capacity *= 2;
+            }
+            frames[depth++] = (WriteFrame){lz_value_as_array(item), 0};
+            ok = lz_writer_write_cstr(writer, "[");
+        } else if (item->type == LZ_VAL_OBJECT && item->as.object->type == LZ_OBJ_STRING) {
+            ok = write_quoted((const LzString *)item->as.object, writer);
+        } else {
+            ok = lz_value_write(item, writer);
+        }
+    }
+    free(frames);
+    return ok;
+}
+
 static bool write_object(const LzObject *object, const LzWriter *writer) {
     switch (object->type) {
     case LZ_OBJ_STRING: {
         const LzString *string = (const LzString *)object;
         return lz_writer_write(writer, string->data, string->length);
     }
+    case LZ_OBJ_ARRAY:
+        return write_array((const LzArray *)object, writer);
     case LZ_OBJ_NATIVE: {
         const LzNative *native = (const LzNative *)object;
         return lz_writer_write_cstr(writer, "<native ") &&
@@ -135,6 +234,16 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
     case LZ_OBJ_NATIVE:
         lz_object_release(heap, &((LzNative *)object)->name->base);
         break;
+    case LZ_OBJ_ARRAY: {
+        LzArray *array = (LzArray *)object;
+        for (size_t i = 0; i < array->count; i++) {
+            lz_array_drop_holder(&array->items[i]);
+            lz_value_release(heap, &array->items[i]);
+        }
+        free(array->items);
+        lz_heap_uncharge(heap, array->capacity * sizeof(LzValue));
+        break;
+    }
     }
 }
 
@@ -208,7 +317,8 @@ static bool is_number_value(const LzValue *value) {
     return value->type == LZ_VAL_INT || value->type == LZ_VAL_FLOAT;
 }
 
-bool lz_value_equal(const LzValue *left, const LzValue *right) {
+/* Equality of everything but the contents of arrays (an array equals itself only). */
+static bool equal_leaf(const LzValue *left, const LzValue *right) {
     if (is_number_value(left) && is_number_value(right)) {
         return lz_number_order(left, right) == LZ_ORDER_EQUAL;
     }
@@ -240,6 +350,79 @@ bool lz_value_equal(const LzValue *left, const LzValue *right) {
         break;
     }
     return false;
+}
+
+typedef struct EqualFrame {
+    const LzArray *left;
+    const LzArray *right;
+    size_t next;
+} EqualFrame;
+
+bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *work) {
+    uint64_t budget = *work;
+    uint64_t used = 0;
+    *work = 0;
+
+    if (!lz_value_is_array(left) || !lz_value_is_array(right) ||
+        left->as.object == right->as.object) {
+        return equal_leaf(left, right);
+    }
+    if (lz_value_as_array(left)->count != lz_value_as_array(right)->count) {
+        return false;
+    }
+
+    size_t capacity = 16;
+    size_t depth = 0;
+    EqualFrame *frames = malloc(capacity * sizeof *frames);
+    if (frames == NULL) {
+        return false;
+    }
+    frames[depth++] = (EqualFrame){lz_value_as_array(left), lz_value_as_array(right), 0};
+
+    bool same = true;
+    while (same && depth > 0) {
+        EqualFrame *frame = &frames[depth - 1];
+        if (frame->next == frame->left->count) {
+            depth--;
+            continue;
+        }
+        const LzValue *a = &frame->left->items[frame->next];
+        const LzValue *b = &frame->right->items[frame->next];
+        frame->next++;
+        if (++used > budget) {
+            used = UINT64_MAX;
+            same = false;
+            break;
+        }
+        if (lz_value_is_array(a) && lz_value_is_array(b) && a->as.object != b->as.object) {
+            const LzArray *x = lz_value_as_array(a);
+            const LzArray *y = lz_value_as_array(b);
+            if (x->count != y->count) {
+                same = false;
+                break;
+            }
+            if (depth == capacity) {
+                EqualFrame *grown = realloc(frames, capacity * 2 * sizeof *frames);
+                if (grown == NULL) {
+                    same = false;
+                    break;
+                }
+                frames = grown;
+                capacity *= 2;
+            }
+            frames[depth++] = (EqualFrame){x, y, 0};
+        } else if (!equal_leaf(a, b)) {
+            same = false;
+        }
+    }
+    free(frames);
+    *work = used;
+    return same;
+}
+
+bool lz_value_equal(const LzValue *left, const LzValue *right) {
+    uint64_t work = UINT64_MAX;
+    return lz_value_equal_budget(left, right, &work);
 }
 
 bool lz_value_write(const LzValue *value, const LzWriter *writer) {

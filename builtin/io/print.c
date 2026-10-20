@@ -1,9 +1,14 @@
 #include "io/io.h"
 
+#include "lizard/array.h"
+
 /* Writing a long string is real work: one fuel unit per 64 bytes. */
 static LzStatus charge_for_string(LzVM *vm, const LzValue *value) {
     if (value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_STRING) {
         return lz_vm_charge_fuel(vm, ((const LzString *)value->as.object)->length / 64);
+    }
+    if (lz_value_is_array(value)) {
+        return lz_vm_charge_fuel(vm, lz_array_cost(lz_value_as_array(value)->count));
     }
     return LZ_OK;
 }

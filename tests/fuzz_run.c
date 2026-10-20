@@ -31,6 +31,7 @@ static void add_random_constant(LzVM *vm, LzChunk *chunk) {
     static const int64_t integers[] = {0, 1, -1, 2, 1000, INT64_MAX, INT64_MIN};
     static const double floats[] = {0.0, -0.0, 1.5, -2.5, NAN, INFINITY, 1e300};
     static const char *const names[] = {"println", "print", "x", "y", "missing"};
+    static const char *const natives[] = {"push", "pop", "insert", "remove", "sort", "join", "sum", "range", "len", "contains"};
 
     LzValue value = lz_value_nil();
     LzString *created = NULL;
@@ -59,7 +60,8 @@ static void add_random_constant(LzVM *vm, LzChunk *chunk) {
         value = lz_value_object(&created->base);
         break;
     case 6: {
-        LzString *println = lz_vm_intern(vm, "println", 7);
+        const char *native = below(2) == 0 ? "println" : natives[below(10)];
+        LzString *println = lz_vm_intern(vm, native, strlen(native));
         const LzValue *builtin = lz_vm_lookup(vm, println);
         value = builtin != NULL ? *builtin : lz_value_nil();
         break;
@@ -93,7 +95,7 @@ static void run_one(void) {
 
     uint32_t type_count = below(4);
     for (uint32_t i = 0; i < type_count; i++) {
-        LzType type = lz_type_of_kinds((uint16_t)below(64));
+        LzType type = lz_type_of_kinds((uint16_t)below(128));
         if (below(2) == 0) {
             LzLiteral literal = {.kind = LZ_VAL_INT, .as.integer = (int64_t)below(4)};
             (void)lz_type_add_literal(&type, &literal);
@@ -123,6 +125,7 @@ static void run_one(void) {
     lz_chunk_free(&vm.heap, &chunk);
     lz_vm_release_roots(&vm);
     LZ_CHECK(vm.heap.live_objects == 0);
+    LZ_CHECK(vm.heap.live_bytes == 0);
     lz_vm_free(&vm);
 }
 

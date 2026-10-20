@@ -35,6 +35,8 @@ static const char *const words[] = {
     "if x { }", "while x < 3 { x = x + 1 }", ":", "|", "?", "int", "string", "any", "type",
     "type T = int | nil", "let x: int? = nil", "let y: \"a\" | 1 = 1", "let z: T = nil",
     "x = \"s\"", "true", "-1", "never", "number", "(int | string)?",
+    "[", "]", "[1, 2]", "x[0]", "x[0] = 1", "x[1:]", "x[:2]", "let x: int[] = []", "push", "len",
+    "pop", "sort", "range(3)", "insert", "remove", "x + y", "[[]]", "let y: int[][] = [[1]]",
 };
 
 static void run_one(void) {

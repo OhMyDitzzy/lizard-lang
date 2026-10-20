@@ -16,6 +16,9 @@ struct LzVM {
     LzTable strings;
     LzTable globals;
     LzTable builtins;
+    LzType **array_types; /* interned item types of array types, see lz_vm_array_of */
+    size_t array_type_count;
+    size_t array_type_capacity;
     LzValue stack[LZ_STACK_MAX];
     size_t stack_count;
     uint64_t fuel;

@@ -2,12 +2,16 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     lz_heap_init(&vm->heap);
     lz_table_init(&vm->strings);
     lz_table_init(&vm->globals);
     lz_table_init(&vm->builtins);
+    vm->array_types = NULL;
+    vm->array_type_count = 0;
+    vm->array_type_capacity = 0;
     vm->stack_count = 0;
     vm->fuel = LZ_FUEL_UNLIMITED;
     vm->instructions = 0;
@@ -46,6 +50,13 @@ void lz_vm_release_roots(LzVM *vm) {
     lz_table_free(&vm->heap, &vm->builtins);
     lz_table_free(&vm->heap, &vm->globals);
     lz_table_free(&vm->heap, &vm->strings);
+    for (size_t i = 0; i < vm->array_type_count; i++) {
+        free(vm->array_types[i]);
+    }
+    free(vm->array_types);
+    vm->array_types = NULL;
+    vm->array_type_count = 0;
+    vm->array_type_capacity = 0;
 }
 
 void lz_vm_free(LzVM *vm) {

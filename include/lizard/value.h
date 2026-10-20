@@ -33,6 +33,25 @@ typedef struct LzString {
     char data[];
 } LzString;
 
+struct LzType;
+
+/*
+ * A growable list. `element` is the type every item must have, or NULL for any
+ * (an unannotated array). It is set when the array is stored under an annotated
+ * type such as `int[]`, and every later store is checked against it. Types
+ * pointed at here are owned by the VM (lz_vm_array_of).
+ */
+typedef struct LzArray {
+    LzObject base;
+    LzValue *items;
+    size_t count;
+    size_t capacity;
+    const struct LzType *element;
+    size_t holders;   /* how many array items currently hold this array */
+    uint32_t mark;    /* graph-walk stamp, see lz_heap_next_epoch */
+    bool has_arrays;  /* some item may be an array (never reset); lets walks skip flat arrays */
+} LzArray;
+
 typedef enum LzOrder {
     LZ_ORDER_LESS = -1,
     LZ_ORDER_EQUAL = 0,
@@ -71,7 +90,18 @@ LzOrder lz_number_order(const LzValue *left, const LzValue *right);
  */
 bool lz_value_equal(const LzValue *left, const LzValue *right);
 
-/* Writes the user-visible text form of a value. Returns false on an output error. */
+/*
+ * Same result as lz_value_equal, but arrays are compared by content with a
+ * work budget (one unit per item pair). *work is the budget on entry and the
+ * work done on exit; when the budget runs out the walk stops, returns false
+ * and sets *work to UINT64_MAX so the caller can report it.
+ */
+bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *work);
+
+/*
+ * Writes the user-visible text form of a value. Strings inside an array are
+ * quoted. Returns false on an output error (or out of memory for a deep array).
+ */
 bool lz_value_write(const LzValue *value, const LzWriter *writer);
 
 #endif

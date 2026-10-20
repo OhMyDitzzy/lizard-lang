@@ -144,6 +144,11 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_LESS_EQUAL:
     case LZ_OP_GREATER_EQUAL:
     case LZ_OP_NOT:
+    case LZ_OP_ARRAY_NEW:
+    case LZ_OP_ARRAY_PUSH:
+    case LZ_OP_INDEX:
+    case LZ_OP_SET_INDEX:
+    case LZ_OP_SLICE:
     case LZ_OP_RETURN:
         return simple_instruction(lz_opcode_name(opcode), offset, out);
     default:

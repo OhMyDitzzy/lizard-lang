@@ -1,5 +1,7 @@
 #include "lizard/memory.h"
 
+#include "lizard/array.h"
+
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,6 +15,9 @@ void lz_heap_init(LzHeap *heap) {
     heap->limit_bytes = LZ_HEAP_UNLIMITED;
     heap->limit_hit = false;
     heap->trace = false;
+    heap->pending = NULL;
+    heap->draining = false;
+    heap->epoch = 0;
 }
 
 void lz_heap_destroy(LzHeap *heap) {
@@ -22,6 +27,9 @@ void lz_heap_destroy(LzHeap *heap) {
         if (heap->trace) {
             fprintf(stderr, "[heap] leak  %p type=%d size=%zu refs=%u\n", (void *)object,
                     (int)object->type, object->size, (unsigned)object->refcount);
+        }
+        if (object->type == LZ_OBJ_ARRAY) {
+            free(((LzArray *)object)->items);
         }
         free(object);
         object = next;
@@ -71,6 +79,36 @@ void *lz_heap_alloc(LzHeap *heap, LzObjType type, size_t size) {
     return object;
 }
 
+bool lz_heap_charge(LzHeap *heap, size_t bytes) {
+    if (heap->live_bytes > heap->limit_bytes || bytes > heap->limit_bytes - heap->live_bytes) {
+        heap->limit_hit = true;
+        return false;
+    }
+    heap->live_bytes += bytes;
+    if (heap->live_bytes > heap->peak_bytes) {
+        heap->peak_bytes = heap->live_bytes;
+    }
+    return true;
+}
+
+void lz_heap_uncharge(LzHeap *heap, size_t bytes) {
+    assert(heap->live_bytes >= bytes);
+    heap->live_bytes -= bytes;
+}
+
+uint32_t lz_heap_next_epoch(LzHeap *heap) {
+    if (heap->epoch == UINT32_MAX) {
+        /* Wrapped: clear every stamp so an old mark cannot look current. */
+        for (LzObject *object = heap->head; object != NULL; object = object->next) {
+            if (object->type == LZ_OBJ_ARRAY) {
+                lz_array_clear_mark(object);
+            }
+        }
+        heap->epoch = 0;
+    }
+    return ++heap->epoch;
+}
+
 void lz_object_retain(LzObject *object) {
     assert(object->refcount > 0);
     object->refcount++;
@@ -98,6 +136,25 @@ void lz_object_release(LzHeap *heap, LzObject *object) {
         fprintf(stderr, "[heap] free  %p type=%d size=%zu\n", (void *)object, (int)object->type,
                 object->size);
     }
+
+    /*
+     * Finalizing a container releases its children. Done recursively, a deeply
+     * nested array would overflow the C stack, so a release that happens while
+     * another is finalizing is queued and the outermost call drains the queue.
+     */
+    if (heap->draining) {
+        object->next = heap->pending;
+        heap->pending = object;
+        return;
+    }
+    heap->draining = true;
     lz_object_finalize(heap, object);
     free(object);
+    while (heap->pending != NULL) {
+        LzObject *dead = heap->pending;
+        heap->pending = dead->next;
+        lz_object_finalize(heap, dead);
+        free(dead);
+    }
+    heap->draining = false;
 }
