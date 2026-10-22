@@ -1,0 +1,59 @@
+# Functions: parameters, types, defaults, named arguments, variadics, closures.
+
+fn square(x) { return x * x }
+println(square(7))
+
+# Optional type annotations on parameters and on the return value.
+fn area(w: float, h: float = 1.0) -> float { return w * h }
+println(area(3.0), area(3.0, 2.5))
+
+# Named arguments, in any order.
+fn box(w, h = 2, d = 3) { return [w, h, d] }
+println(box(1), box(1, d = 9), box(d = 5, w = 4))
+
+# A rest parameter collects the surplus; * spreads an array into arguments.
+fn sum(*xs) {
+  let t = 0
+  let i = 0
+  while i < len(xs) {
+    t = t + xs[i]
+    i = i + 1
+  }
+  return t
+}
+let nums = [1, 2, 3]
+println(sum(), sum(10, 20), sum(*nums, 4))
+
+# Recursion, and functions that call each other regardless of order.
+fn fact(n) {
+  if n <= 1 { return 1 }
+  return n * fact(n - 1)
+}
+fn is_even(n) {
+  if n == 0 { return true }
+  return is_odd(n - 1)
+}
+fn is_odd(n) {
+  if n == 0 { return false }
+  return is_even(n - 1)
+}
+println(fact(10), is_even(10), is_odd(7))
+
+# Closures keep the variables they use alive.
+fn counter() {
+  let c = 0
+  fn next() {
+    c = c + 1
+    return c
+  }
+  return next
+}
+let a = counter()
+let b = counter()
+a()
+a()
+println(a(), b())
+
+# Functions are values: pass them around, or write them without a name.
+fn twice(f, x) { return f(f(x)) }
+println(twice(fn(n) { return n * 3 }, 2))

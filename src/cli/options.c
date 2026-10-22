@@ -16,6 +16,17 @@ static const char *option_value(const char *arg, const char *name) {
     return NULL;
 }
 
+static const char *const engine_names[] = {"ref", "reference", "ge", "gecko"};
+
+static bool is_engine_name(const char *text) {
+    for (size_t i = 0; i < sizeof engine_names / sizeof engine_names[0]; i++) {
+        if (strcmp(text, engine_names[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Plain decimal digits, optionally followed by one K, M or G (powers of 1024). */
 static bool parse_count(const char *text, bool allow_suffix, uint64_t *out) {
     if (*text < '0' || *text > '9') {
@@ -87,6 +98,17 @@ bool lz_options_parse(LzOptions *options, int argc, char **argv) {
             options->trace_memory = true;
         } else if (strcmp(arg, "--dump-tokens") == 0) {
             options->dump_tokens = true;
+        } else if (strcmp(arg, "--engine-stats") == 0) {
+            options->engine_stats = true;
+        } else if (option_value(arg, "--engine") != NULL) {
+            const char *name = option_value(arg, "--engine");
+            if (!is_engine_name(name)) {
+                (void)snprintf(options->error, sizeof options->error,
+                               "invalid value for --engine: '%.40s' (expected ge or ref)", name);
+                return false;
+            }
+            options->has_engine = true;
+            (void)snprintf(options->engine, sizeof options->engine, "%s", name);
         } else if (option_value(arg, "--max-heap") != NULL) {
             uint64_t bytes;
             if (!parse_count(option_value(arg, "--max-heap"), true, &bytes) || bytes > SIZE_MAX) {

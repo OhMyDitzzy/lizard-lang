@@ -6,7 +6,10 @@
 typedef enum LzObjType {
     LZ_OBJ_STRING,
     LZ_OBJ_NATIVE,
-    LZ_OBJ_ARRAY
+    LZ_OBJ_ARRAY,
+    LZ_OBJ_FUNCTION, /* the compiled code of a user function; never a value of its own */
+    LZ_OBJ_CLOSURE,  /* a callable user function: a function plus the variables it captured */
+    LZ_OBJ_UPVALUE   /* a variable shared between a function and the closures that captured it */
 } LzObjType;
 
 /*

@@ -1,0 +1,17 @@
+# A loop of calls to small functions: default argument, typed arguments, a closure.
+fn add(a: int, b: int = 1) -> int { return a + b }
+fn make() {
+  let c = 0
+  fn tick() { c = c + 1
+    return c }
+  return tick
+}
+let tick = make()
+let i = 0
+let s = 0
+while i < 2000000 {
+  s = add(s, 2) + add(i) - add(i)
+  tick()
+  i = i + 1
+}
+println(s, tick())

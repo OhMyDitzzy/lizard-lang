@@ -5,6 +5,29 @@ function(lz_add_test name)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
+# Tests of the Gecko Engine link it as well.
+function(lz_add_engine_test name)
+    add_executable(${name} ${name}.c)
+    target_link_libraries(${name} PRIVATE lizard_engine lizard_frontend lizard_builtin lizard_core)
+    lz_enable_warnings(${name})
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+# The same test sources again, with every call to the reference interpreter routed
+# through the Gecko Engine (engine_redirect.h): the existing suite becomes a
+# conformance test for GE, with the same assertions and expected results.
+function(lz_add_ge_variant name)
+    add_executable(${name}_ge ${name}.c)
+    target_link_libraries(${name}_ge PRIVATE lizard_engine lizard_frontend lizard_builtin lizard_core)
+    if(MSVC)
+        target_compile_options(${name}_ge PRIVATE /FI${CMAKE_CURRENT_SOURCE_DIR}/engine_redirect.h)
+    else()
+        target_compile_options(${name}_ge PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/engine_redirect.h)
+    endif()
+    lz_enable_warnings(${name}_ge)
+    add_test(NAME ${name}_ge COMMAND ${name}_ge)
+endfunction()
+
 lz_add_test(test_memory)
 lz_add_test(test_table)
 lz_add_test(test_native)
@@ -29,3 +52,13 @@ target_include_directories(test_options PRIVATE ${PROJECT_SOURCE_DIR}/src/cli)
 lz_enable_warnings(test_options)
 add_test(NAME test_options COMMAND test_options)
 lz_add_test(test_print)
+
+lz_add_engine_test(test_engine)
+lz_add_engine_test(fuzz_engine)
+
+lz_add_ge_variant(test_run)
+lz_add_ge_variant(test_limits)
+lz_add_ge_variant(test_array)
+lz_add_ge_variant(test_compiler)
+lz_add_ge_variant(fuzz_run)
+lz_add_ge_variant(fuzz_compile)

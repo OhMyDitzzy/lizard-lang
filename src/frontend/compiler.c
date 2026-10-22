@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "lizard/array.h"
+#include "lizard/function.h"
 #include "lizard/lexer.h"
 #include "lizard/native.h"
 #include "lizard/type.h"
@@ -21,6 +22,25 @@ typedef enum SymbolKind {
     SYMBOL_CONSTANT  /* const folded at compile time: no storage, uses emit the value */
 } SymbolKind;
 
+struct FuncState;
+
+/*
+ * What the compiler knows about a declared function: enough to check a call of it
+ * at compile time (argument count, names, types) and to type its result.
+ */
+typedef struct FuncSig {
+    struct FuncSig *next; /* every signature is freed together when compilation ends */
+    LzString *fname;      /* NULL for an anonymous function */
+    uint16_t param_count;
+    uint16_t required;
+    bool has_rest;
+    LzType result; /* the declared result type, or any */
+    bool result_declared;
+    LzType rest_item; /* type of each surplus argument */
+    LzString *names[LZ_MAX_PARAMS + 1];
+    LzType types[LZ_MAX_PARAMS];
+} FuncSig;
+
 typedef struct Symbol {
     LzString *name;
     int depth;
@@ -29,6 +49,10 @@ typedef struct Symbol {
     uint16_t slot;
     LzValue value;
     LzType type; /* declared type, or the exact type of a folded const */
+    struct FuncState *owner; /* the function whose frame holds a local */
+    bool captured;           /* a closure captured this local: closing its scope must close upvalues */
+    bool pending;            /* a top-level `fn` seen ahead of its declaration */
+    const FuncSig *sig;      /* set for a declared function: calls of it are checked */
 } Symbol;
 
 #define LZ_MAX_ALIASES 64
@@ -53,6 +77,24 @@ typedef struct ConstantIndex {
     size_t used;     /* occupied slots */
 } ConstantIndex;
 
+/*
+ * The function being compiled. The parser's chunk, constant index and local count
+ * always belong to the innermost one; the enclosing function's are parked here.
+ */
+typedef struct FuncState {
+    struct FuncState *enclosing;
+    LzFunction *function; /* NULL for the top-level script */
+    size_t first_symbol;  /* symbols from here on belong to this function */
+    size_t self_symbol;   /* the symbol of a `fn name` declared in the enclosing scope, or SIZE_MAX */
+    const FuncSig *sig;
+    LzUpvalueDesc upvalues[LZ_MAX_UPVALUES];
+    size_t upvalue_count;
+    LzChunk *saved_chunk;
+    ConstantIndex saved_constants;
+    size_t saved_local_count;
+    bool saved_terminated;
+} FuncState;
+
 typedef struct Parser {
     LzVM *vm;
     const LzSource *source;
@@ -71,6 +113,9 @@ typedef struct Parser {
     ConstantIndex constants;
     Alias aliases[LZ_MAX_ALIASES];
     size_t alias_count;
+    FuncState *fs;      /* innermost function being compiled */
+    FuncSig *sigs;      /* every signature made so far */
+    bool terminated;    /* the statement just compiled never falls through (return, ...) */
 } Parser;
 
 typedef enum Precedence {
@@ -93,6 +138,7 @@ typedef enum Precedence {
 typedef struct Expr {
     LzType type;
     const LzNative *native;
+    const FuncSig *sig; /* the expression is a direct reference to a declared function */
     bool is_index;  /* the expression is `a[i]` and its last instruction is OP_INDEX... */
     size_t op_pos;  /* ...at this code offset, so a following '=' can turn it into OP_SET_INDEX */
 } Expr;
@@ -108,6 +154,9 @@ typedef struct ParseRule {
 
 static Expr expression(Parser *parser);
 static void declaration(Parser *parser);
+static LzTokenType next_token_type(const Parser *parser);
+static void end_statement(Parser *parser);
+static Expr function_expression(Parser *parser);
 static Expr parse_precedence(Parser *parser, Precedence precedence);
 
 /* Diagnostics */
@@ -497,6 +546,10 @@ static Symbol *add_symbol(Parser *parser, const LzToken *token, LzString *name, 
     symbol->slot = kind == SYMBOL_LOCAL ? (uint16_t)parser->local_count++ : 0;
     symbol->value = value;
     symbol->type = *type;
+    symbol->owner = parser->fs;
+    symbol->captured = false;
+    symbol->pending = false;
+    symbol->sig = NULL;
     return symbol;
 }
 
@@ -510,7 +563,7 @@ static void end_scope(Parser *parser) {
            parser->symbols[parser->symbol_count - 1].depth == parser->scope_depth) {
         Symbol *symbol = &parser->symbols[--parser->symbol_count];
         if (symbol->kind == SYMBOL_LOCAL) {
-            emit_op_at(parser, LZ_OP_POP, offset);
+            emit_op_at(parser, symbol->captured ? LZ_OP_CLOSE_UPVALUE : LZ_OP_POP, offset);
             parser->local_count--;
         } else if (symbol->kind == SYMBOL_CONSTANT) {
             lz_value_release(&parser->vm->heap, &symbol->value);
@@ -529,6 +582,7 @@ static Expr expr_of(LzType type) {
     Expr expr;
     expr.type = type;
     expr.native = NULL;
+    expr.sig = NULL;
     expr.is_index = false;
     expr.op_pos = 0;
     return expr;
@@ -592,8 +646,8 @@ static void error_operator(Parser *parser, const LzToken *op, const LzType *left
  * always fits needs nothing, one that never fits is a compile error, and one
  * that might fit (any, a union, a wider type) gets a run-time check.
  */
-static void check_assignment(Parser *parser, const LzType *from, const LzType *to,
-                             const LzToken *start, uint32_t offset) {
+static void check_flow(Parser *parser, const LzType *from, const LzType *to, const LzToken *start,
+                       uint32_t offset, LzOpCode check_op, const char *mismatch) {
     switch (lz_type_assignable(from, to)) {
     case LZ_ASSIGN_ALWAYS:
         /*
@@ -607,7 +661,7 @@ static void check_assignment(Parser *parser, const LzType *from, const LzType *t
         break;
     case LZ_ASSIGN_NEVER: {
         LzToken span = span_from(parser, start);
-        error_types(parser, &span, "type mismatch: expected ", to, ", got ", from);
+        error_types(parser, &span, mismatch, to, ", got ", from);
         return;
     }
     case LZ_ASSIGN_MAYBE:
@@ -623,8 +677,13 @@ static void check_assignment(Parser *parser, const LzType *from, const LzType *t
         }
         return;
     }
-    emit_op_at(parser, LZ_OP_CHECK_TYPE, offset);
+    emit_op_at(parser, check_op, offset);
     emit_u16_at(parser, index, offset);
+}
+
+static void check_assignment(Parser *parser, const LzType *from, const LzType *to,
+                             const LzToken *start, uint32_t offset) {
+    check_flow(parser, from, to, start, offset, LZ_OP_CHECK_TYPE, "type mismatch: expected ");
 }
 
 static Expr union_expr(Expr left, Expr right) {
@@ -669,6 +728,8 @@ static bool builtin_type(const char *name, LzType *out) {
         *out = lz_type_of_kinds(LZ_KINDS_ANY);
     } else if (strcmp(name, "never") == 0) {
         *out = lz_type_of_kinds(0);
+    } else if (strcmp(name, "function") == 0) {
+        *out = lz_type_of_kinds(LZ_KIND_FUNCTION);
     } else {
         return false;
     }
@@ -723,6 +784,14 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
     case LZ_TOKEN_NIL:
         advance(parser);
         *out = lz_type_of_kinds(LZ_KIND_NIL);
+        return true;
+    case LZ_TOKEN_FN:
+        advance(parser);
+        if (check(parser, LZ_TOKEN_LEFT_PAREN)) {
+            error_at_current(parser, "function types with a signature are not supported yet; write 'fn'");
+            return false;
+        }
+        *out = lz_type_of_kinds(LZ_KIND_FUNCTION);
         return true;
     case LZ_TOKEN_TRUE:
     case LZ_TOKEN_FALSE: {
@@ -898,6 +967,36 @@ static Expr grouping(Parser *parser) {
     return inner;
 }
 
+static int add_upvalue(Parser *parser, FuncState *fs, uint16_t index, bool is_local) {
+    for (size_t i = 0; i < fs->upvalue_count; i++) {
+        if (fs->upvalues[i].index == index && fs->upvalues[i].is_local == is_local) {
+            return (int)i;
+        }
+    }
+    if (fs->upvalue_count >= LZ_MAX_UPVALUES) {
+        error_at_previous(parser, "too many variables captured by one function");
+        return -1;
+    }
+    fs->upvalues[fs->upvalue_count] = (LzUpvalueDesc){index, is_local};
+    return (int)fs->upvalue_count++;
+}
+
+/*
+ * The index of the upvalue through which fs reaches a local of an enclosing
+ * function, creating it (and one in every function in between). -1 after an error.
+ */
+static int resolve_upvalue(Parser *parser, FuncState *fs, Symbol *symbol) {
+    if (symbol->owner == fs->enclosing) {
+        symbol->captured = true;
+        return add_upvalue(parser, fs, symbol->slot, true);
+    }
+    if (fs->enclosing == NULL) {
+        return -1;
+    }
+    int outer = resolve_upvalue(parser, fs->enclosing, symbol);
+    return outer < 0 ? -1 : add_upvalue(parser, fs, (uint16_t)outer, false);
+}
+
 static Expr variable(Parser *parser) {
     LzToken token = parser->previous;
     LzString *name = intern_token(parser, &token);
@@ -909,8 +1008,18 @@ static Expr variable(Parser *parser) {
     if (symbol != NULL) {
         switch (symbol->kind) {
         case SYMBOL_LOCAL:
-            emit_op_at(parser, LZ_OP_GET_LOCAL, token.offset);
-            emit_u16_at(parser, symbol->slot, token.offset);
+            if (symbol->owner == parser->fs) {
+                emit_op_at(parser, LZ_OP_GET_LOCAL, token.offset);
+                emit_u16_at(parser, symbol->slot, token.offset);
+            } else if (parser->fs->self_symbol != SIZE_MAX &&
+                       symbol == &parser->symbols[parser->fs->self_symbol]) {
+                /* A local function calling itself: no capture, so no reference cycle. */
+                emit_op_at(parser, LZ_OP_GET_SELF, token.offset);
+            } else {
+                int index = resolve_upvalue(parser, parser->fs, symbol);
+                emit_op_at(parser, LZ_OP_GET_UPVALUE, token.offset);
+                emit_u16_at(parser, (uint16_t)(index < 0 ? 0 : index), token.offset);
+            }
             break;
         case SYMBOL_GLOBAL:
             emit_named(parser, LZ_OP_GET_GLOBAL, name, token.offset);
@@ -919,7 +1028,9 @@ static Expr variable(Parser *parser) {
             emit_constant(parser, symbol->value);
             break;
         }
-        return expr_of(symbol->type);
+        Expr found = expr_of(symbol->type);
+        found.sig = symbol->sig;
+        return found;
     }
 
     const LzValue *defined = lz_vm_lookup(parser->vm, name);
@@ -1070,6 +1181,8 @@ static ParseRule rule_for(LzTokenType type) {
         return (ParseRule){grouping, call, PREC_CALL};
     case LZ_TOKEN_LEFT_BRACKET:
         return (ParseRule){array_literal, subscript, PREC_CALL};
+    case LZ_TOKEN_FN:
+        return (ParseRule){function_expression, NULL, PREC_NONE};
     case LZ_TOKEN_BANG:
         return (ParseRule){unary, NULL, PREC_NONE};
     case LZ_TOKEN_MINUS:
@@ -1238,6 +1351,235 @@ static Expr binary(Parser *parser, Expr left) {
     return expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
 }
 
+static bool is_any_type(const LzType *type) {
+    return type->kinds == LZ_KINDS_ANY && type->literal_count == 0 && type->element == NULL;
+}
+
+/* Is the argument list that starts at the current token one with `*spread` or `name = value`? */
+static bool call_has_special_args(const Parser *parser) {
+    LzLexer ahead = parser->lexer;
+    LzToken token = parser->current;
+    int depth = 0;
+    bool at_start = true;
+    for (;;) {
+        if (token.type == LZ_TOKEN_EOF) {
+            return false;
+        }
+        if (depth == 0) {
+            if (token.type == LZ_TOKEN_RIGHT_PAREN) {
+                return false;
+            }
+            if (at_start) {
+                if (token.type == LZ_TOKEN_STAR) {
+                    return true;
+                }
+                if (token.type == LZ_TOKEN_IDENTIFIER) {
+                    LzLexer peek = ahead;
+                    if (lz_lexer_next(&peek).type == LZ_TOKEN_EQUAL) {
+                        return true;
+                    }
+                }
+            }
+            at_start = token.type == LZ_TOKEN_COMMA;
+        }
+        if (token.type == LZ_TOKEN_LEFT_PAREN || token.type == LZ_TOKEN_LEFT_BRACKET ||
+            token.type == LZ_TOKEN_LEFT_BRACE) {
+            depth++;
+        } else if (token.type == LZ_TOKEN_RIGHT_PAREN || token.type == LZ_TOKEN_RIGHT_BRACKET ||
+                   token.type == LZ_TOKEN_RIGHT_BRACE) {
+            if (depth == 0) {
+                return false;
+            }
+            depth--;
+        }
+        token = lz_lexer_next(&ahead);
+    }
+}
+
+static const char *sig_name(const FuncSig *sig) {
+    return sig->fname != NULL ? sig->fname->data : "<fn>";
+}
+
+/* A statically known callee: does the argument fit the parameter it lands in? */
+static void check_argument(Parser *parser, const FuncSig *sig, size_t index, const Expr *arg,
+                           const LzToken *start) {
+    if (sig == NULL) {
+        return;
+    }
+    const LzType *expected;
+    const char *name;
+    if (index < sig->param_count) {
+        expected = &sig->types[index];
+        name = sig->names[index]->data;
+    } else if (sig->has_rest) {
+        expected = &sig->rest_item;
+        name = sig->names[sig->param_count]->data;
+    } else {
+        return;
+    }
+    if (lz_type_assignable(&arg->type, expected) == LZ_ASSIGN_NEVER) {
+        LzToken span = span_from(parser, start);
+        char prefix[128];
+        (void)snprintf(prefix, sizeof prefix, "type mismatch: argument '%s' of %s() expects ", name,
+                       sig_name(sig));
+        error_types(parser, &span, prefix, expected, ", got ", &arg->type);
+    }
+}
+
+static void check_arity(Parser *parser, const FuncSig *sig, size_t given, const LzToken *at) {
+    if (sig == NULL || (given >= sig->required && (given <= sig->param_count || sig->has_rest))) {
+        return;
+    }
+    char message[160];
+    if (given < sig->required) {
+        (void)snprintf(message, sizeof message, "%s() expects %s%u argument%s, got %zu", sig_name(sig),
+                       sig->has_rest || sig->required != sig->param_count ? "at least " : "",
+                       (unsigned)sig->required, sig->required == 1 ? "" : "s", given);
+    } else {
+        (void)snprintf(message, sizeof message, "%s() expects %s%u argument%s, got %zu", sig_name(sig),
+                       sig->required != sig->param_count ? "at most " : "", (unsigned)sig->param_count,
+                       sig->param_count == 1 ? "" : "s", given);
+    }
+    error_at(parser, at, message);
+}
+
+static Expr call_result(Expr callee) {
+    if (callee.native != NULL) {
+        return expr_of(lz_type_of_kinds(callee.native->result_kinds));
+    }
+    if (callee.sig != NULL) {
+        return expr_of(callee.sig->result);
+    }
+    return any_expr();
+}
+
+/*
+ * A call with `*spread` or `name = value` arguments. The positional arguments are
+ * collected into one array (the callee spreads it again on entry), and the named
+ * values stay on the stack after it:
+ *     [callee] [array of positional arguments] [named values...]  OP_CALL_EX
+ */
+static Expr call_special(Parser *parser, Expr callee, const LzToken *paren) {
+    uint32_t offset = paren->offset;
+    const FuncSig *sig = callee.sig;
+    emit_op_at(parser, LZ_OP_ARRAY_NEW, offset);
+
+    LzBuffer names = {0};
+    LzWriter names_out = lz_writer_from_buffer(&names);
+    LzString *seen[LZ_MAX_ARGUMENTS];
+    size_t named = 0;
+    size_t positional = 0;
+    bool spread = false;
+
+    if (!check(parser, LZ_TOKEN_RIGHT_PAREN)) {
+        do {
+            if (check(parser, LZ_TOKEN_RIGHT_PAREN)) {
+                break;
+            }
+            if (match(parser, LZ_TOKEN_STAR)) {
+                if (named > 0) {
+                    error_at_previous(parser, "a positional argument cannot follow a named one");
+                }
+                LzToken start = parser->current;
+                Expr list = expression(parser);
+                if ((lz_type_possible_kinds(&list.type) & LZ_KIND_ARRAY) == 0) {
+                    LzToken span = span_from(parser, &start);
+                    error_types(parser, &span, "cannot spread a value of type ", &list.type, "", NULL);
+                }
+                emit_op_at(parser, LZ_OP_ARRAY_EXTEND, offset);
+                spread = true;
+            } else if (check(parser, LZ_TOKEN_IDENTIFIER) && next_token_type(parser) == LZ_TOKEN_EQUAL) {
+                advance(parser);
+                LzToken name_token = parser->previous;
+                LzString *name = intern_token(parser, &name_token);
+                advance(parser); /* the '=' */
+                skip_newlines(parser);
+                for (size_t i = 0; name != NULL && i < named; i++) {
+                    if (seen[i] == name) {
+                        error_with_name(parser, &name_token, "argument '", "' is given twice");
+                    }
+                }
+                if (callee.native != NULL) {
+                    error_at(parser, &name_token, "builtin functions do not take named arguments");
+                } else if (sig != NULL && name != NULL) {
+                    size_t index = 0;
+                    while (index < sig->param_count && sig->names[index] != name) {
+                        index++;
+                    }
+                    if (index == sig->param_count) {
+                        error_with_name(parser, &name_token, "unexpected named argument '", "'");
+                    } else if (index < positional && !spread) {
+                        error_with_name(parser, &name_token, "argument '", "' is already given by position");
+                    }
+                }
+                LzToken start = parser->current;
+                Expr value = expression(parser);
+                if (sig != NULL && name != NULL) {
+                    for (size_t index = 0; index < sig->param_count; index++) {
+                        if (sig->names[index] == name) {
+                            check_argument(parser, sig, index, &value, &start);
+                        }
+                    }
+                }
+                if (named >= LZ_MAX_ARGUMENTS) {
+                    error_at_previous(parser, "too many named arguments");
+                } else if (name != NULL) {
+                    seen[named] = name;
+                    if (named > 0) {
+                        (void)lz_writer_write(&names_out, "\0", 1);
+                    }
+                    (void)lz_writer_write(&names_out, name->data, name->length);
+                    named++;
+                }
+            } else {
+                if (named > 0) {
+                    error_at_current(parser, "a positional argument cannot follow a named one");
+                }
+                LzToken start = parser->current;
+                Expr value = expression(parser);
+                check_argument(parser, sig, positional, &value, &start);
+                emit_op_at(parser, LZ_OP_ARRAY_PUSH, offset);
+                positional++;
+            }
+        } while (match(parser, LZ_TOKEN_COMMA));
+    }
+    consume(parser, LZ_TOKEN_RIGHT_PAREN, "expected ')' after arguments");
+
+    if (sig != NULL && !spread) {
+        check_arity(parser, sig, positional + named, paren);
+        for (size_t i = positional; i < sig->required; i++) {
+            bool given = false;
+            for (size_t k = 0; k < named; k++) {
+                given = given || seen[k] == sig->names[i];
+            }
+            if (!given && positional + named >= sig->required) {
+                char message[96];
+                (void)snprintf(message, sizeof message, "%s() is missing argument '%s'", sig_name(sig),
+                               sig->names[i]->data);
+                error_at(parser, paren, message);
+                break;
+            }
+        }
+    }
+
+    uint16_t names_index = 0;
+    if (named > 0) {
+        LzString *text = lz_string_new(&parser->vm->heap, names.data, names.length);
+        if (text == NULL) {
+            fail(parser, lz_vm_out_of_memory(parser->vm));
+        } else {
+            names_index = make_constant(parser, lz_value_object(&text->base));
+            lz_object_release(&parser->vm->heap, &text->base);
+        }
+    }
+    lz_buffer_free(&names);
+
+    emit_op_at(parser, LZ_OP_CALL_EX, offset);
+    emit_byte_at(parser, (uint8_t)named, offset);
+    emit_u16_at(parser, names_index, offset);
+    return call_result(callee);
+}
+
 static Expr call(Parser *parser, Expr callee) {
     LzToken paren = parser->previous;
     uint32_t offset = paren.offset;
@@ -1246,13 +1588,18 @@ static Expr call(Parser *parser, Expr callee) {
     if ((lz_type_possible_kinds(&callee.type) & LZ_KIND_FUNCTION) == 0) {
         error_types(parser, &paren, "cannot call a value of type ", &callee.type, "", NULL);
     }
+    if (call_has_special_args(parser)) {
+        return call_special(parser, callee, &paren);
+    }
 
     if (!check(parser, LZ_TOKEN_RIGHT_PAREN)) {
         do {
             if (check(parser, LZ_TOKEN_RIGHT_PAREN)) {
                 break;
             }
-            (void)expression(parser);
+            LzToken start = parser->current;
+            Expr arg = expression(parser);
+            check_argument(parser, callee.sig, count, &arg, &start);
             if (++count > LZ_MAX_ARGUMENTS) {
                 error_at_previous(parser, "too many arguments");
                 count = LZ_MAX_ARGUMENTS;
@@ -1260,14 +1607,11 @@ static Expr call(Parser *parser, Expr callee) {
         } while (match(parser, LZ_TOKEN_COMMA));
     }
     consume(parser, LZ_TOKEN_RIGHT_PAREN, "expected ')' after arguments");
+    check_arity(parser, callee.sig, count, &paren);
 
     emit_op_at(parser, LZ_OP_CALL, offset);
     emit_byte_at(parser, (uint8_t)count, offset);
-
-    if (callee.native != NULL) {
-        return expr_of(lz_type_of_kinds(callee.native->result_kinds));
-    }
-    return any_expr();
+    return call_result(callee);
 }
 
 static Expr and_(Parser *parser, Expr left) {
@@ -1499,7 +1843,11 @@ static void assignment_statement(Parser *parser) {
         error_with_name(parser, &name_token, "cannot assign to constant '", "'");
     } else {
         check_assignment(parser, &value.type, &symbol->type, &value_start, name_token.offset);
-        if (symbol->kind == SYMBOL_LOCAL) {
+        if (symbol->kind == SYMBOL_LOCAL && symbol->owner != parser->fs) {
+            int index = resolve_upvalue(parser, parser->fs, symbol);
+            emit_op_at(parser, LZ_OP_SET_UPVALUE, name_token.offset);
+            emit_u16_at(parser, (uint16_t)(index < 0 ? 0 : index), name_token.offset);
+        } else if (symbol->kind == SYMBOL_LOCAL) {
             emit_op_at(parser, LZ_OP_SET_LOCAL, name_token.offset);
             emit_u16_at(parser, symbol->slot, name_token.offset);
         } else {
@@ -1565,13 +1913,16 @@ static void block(Parser *parser) {
     parser->nesting++;
     consume(parser, LZ_TOKEN_LEFT_BRACE, "expected '{'");
     begin_scope(parser);
+    bool returns = false;
     while (!check(parser, LZ_TOKEN_RIGHT_BRACE) && !check(parser, LZ_TOKEN_EOF) &&
            parser->fatal == LZ_OK) {
         declaration(parser);
+        returns = returns || parser->terminated;
     }
     consume(parser, LZ_TOKEN_RIGHT_BRACE, "expected '}' after block");
     end_scope(parser);
     parser->nesting--;
+    parser->terminated = returns;
 }
 
 /*
@@ -1583,6 +1934,8 @@ static void if_statement(Parser *parser) {
     size_t *end_jumps = NULL;
     size_t end_count = 0;
     size_t end_capacity = 0;
+    bool all_return = true; /* every branch ends in a return, and there is an else */
+    bool has_else = false;
 
     for (;;) {
         /* previous is this branch's "if", so each branch's jumps point at their own line. */
@@ -1596,6 +1949,7 @@ static void if_statement(Parser *parser) {
         size_t then_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
         emit_op_at(parser, LZ_OP_POP, offset);
         block(parser);
+        all_return = all_return && parser->terminated;
 
         if (end_count == end_capacity) {
             size_t capacity = end_capacity != 0 ? end_capacity * 2 : 4;
@@ -1620,6 +1974,8 @@ static void if_statement(Parser *parser) {
         }
         if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
             block(parser);
+            has_else = true;
+            all_return = all_return && parser->terminated;
         } else {
             error_at_current(parser, "expected '{' or 'if' after 'else'");
         }
@@ -1630,11 +1986,14 @@ static void if_statement(Parser *parser) {
         patch_jump(parser, end_jumps[i]);
     }
     free(end_jumps);
+    parser->terminated = has_else && all_return;
 }
 
 static void while_statement(Parser *parser) {
     uint32_t offset = parser->previous.offset;
     size_t loop_start = parser->chunk->count;
+    /* `while true { ... }` has no way out but a return, so nothing after it is reachable. */
+    bool forever = check(parser, LZ_TOKEN_TRUE) && next_token_type(parser) == LZ_TOKEN_LEFT_BRACE;
     (void)expression(parser);
     if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
         error_at_current(parser, "expected '{' after condition");
@@ -1647,6 +2006,7 @@ static void while_statement(Parser *parser) {
     emit_loop(parser, loop_start, offset);
     patch_jump(parser, exit_jump);
     emit_op_at(parser, LZ_OP_POP, offset);
+    parser->terminated = forever;
 }
 
 static LzTokenType next_token_type(const Parser *parser) {
@@ -1682,6 +2042,362 @@ static void expression_statement(Parser *parser) {
     end_statement(parser);
 }
 
+/* Functions */
+
+static FuncSig *new_sig(Parser *parser, LzString *name) {
+    FuncSig *sig = calloc(1, sizeof *sig);
+    if (sig == NULL) {
+        fail(parser, LZ_ERR_MEMORY);
+        return NULL;
+    }
+    sig->next = parser->sigs;
+    parser->sigs = sig;
+    sig->fname = name;
+    sig->result = lz_type_of_kinds(LZ_KINDS_ANY);
+    sig->rest_item = lz_type_of_kinds(LZ_KINDS_ANY);
+    for (size_t i = 0; i < LZ_MAX_PARAMS; i++) {
+        sig->types[i] = lz_type_of_kinds(LZ_KINDS_ANY);
+    }
+    return sig;
+}
+
+typedef struct ParamCheck {
+    uint16_t slot;
+    LzType type;
+} ParamCheck;
+
+/*
+ * Compiles `( params ) [-> type] { body }` into a new function and emits the code that
+ * creates it in the enclosing function. `self` is the symbol of a `fn name` (so the
+ * body can call itself and its signature can be attached), or SIZE_MAX.
+ */
+static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32_t offset) {
+    Expr result = expr_of(lz_type_of_kinds(LZ_KIND_FUNCTION));
+    LzHeap *heap = &parser->vm->heap;
+    if (parser->nesting >= LZ_MAX_NESTING) {
+        error_at_current(parser, "functions nested too deeply");
+        return result;
+    }
+    LzFunction *function = lz_function_new(heap, name);
+    FuncSig *sig = function != NULL ? new_sig(parser, name) : NULL;
+    if (function == NULL || sig == NULL) {
+        if (function != NULL) {
+            lz_object_release(heap, &function->base);
+        } else {
+            fail(parser, lz_vm_out_of_memory(parser->vm));
+        }
+        return result;
+    }
+    function->offset = offset;
+
+    FuncState fs;
+    fs.enclosing = parser->fs;
+    fs.function = function;
+    fs.first_symbol = parser->symbol_count;
+    fs.self_symbol = self;
+    fs.sig = sig;
+    fs.upvalue_count = 0;
+    fs.saved_chunk = parser->chunk;
+    fs.saved_constants = parser->constants;
+    fs.saved_local_count = parser->local_count;
+    fs.saved_terminated = parser->terminated;
+    parser->chunk = &function->chunk;
+    memset(&parser->constants, 0, sizeof parser->constants);
+    parser->local_count = 0;
+    parser->fs = &fs;
+    parser->nesting++;
+    begin_scope(parser);
+
+    /* Parameters */
+    LzString *names[LZ_MAX_PARAMS + 1];
+    ParamCheck checks[LZ_MAX_PARAMS + 1];
+    size_t check_count = 0;
+    size_t param_count = 0;
+    size_t required = 0;
+    bool has_rest = false;
+    bool seen_default = false;
+
+    consume(parser, LZ_TOKEN_LEFT_PAREN, "expected '(' after 'fn'");
+    if (!check(parser, LZ_TOKEN_RIGHT_PAREN) && !parser->panic) {
+        do {
+            if (check(parser, LZ_TOKEN_RIGHT_PAREN)) {
+                break; /* trailing comma */
+            }
+            if (has_rest) {
+                error_at_current(parser, "the rest parameter must be the last one");
+                break;
+            }
+            bool rest = match(parser, LZ_TOKEN_STAR);
+            if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+                error_at_current(parser, "expected a parameter name");
+                break;
+            }
+            advance(parser);
+            LzToken param_token = parser->previous;
+            LzString *param = intern_token(parser, &param_token);
+            if (param == NULL) {
+                break;
+            }
+            LzType declared = lz_type_of_kinds(LZ_KINDS_ANY);
+            if (match(parser, LZ_TOKEN_COLON)) {
+                (void)parse_type_union(parser, &declared);
+            }
+            uint16_t slot = (uint16_t)parser->local_count;
+
+            if (rest) {
+                if (check(parser, LZ_TOKEN_EQUAL)) {
+                    error_at_current(parser, "a rest parameter cannot have a default");
+                }
+                LzType list = array_type(parser, &declared);
+                (void)add_symbol(parser, &param_token, param, SYMBOL_LOCAL, false, lz_value_nil(), &list);
+                names[param_count] = param;
+                sig->names[param_count] = param;
+                sig->rest_item = declared;
+                has_rest = true;
+                checks[check_count++] = (ParamCheck){slot, list};
+                continue;
+            }
+
+            if (param_count >= LZ_MAX_PARAMS) {
+                error_at(parser, &param_token, "too many parameters (limit 64)");
+                break;
+            }
+            if (match(parser, LZ_TOKEN_EQUAL)) {
+                skip_newlines(parser);
+                seen_default = true;
+                /* Runs only when the caller left this argument out. */
+                emit_op_at(parser, LZ_OP_JUMP_IF_SUPPLIED, param_token.offset);
+                emit_u16_at(parser, slot, param_token.offset);
+                emit_u16_at(parser, 0xFFFF, param_token.offset);
+                size_t jump = parser->chunk->count - 2;
+                LzToken value_start = parser->current;
+                Expr value = expression(parser);
+                if (lz_type_assignable(&value.type, &declared) == LZ_ASSIGN_NEVER) {
+                    LzToken span = span_from(parser, &value_start);
+                    error_types(parser, &span, "type mismatch: expected ", &declared, ", got ",
+                                &value.type);
+                }
+                emit_op_at(parser, LZ_OP_SET_LOCAL, param_token.offset);
+                emit_u16_at(parser, slot, param_token.offset);
+                patch_jump(parser, jump);
+            } else if (seen_default) {
+                error_at(parser, &param_token, "a parameter without a default cannot follow one with a default");
+            } else {
+                required = param_count + 1;
+            }
+            (void)add_symbol(parser, &param_token, param, SYMBOL_LOCAL, false, lz_value_nil(), &declared);
+            names[param_count] = param;
+            sig->names[param_count] = param;
+            sig->types[param_count] = declared;
+            if (!is_any_type(&declared)) {
+                checks[check_count++] = (ParamCheck){slot, declared};
+            }
+            param_count++;
+        } while (match(parser, LZ_TOKEN_COMMA));
+    }
+    consume(parser, LZ_TOKEN_RIGHT_PAREN, "expected ')' after parameters");
+    if (!parser->panic && match(parser, LZ_TOKEN_ARROW)) {
+        sig->result_declared = true;
+        (void)parse_type_union(parser, &sig->result);
+    }
+    sig->param_count = (uint16_t)param_count;
+    sig->required = (uint16_t)required;
+    sig->has_rest = has_rest;
+    if (self != SIZE_MAX) {
+        parser->symbols[self].sig = sig;
+    }
+
+    /* Argument types are checked once, on entry, after the defaults are in place. */
+    for (size_t i = 0; i < check_count; i++) {
+        uint16_t type_index = 0;
+        if (!lz_chunk_add_type(parser->chunk, &checks[i].type, &type_index)) {
+            error_at_previous(parser, "too many types in one function");
+            break;
+        }
+        emit_op_at(parser, LZ_OP_CHECK_PARAM, offset);
+        emit_u16_at(parser, checks[i].slot, offset);
+        emit_u16_at(parser, type_index, offset);
+    }
+
+    /* Body: same scope as the parameters, so `let` cannot silently shadow one. */
+    bool returns = false;
+    if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+        advance(parser);
+        while (!check(parser, LZ_TOKEN_RIGHT_BRACE) && !check(parser, LZ_TOKEN_EOF) &&
+               parser->fatal == LZ_OK) {
+            declaration(parser);
+            returns = returns || parser->terminated;
+        }
+        consume(parser, LZ_TOKEN_RIGHT_BRACE, "expected '}' after function body");
+    } else {
+        error_at_current(parser, "expected '{' before function body");
+    }
+
+    LzToken close = parser->previous;
+    if (!returns && sig->result_declared) {
+        LzType nothing = lz_type_of_kinds(LZ_KIND_NIL);
+        if (lz_type_assignable(&nothing, &sig->result) == LZ_ASSIGN_NEVER) {
+            error_types(parser, &close, "missing return: the function must return a value of type ",
+                        &sig->result, "", NULL);
+        }
+    }
+    emit_op_at(parser, LZ_OP_NIL, close.offset);
+    emit_op_at(parser, LZ_OP_RETURN, close.offset);
+
+    /* Leave the function. */
+    while (parser->symbol_count > fs.first_symbol) {
+        Symbol *symbol = &parser->symbols[--parser->symbol_count];
+        if (symbol->kind == SYMBOL_CONSTANT) {
+            lz_value_release(heap, &symbol->value);
+        }
+    }
+    while (parser->alias_count > 0 && parser->aliases[parser->alias_count - 1].depth == parser->scope_depth) {
+        parser->alias_count--;
+    }
+    parser->scope_depth--;
+    parser->nesting--;
+
+    if (!lz_function_set_params(function, names, param_count, required, has_rest) ||
+        !lz_function_set_upvalues(function, fs.upvalues, fs.upvalue_count)) {
+        fail(parser, LZ_ERR_MEMORY);
+    }
+    free(parser->constants.slots);
+    parser->chunk = fs.saved_chunk;
+    parser->constants = fs.saved_constants;
+    parser->local_count = fs.saved_local_count;
+    parser->fs = fs.enclosing;
+    parser->terminated = false;
+    (void)fs.saved_terminated;
+
+    /* In the enclosing function: build the value. A function that captures nothing is made once. */
+    if (fs.upvalue_count == 0) {
+        LzClosure *closure = lz_closure_new(heap, function);
+        if (closure == NULL) {
+            fail(parser, lz_vm_out_of_memory(parser->vm));
+        } else {
+            uint16_t index = add_constant(parser, lz_value_object(&closure->base), true);
+            emit_op_at(parser, LZ_OP_CONSTANT, offset);
+            emit_u16_at(parser, index, offset);
+            lz_object_release(heap, &closure->base);
+        }
+    } else {
+        uint16_t index = add_constant(parser, lz_value_object(&function->base), true);
+        emit_op_at(parser, LZ_OP_CLOSURE, offset);
+        emit_u16_at(parser, index, offset);
+    }
+    lz_object_release(heap, &function->base);
+
+    result.sig = sig;
+    return result;
+}
+
+/* fn(params) { ... } as an expression. */
+static Expr function_expression(Parser *parser) {
+    return compile_function(parser, NULL, SIZE_MAX, parser->previous.offset);
+}
+
+/* fn name(params) { ... }: a constant binding, global at the top level and a local elsewhere. */
+static void function_declaration(Parser *parser) {
+    advance(parser); /* the name */
+    LzToken name_token = parser->previous;
+    LzString *name = intern_token(parser, &name_token);
+    if (name == NULL) {
+        return;
+    }
+
+    LzType type = lz_type_of_kinds(LZ_KIND_FUNCTION);
+    size_t self = SIZE_MAX;
+    if (parser->scope_depth == 0) {
+        Symbol *existing = find_symbol(parser, name);
+        if (existing != NULL && existing->pending) {
+            existing->pending = false; /* declared ahead of time by prescan_functions */
+            self = (size_t)(existing - parser->symbols);
+        } else {
+            Symbol *symbol = add_symbol(parser, &name_token, name, SYMBOL_GLOBAL, true, lz_value_nil(), &type);
+            if (symbol != NULL) {
+                self = (size_t)(symbol - parser->symbols);
+            }
+        }
+    } else {
+        Symbol *symbol = add_symbol(parser, &name_token, name, SYMBOL_LOCAL, true, lz_value_nil(), &type);
+        if (symbol != NULL) {
+            self = (size_t)(symbol - parser->symbols);
+        }
+    }
+
+    (void)compile_function(parser, name, self, name_token.offset);
+    if (self != SIZE_MAX && parser->scope_depth == 0) {
+        emit_named(parser, LZ_OP_DEFINE_GLOBAL, name, name_token.offset);
+    }
+    parser->terminated = false;
+}
+
+static void return_statement(Parser *parser) {
+    uint32_t offset = parser->previous.offset;
+    const FuncState *fs = parser->fs;
+    if (fs->function == NULL) {
+        error_at_previous(parser, "'return' outside of a function");
+    }
+
+    LzToken start = parser->current;
+    Expr value = expr_of(lz_type_of_kinds(LZ_KIND_NIL));
+    if (check(parser, LZ_TOKEN_NEWLINE) || check(parser, LZ_TOKEN_SEMICOLON) ||
+        check(parser, LZ_TOKEN_RIGHT_BRACE) || check(parser, LZ_TOKEN_EOF)) {
+        emit_op_at(parser, LZ_OP_NIL, offset);
+    } else {
+        value = expression(parser);
+    }
+    if (fs->function != NULL && fs->sig->result_declared) {
+        check_flow(parser, &value.type, &fs->sig->result, &start, offset, LZ_OP_CHECK_RETURN,
+                   "return type mismatch: expected ");
+    }
+    emit_op_at(parser, LZ_OP_RETURN, offset);
+    end_statement(parser);
+    parser->terminated = true;
+}
+
+/*
+ * Top-level `fn` declarations are visible to the whole file, so functions can call
+ * each other whatever their order. Only the names are declared here; the function
+ * itself exists once its declaration has run.
+ */
+static void prescan_functions(Parser *parser) {
+    LzLexer lexer;
+    lz_lexer_init(&lexer, parser->source);
+    int depth = 0;
+    LzType type = lz_type_of_kinds(LZ_KIND_FUNCTION);
+    for (;;) {
+        LzToken token = lz_lexer_next(&lexer);
+        if (token.type == LZ_TOKEN_EOF) {
+            break;
+        }
+        if (token.type == LZ_TOKEN_LEFT_BRACE) {
+            depth++;
+        } else if (token.type == LZ_TOKEN_RIGHT_BRACE) {
+            if (depth > 0) {
+                depth--;
+            }
+        } else if (token.type == LZ_TOKEN_FN && depth == 0) {
+            LzLexer peek = lexer;
+            LzToken name_token = lz_lexer_next(&peek);
+            if (name_token.type != LZ_TOKEN_IDENTIFIER || parser->symbol_count >= LZ_MAX_SYMBOLS) {
+                continue;
+            }
+            LzString *name = intern_token(parser, &name_token);
+            if (name == NULL) {
+                return;
+            }
+            if (find_symbol(parser, name) == NULL) {
+                Symbol *symbol = add_symbol(parser, &name_token, name, SYMBOL_GLOBAL, true,
+                                            lz_value_nil(), &type);
+                if (symbol != NULL) {
+                    symbol->pending = true;
+                }
+            }
+        }
+    }
+}
+
 static void synchronize(Parser *parser) {
     parser->panic = false;
     while (!check(parser, LZ_TOKEN_EOF)) {
@@ -1694,6 +2410,8 @@ static void synchronize(Parser *parser) {
         case LZ_TOKEN_CONST:
         case LZ_TOKEN_IF:
         case LZ_TOKEN_WHILE:
+        case LZ_TOKEN_FN:
+        case LZ_TOKEN_RETURN:
         case LZ_TOKEN_RIGHT_BRACE:
             return;
         default:
@@ -1713,8 +2431,21 @@ static void declaration(Parser *parser) {
 
     uint32_t start_offset = parser->current.offset;
     LzTokenType start_type = parser->current.type;
+    parser->terminated = false;
 
     switch (parser->current.type) {
+    case LZ_TOKEN_FN:
+        if (next_token_type(parser) == LZ_TOKEN_IDENTIFIER) {
+            advance(parser);
+            function_declaration(parser);
+        } else {
+            expression_statement(parser);
+        }
+        break;
+    case LZ_TOKEN_RETURN:
+        advance(parser);
+        return_statement(parser);
+        break;
     case LZ_TOKEN_LET:
         advance(parser);
         variable_declaration(parser, false);
@@ -1765,6 +2496,11 @@ static void declaration(Parser *parser) {
 /* Entry points */
 
 static LzStatus compile_into(Parser *parser) {
+    FuncState script;
+    memset(&script, 0, sizeof script);
+    script.self_symbol = SIZE_MAX;
+    parser->fs = &script;
+    prescan_functions(parser);
     advance(parser);
     while (!check(parser, LZ_TOKEN_EOF) && parser->fatal == LZ_OK) {
         declaration(parser);
@@ -1802,6 +2538,11 @@ LzStatus lz_compile(LzVM *vm, const LzSource *source, LzChunk *chunk, LzDiagnost
         if (vm->error[0] == '\0') {
             (void)lz_vm_out_of_memory(vm);
         }
+    }
+    while (parser->sigs != NULL) {
+        FuncSig *next = parser->sigs->next;
+        free(parser->sigs);
+        parser->sigs = next;
     }
     free(parser->constants.slots);
     free(parser);

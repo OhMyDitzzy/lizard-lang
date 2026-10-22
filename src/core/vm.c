@@ -13,9 +13,13 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->array_type_count = 0;
     vm->array_type_capacity = 0;
     vm->stack_count = 0;
+    vm->frame_count = 0;
+    vm->open_upvalues = NULL;
     vm->fuel = LZ_FUEL_UNLIMITED;
     vm->instructions = 0;
     vm->error_offset = LZ_NO_OFFSET;
+    vm->trace_count = 0;
+    vm->trace_total = 0;
     vm->out = out;
     vm->err = err;
     vm->error[0] = '\0';
@@ -39,6 +43,8 @@ LzStatus lz_vm_out_of_memory(LzVM *vm) {
 }
 
 void lz_vm_reset_stack(LzVM *vm) {
+    lz_vm_close_upvalues(vm, 0); /* before the slots die: a closure may outlive them */
+    vm->frame_count = 0;
     while (vm->stack_count > 0) {
         vm->stack_count--;
         lz_value_release(&vm->heap, &vm->stack[vm->stack_count]);

@@ -48,6 +48,15 @@ if(LZ_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
+if(UNIX)
+    # cmake --build build --target bench: every bench/*.lz on both engines
+    add_custom_target(bench
+        COMMAND ${PROJECT_SOURCE_DIR}/bench/run.sh $<TARGET_FILE:lizard> 3
+        DEPENDS lizard
+        USES_TERMINAL
+        COMMENT "Running bench/*.lz on both engines")
+endif()
+
 install(TARGETS lizard RUNTIME DESTINATION bin)
 
 message(STATUS "Lizard ${PROJECT_VERSION} (${CMAKE_BUILD_TYPE})")

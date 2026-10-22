@@ -1,0 +1,44 @@
+# Dense matrix multiplication on arrays of arrays.
+let size = 150
+let a = []
+let b = []
+let c = []
+let i = 0
+while i < size {
+  let row_a = []
+  let row_b = []
+  let row_c = []
+  let j = 0
+  while j < size {
+    push(row_a, (i + j) % 10)
+    push(row_b, (i * j) % 10)
+    push(row_c, 0)
+    j = j + 1
+  }
+  push(a, row_a)
+  push(b, row_b)
+  push(c, row_c)
+  i = i + 1
+}
+i = 0
+while i < size {
+  let j = 0
+  while j < size {
+    let sum = 0
+    let k = 0
+    while k < size {
+      sum = sum + a[i][k] * b[k][j]
+      k = k + 1
+    }
+    c[i][j] = sum
+    j = j + 1
+  }
+  i = i + 1
+}
+let trace = 0
+i = 0
+while i < size {
+  trace = trace + c[i][i]
+  i = i + 1
+}
+println(trace, c[size - 1][size - 1])

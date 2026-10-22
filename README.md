@@ -6,8 +6,9 @@ extension.
 Status: early. Scripts run: variables, constants, arithmetic, strings, `if`,
 `while`, blocks, optional type annotations and the builtins `print`,
 `println`, `int`, `float`, `string` and `bool`, and arrays (`[1, 2, 3]`,
-indexing, slices, typed `int[]`, and `len`, `push`, `sort`, ... see below).
-Functions are next.
+indexing, slices, typed `int[]`, and `len`, `push`, `sort`, ... see below), and
+functions (`fn`: typed parameters and results, defaults, named arguments,
+variadics, closures, recursion; see below).
 
 ```
 const GREETING = "Hello" + ", " + "Lizard"
@@ -30,6 +31,25 @@ xs[0] = 10
 xs[1:3]           # [2, 3]
 xs + ys           # [10, 2, 3, 4, 5]
 ```
+
+### Functions
+
+```
+fn area(w: float, h: float = 1.0) -> float { return w * h }   # types are optional
+fn sum(*xs) { ... }                  # rest parameter: xs is an array
+let twice = fn(f, x) { return f(f(x)) }   # anonymous functions are values
+
+area(3.0, h = 2.0)                   # named arguments, in any order
+sum(1, 2, *[3, 4])                   # * spreads an array into arguments
+```
+
+* Parameters and the result may carry types; a typed call that is wrong is a
+  compile-time error when the callee is known, and a run-time error otherwise.
+  A function with `-> T` must return on every path ("missing return").
+* A default may use earlier parameters (`fn k(a, b = a * 2)`).
+* Top-level functions can call each other regardless of order; a function nested
+  in another captures the variables it uses (closures keep them alive).
+* Calls nest up to 2048 deep. An error inside a function prints a stack trace.
 
 ### Arrays
 
@@ -91,7 +111,17 @@ Example: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DLZ_ENABLE_SANITIZERS=ON
 | `--dump-tokens` | Print the tokens of the script and exit |
 | `--max-heap=N` | Limit live heap bytes (suffix `K`, `M` or `G`) |
 | `--fuel=N` | Limit the number of executed instructions |
+| `--engine=E` | Execution engine: `ge` (default, the fast one) or `ref` (the reference interpreter) |
+| `--engine-stats` | Print what the engine did when the program ends |
 | `--` | Stop option parsing |
+
+## Engines
+
+Programs run on the Gecko Engine (`ge`) by default: a faster interpreter for
+the same bytecode, about 3 to 4 times quicker on loops, arithmetic and arrays.
+`--engine=ref` selects the plain reference interpreter, which defines the
+language and behaves identically. `cmake --build build --target bench` compares
+the two on `bench/*.lz`. See [docs/ENGINE.md](docs/ENGINE.md).
 
 ## Development
 

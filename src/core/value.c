@@ -1,6 +1,7 @@
 #include "lizard/value.h"
 
 #include "lizard/array.h"
+#include "lizard/function.h"
 #include "lizard/native.h"
 
 #include <inttypes.h>
@@ -223,6 +224,19 @@ static bool write_object(const LzObject *object, const LzWriter *writer) {
                lz_writer_write(writer, native->name->data, native->name->length) &&
                lz_writer_write_cstr(writer, ">");
     }
+    case LZ_OBJ_CLOSURE: {
+        const LzFunction *function = ((const LzClosure *)object)->function;
+        if (function->name == NULL) {
+            return lz_writer_write_cstr(writer, "<fn>");
+        }
+        return lz_writer_write_cstr(writer, "<fn ") &&
+               lz_writer_write(writer, function->name->data, function->name->length) &&
+               lz_writer_write_cstr(writer, ">");
+    }
+    case LZ_OBJ_FUNCTION:
+        return lz_writer_write_cstr(writer, "<function code>");
+    case LZ_OBJ_UPVALUE:
+        return lz_writer_write_cstr(writer, "<upvalue>");
     }
     return false;
 }
@@ -242,6 +256,26 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
         }
         free(array->items);
         lz_heap_uncharge(heap, array->capacity * sizeof(LzValue));
+        break;
+    }
+    case LZ_OBJ_FUNCTION:
+        lz_function_free_storage(heap, (LzFunction *)object, true);
+        break;
+    case LZ_OBJ_CLOSURE: {
+        LzClosure *closure = (LzClosure *)object;
+        for (size_t i = 0; i < closure->upvalue_count; i++) {
+            if (closure->upvalues[i] != NULL) {
+                lz_object_release(heap, &closure->upvalues[i]->base);
+            }
+        }
+        lz_object_release(heap, &closure->function->base);
+        break;
+    }
+    case LZ_OBJ_UPVALUE: {
+        LzUpvalue *upvalue = (LzUpvalue *)object;
+        if (upvalue->location == &upvalue->closed) {
+            lz_value_release(heap, &upvalue->closed);
+        }
         break;
     }
     }

@@ -1,6 +1,7 @@
 #include "lizard/memory.h"
 
 #include "lizard/array.h"
+#include "lizard/function.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -30,6 +31,8 @@ void lz_heap_destroy(LzHeap *heap) {
         }
         if (object->type == LZ_OBJ_ARRAY) {
             free(((LzArray *)object)->items);
+        } else if (object->type == LZ_OBJ_FUNCTION) {
+            lz_function_free_storage(heap, (LzFunction *)object, false);
         }
         free(object);
         object = next;

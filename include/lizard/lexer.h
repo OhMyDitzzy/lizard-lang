@@ -46,7 +46,10 @@ typedef enum LzTokenType {
     LZ_TOKEN_CONST,
     LZ_TOKEN_IF,
     LZ_TOKEN_ELSE,
-    LZ_TOKEN_WHILE
+    LZ_TOKEN_WHILE,
+    LZ_TOKEN_FN,
+    LZ_TOKEN_RETURN,
+    LZ_TOKEN_ARROW
 } LzTokenType;
 
 /*

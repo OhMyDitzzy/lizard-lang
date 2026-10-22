@@ -7,13 +7,14 @@
 | `include/lizard/` | Public headers of the core (values, heap, VM, writer) |
 | `src/core/` | Core implementation, no knowledge of any builtin (`array.c` holds the array operations) |
 | `src/frontend/` | Lexer and the single-pass compiler |
+| `src/engine/` | The Gecko Engine, a faster execution engine for the same bytecode ([ENGINE.md](ENGINE.md)) |
 | `src/cli/` | The `lizard` binary: argument parsing and process entry point |
 | `builtin/` | Builtin functions and their registry, one subfolder per area (`io/`, ...) |
 | `tests/` | Unit tests, registered with CTest |
 | `cmake/` | Build helper modules |
 
-Dependency direction: `cli` -> `builtin` -> `core`. The core never includes
-anything from `builtin/`.
+Dependency direction: `cli` -> `engine` -> `core` and `cli` -> `builtin` ->
+`core`. The core never includes anything from `builtin/` or `engine/`.
 
 ## Memory model
 
@@ -54,8 +55,40 @@ reference owned by the caller. Failures return a status, set `vm->error`, and
 record the failing source line in `vm->error_line`; the stack is always empty
 afterwards. `lz_disassemble_chunk` (`debug.h`) prints a chunk for debugging.
 
-There are no call frames yet: nothing can be called except natives. Frames
-arrive together with user-defined functions.
+`run.c` is the *reference* interpreter: it defines what every instruction does.
+Faster engines reuse it through two extension points, `lz_vm_exec_one` (run one
+instruction, no accounting) and `lz_vm_eval_with` (supply the instruction loop),
+and must behave identically down to the fuel spent. See [ENGINE.md](ENGINE.md).
+
+## Functions and call frames
+
+Each `fn` compiles to its own chunk, held by an `LzFunction` (`function.h`) that
+lives only in the constant table of the code that defines it. At run time a
+function value is an `LzClosure`: the function plus its captured variables
+(`LzUpvalue`). An upvalue is *open* while the variable is still on the stack
+(it points into the stack; the VM keeps the list, highest slot first) and
+*closed* once the frame returns (the value is moved into the upvalue).
+
+`vm->frames` (limit `LZ_FRAMES_MAX`, 2048) holds one `LzCallFrame` per active
+call: closure, chunk, saved `ip`, `base`, a `supplied` mask and the offset of
+the call for stack traces. Locals are `stack[base + slot]`; the callee sits at
+`base - 1`, followed by the parameters, the rest array, then other locals.
+Frame 0 is the script itself.
+
+Calls (`call.c`): `OP_CALL` for plain positional calls, `OP_CALL_EX` when the
+call uses `*spread` or `name = value`. Missing trailing arguments are not filled
+by the caller: the callee's prologue evaluates each default
+(`OP_JUMP_IF_SUPPLIED` skips it when the argument was given), so a default can
+use earlier parameters. `*rest` collects surplus arguments into an array.
+`OP_CHECK_PARAM` / `OP_CHECK_RETURN` enforce annotations at run time; when the
+callee is known at compile time, the compiler checks arity, names and types
+itself (`FuncSig`). Recursive local functions refer to themselves through
+`OP_GET_SELF` rather than capturing their own variable, which would be a
+reference cycle that reference counting never frees.
+
+Errors keep the failing frames in place so the offset comes from the right
+chunk and `lz_vm_capture_trace` can record the call stack (`vm->trace`, the 16
+innermost frames) before the stack is reset.
 
 ## Source positions and diagnostics
 
@@ -256,7 +289,7 @@ copy or write. Array work charges one unit per 8 items (copying, slicing,
 `+`, searching, sorting with its passes, scanning for a type check, comparing);
 an `==` on arrays stops at the fuel that is left, so a hostile diamond-shaped
 structure cannot run forever.
-Call depth gets its own limit when call frames arrive.
+Call depth is limited to `LZ_FRAMES_MAX` frames (a "stack overflow" error).
 
 ## Language semantics
 
@@ -325,5 +358,5 @@ area's header, add one row to the table in `registry.c`, and add the source to
 
 ## Not decided yet
 
-Functions (`fn`) with typed parameters and results, `for` (so `range` is only useful with `while` for now), `break`/`continue`, maps and other collections, indexing and slicing strings, narrowing, the error model, and call frames. Removing entries from `LzTable`.
+`for` (so `range` is only useful with `while` for now), `break`/`continue`, maps and other collections, indexing and slicing strings, narrowing, the error model, and classes. Removing entries from `LzTable`.
 Garbage collection beyond reference counting (cycles).

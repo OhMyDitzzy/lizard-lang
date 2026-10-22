@@ -24,7 +24,11 @@ uint16_t lz_kind_of(const LzValue *value) {
         case LZ_OBJ_ARRAY:
             return LZ_KIND_ARRAY;
         case LZ_OBJ_NATIVE:
+        case LZ_OBJ_CLOSURE:
             return LZ_KIND_FUNCTION;
+        case LZ_OBJ_FUNCTION:
+        case LZ_OBJ_UPVALUE:
+            return 0; /* internal objects are never values a script can hold */
         }
         return 0;
     }

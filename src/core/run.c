@@ -5,6 +5,8 @@
 #include "lizard/compare.h"
 #include "lizard/native.h"
 
+#include <stdio.h>
+
 static bool read_u16(const LzChunk *chunk, size_t *ip, uint16_t *out) {
     if (*ip + 2 > chunk->count) {
         return false;
@@ -57,7 +59,26 @@ static LzStatus read_name(LzVM *vm, const LzChunk *chunk, size_t *ip, LzString *
     return LZ_OK;
 }
 
-static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value) {
+/* What a failed check was about, for the message: an argument, a returned value, or nothing. */
+typedef enum CheckSubject { CHECK_VALUE, CHECK_PARAM, CHECK_RETURN } CheckSubject;
+
+static void describe_subject(const LzVM *vm, CheckSubject subject, size_t slot, char *out, size_t size) {
+    out[0] = '\0';
+    const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
+    if (subject == CHECK_VALUE || frame->closure == NULL) {
+        return;
+    }
+    const LzFunction *function = frame->closure->function;
+    if (subject == CHECK_PARAM) {
+        const char *name = slot < lz_function_slots(function) ? function->param_names[slot]->data : "?";
+        (void)snprintf(out, size, "argument '%s' of %s()", name, lz_function_display_name(function));
+    } else {
+        (void)snprintf(out, size, "return value of %s()", lz_function_display_name(function));
+    }
+}
+
+static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value,
+                              CheckSubject subject, size_t slot) {
     LzBuffer expected = {0};
     LzBuffer actual = {0};
     LzWriter expected_out = lz_writer_from_buffer(&expected);
@@ -73,7 +94,10 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
         (void)lz_writer_write_cstr(&actual_out, lz_kind_name(lz_kind_of(value)));
     }
 
-    LzStatus status = lz_vm_set_error(vm, LZ_ERR_TYPE, "type error: expected %s, got %s",
+    char what[160];
+    describe_subject(vm, subject, slot, what, sizeof what);
+    LzStatus status = lz_vm_set_error(vm, LZ_ERR_TYPE, "type error: %s%sexpected %s, got %s", what,
+                                      what[0] != '\0' ? ": " : "",
                                       expected.data != NULL ? expected.data : "?",
                                       actual.data != NULL ? actual.data : "?");
     lz_buffer_free(&expected);
@@ -81,29 +105,24 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
     return status;
 }
 
-static LzStatus do_call(LzVM *vm, uint8_t argc) {
-    if (vm->stack_count < (size_t)argc + 1) {
-        return malformed(vm, "stack underflow");
+/*
+ * Does the value fit the type? An array is checked item by item and then restricted to
+ * the item type, which costs fuel in proportion to its size.
+ */
+static LzStatus check_value(LzVM *vm, const LzType *type, const LzValue *value, CheckSubject subject,
+                            size_t slot) {
+    LzStatus status = LZ_OK;
+    bool fits;
+    if (lz_value_is_array(value)) {
+        status = lz_vm_charge_fuel(vm, lz_array_cost(lz_value_as_array(value)->count));
+        fits = (type->kinds & LZ_KIND_ARRAY) != 0 && lz_array_conform(lz_value_as_array(value), type->element);
+    } else {
+        fits = lz_type_matches(type, value);
     }
-
-    const LzValue *callee = &vm->stack[vm->stack_count - argc - 1];
-    if (callee->type != LZ_VAL_OBJECT || callee->as.object->type != LZ_OBJ_NATIVE) {
-        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "can only call functions");
+    if (status == LZ_OK && !fits) {
+        status = type_mismatch(vm, type, value, subject, slot);
     }
-
-    /* The result is a new reference owned by this frame until it is pushed. */
-    LzValue result = lz_value_nil();
-    const LzValue *args = &vm->stack[vm->stack_count - argc];
-    LzStatus status = lz_native_call(vm, (const LzNative *)callee->as.object, argc, args, &result);
-    if (status != LZ_OK) {
-        return status;
-    }
-
-    for (size_t i = 0; i < (size_t)argc + 1; i++) {
-        pop(vm);
-    }
-    vm->stack[vm->stack_count++] = result;
-    return LZ_OK;
+    return status;
 }
 
 static LzStatus array_new(LzVM *vm) {
@@ -200,6 +219,30 @@ static LzStatus slice_op(LzVM *vm) {
     return LZ_OK;
 }
 
+static LzStatus array_extend(LzVM *vm) {
+    if (vm->stack_count < 2) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *target = &vm->stack[vm->stack_count - 2];
+    const LzValue *source = &vm->stack[vm->stack_count - 1];
+    if (!lz_value_is_array(target)) {
+        return malformed(vm, "array expected");
+    }
+    if (!lz_value_is_array(source)) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot spread a value of type %s",
+                               lz_kind_name(lz_kind_of(source)));
+    }
+    const LzArray *items = lz_value_as_array(source);
+    LzStatus status = lz_vm_charge_fuel(vm, lz_array_cost(items->count));
+    for (size_t i = 0; status == LZ_OK && i < items->count; i++) {
+        status = lz_array_push(vm, lz_value_as_array(target), &items->items[i]);
+    }
+    if (status == LZ_OK) {
+        pop(vm);
+    }
+    return status;
+}
+
 static LzStatus binary_op(LzVM *vm, LzOpCode op) {
     if (vm->stack_count < 2) {
         return malformed(vm, "stack underflow");
@@ -266,13 +309,386 @@ static LzStatus negate(LzVM *vm) {
     return LZ_OK;
 }
 
-static LzStatus execute(LzVM *vm, const LzChunk *chunk, size_t *failed_at) {
+/*
+ * Runs the one instruction at byte offset *ip_io and advances it past the
+ * instruction. It does no accounting (fuel, vm->instructions): the loop that
+ * calls it does that, so a faster engine can spend fuel its own way and still
+ * reuse every semantic.
+ *
+ * OP_RETURN is reported by setting *ip_io to SIZE_MAX, which the loop already
+ * has to treat as "no more instructions": the hot path pays nothing for it.
+ * Marked always_inline so the reference loop below keeps its speed.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#define LZ_FORCE_INLINE static inline __attribute__((always_inline))
+#else
+#define LZ_FORCE_INLINE static inline
+#endif
+
+LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip_io,
+                                  bool frames_ok) {
+    const LzChunk *chunk = *chunk_io;
+    size_t ip = *ip_io;
+    LzStatus status = LZ_OK;
+    if (ip >= chunk->count) {
+        return malformed(vm, "chunk ended without OP_RETURN");
+    }
+
+    const size_t start = ip;
+    uint8_t opcode = chunk->code[ip++];
+    switch (opcode) {
+    case LZ_OP_CONSTANT: {
+        const LzValue *constant = NULL;
+        status = read_constant(vm, chunk, &ip, &constant);
+        if (status == LZ_OK) {
+            status = push(vm, *constant);
+        }
+        break;
+    }
+    case LZ_OP_NIL:
+        status = push(vm, lz_value_nil());
+        break;
+    case LZ_OP_TRUE:
+        status = push(vm, lz_value_bool(true));
+        break;
+    case LZ_OP_FALSE:
+        status = push(vm, lz_value_bool(false));
+        break;
+    case LZ_OP_POP:
+        if (vm->stack_count == 0) {
+            status = malformed(vm, "stack underflow");
+        } else {
+            pop(vm);
+        }
+        break;
+    case LZ_OP_GET_GLOBAL: {
+        LzString *name;
+        status = read_name(vm, chunk, &ip, &name);
+        if (status != LZ_OK) {
+            break;
+        }
+        const LzValue *value = lz_vm_lookup(vm, name);
+        if (value == NULL) {
+            status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "undefined variable '%s'", name->data);
+        } else {
+            status = push(vm, *value);
+        }
+        break;
+    }
+    case LZ_OP_DEFINE_GLOBAL: {
+        LzString *name;
+        status = read_name(vm, chunk, &ip, &name);
+        if (status != LZ_OK) {
+            break;
+        }
+        if (vm->stack_count == 0) {
+            status = malformed(vm, "stack underflow");
+        } else if (!lz_vm_define_global(vm, name, vm->stack[vm->stack_count - 1])) {
+            status = lz_vm_out_of_memory(vm);
+        } else {
+            pop(vm);
+        }
+        break;
+    }
+    case LZ_OP_CALL: {
+        if (ip >= chunk->count) {
+            status = malformed(vm, "truncated operand");
+            break;
+        }
+        size_t argc = chunk->code[ip++];
+        if (!frames_ok && vm->stack_count > argc && lz_value_is_closure(&vm->stack[vm->stack_count - argc - 1])) {
+            status = malformed(vm, "a single step cannot enter a function");
+            break;
+        }
+        bool entered = false;
+        status = lz_vm_call(vm, argc, ip, (uint32_t)start, &entered);
+        if (entered) {
+            *chunk_io = chunk = vm->frames[vm->frame_count - 1].chunk;
+            ip = 0;
+        }
+        break;
+    }
+    case LZ_OP_CALL_EX: {
+        uint16_t names;
+        if (ip >= chunk->count) {
+            status = malformed(vm, "truncated operand");
+            break;
+        }
+        size_t named = chunk->code[ip++];
+        if (!read_u16(chunk, &ip, &names)) {
+            status = malformed(vm, "truncated operand");
+        } else if (!frames_ok) {
+            status = malformed(vm, "a single step cannot enter a function");
+        } else {
+            bool entered = false;
+            status = lz_vm_call_ex(vm, chunk, named, names, ip, (uint32_t)start, &entered);
+            if (entered) {
+                *chunk_io = chunk = vm->frames[vm->frame_count - 1].chunk;
+                ip = 0;
+            }
+        }
+        break;
+    }
+    case LZ_OP_ADD:
+    case LZ_OP_SUBTRACT:
+    case LZ_OP_MULTIPLY:
+    case LZ_OP_DIVIDE:
+    case LZ_OP_FLOOR_DIVIDE:
+    case LZ_OP_MODULO:
+    case LZ_OP_LESS:
+    case LZ_OP_GREATER:
+    case LZ_OP_LESS_EQUAL:
+    case LZ_OP_GREATER_EQUAL:
+        status = binary_op(vm, (LzOpCode)opcode);
+        break;
+    case LZ_OP_GET_LOCAL: {
+        uint16_t slot;
+        if (!read_u16(chunk, &ip, &slot)) {
+            status = malformed(vm, "truncated operand");
+        } else if (vm->frames[vm->frame_count - 1].base + slot >= vm->stack_count) {
+            status = malformed(vm, "local slot out of range");
+        } else {
+            status = push(vm, vm->stack[vm->frames[vm->frame_count - 1].base + slot]);
+        }
+        break;
+    }
+    case LZ_OP_SET_LOCAL: {
+        uint16_t slot;
+        if (!read_u16(chunk, &ip, &slot)) {
+            status = malformed(vm, "truncated operand");
+        } else if (vm->stack_count == 0 ||
+                   vm->frames[vm->frame_count - 1].base + slot >= vm->stack_count - 1) {
+            status = malformed(vm, "local slot out of range");
+        } else {
+            size_t index = vm->frames[vm->frame_count - 1].base + slot;
+            LzValue moved = vm->stack[--vm->stack_count];
+            lz_value_release(&vm->heap, &vm->stack[index]);
+            vm->stack[index] = moved;
+        }
+        break;
+    }
+    case LZ_OP_SET_GLOBAL: {
+        LzString *name;
+        status = read_name(vm, chunk, &ip, &name);
+        if (status != LZ_OK) {
+            break;
+        }
+        if (vm->stack_count == 0) {
+            status = malformed(vm, "stack underflow");
+        } else if (lz_table_get(&vm->globals, name) == NULL) {
+            status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "undefined variable '%s'", name->data);
+        } else if (!lz_vm_define_global(vm, name, vm->stack[vm->stack_count - 1])) {
+            status = lz_vm_out_of_memory(vm);
+        } else {
+            pop(vm);
+        }
+        break;
+    }
+    case LZ_OP_JUMP:
+    case LZ_OP_JUMP_IF_FALSE:
+    case LZ_OP_JUMP_IF_TRUE: {
+        uint16_t distance;
+        if (!read_u16(chunk, &ip, &distance)) {
+            status = malformed(vm, "truncated operand");
+        } else if (ip + distance > chunk->count) {
+            status = malformed(vm, "jump out of range");
+        } else if (opcode == LZ_OP_JUMP) {
+            ip += distance;
+        } else if (vm->stack_count == 0) {
+            status = malformed(vm, "stack underflow");
+        } else if (lz_value_is_truthy(&vm->stack[vm->stack_count - 1]) ==
+                   (opcode == LZ_OP_JUMP_IF_TRUE)) {
+            ip += distance;
+        }
+        break;
+    }
+    case LZ_OP_LOOP: {
+        uint16_t distance;
+        if (!read_u16(chunk, &ip, &distance)) {
+            status = malformed(vm, "truncated operand");
+        } else if (distance > ip) {
+            status = malformed(vm, "jump out of range");
+        } else {
+            ip -= distance;
+        }
+        break;
+    }
+    case LZ_OP_EQUAL:
+        status = equal(vm);
+        break;
+    case LZ_OP_NOT:
+        status = not_op(vm);
+        break;
+    case LZ_OP_NEGATE:
+        status = negate(vm);
+        break;
+    case LZ_OP_CHECK_TYPE: {
+        uint16_t index;
+        if (!read_u16(chunk, &ip, &index)) {
+            status = malformed(vm, "truncated operand");
+        } else if (index >= chunk->type_count) {
+            status = malformed(vm, "type index out of range");
+        } else if (vm->stack_count == 0) {
+            status = malformed(vm, "stack underflow");
+        } else {
+            status = check_value(vm, &chunk->types[index], &vm->stack[vm->stack_count - 1],
+                                 CHECK_VALUE, 0);
+        }
+        break;
+    }
+    case LZ_OP_CHECK_PARAM: {
+        uint16_t slot;
+        uint16_t index;
+        if (!read_u16(chunk, &ip, &slot) || !read_u16(chunk, &ip, &index)) {
+            status = malformed(vm, "truncated operand");
+        } else if (index >= chunk->type_count) {
+            status = malformed(vm, "type index out of range");
+        } else if (vm->frames[vm->frame_count - 1].base + slot >= vm->stack_count) {
+            status = malformed(vm, "local slot out of range");
+        } else {
+            status = check_value(vm, &chunk->types[index],
+                                 &vm->stack[vm->frames[vm->frame_count - 1].base + slot],
+                                 CHECK_PARAM, slot);
+        }
+        break;
+    }
+    case LZ_OP_CHECK_RETURN: {
+        uint16_t index;
+        if (!read_u16(chunk, &ip, &index)) {
+            status = malformed(vm, "truncated operand");
+        } else if (index >= chunk->type_count) {
+            status = malformed(vm, "type index out of range");
+        } else if (vm->stack_count == 0) {
+            status = malformed(vm, "stack underflow");
+        } else {
+            status = check_value(vm, &chunk->types[index], &vm->stack[vm->stack_count - 1],
+                                 CHECK_RETURN, 0);
+        }
+        break;
+    }
+    case LZ_OP_JUMP_IF_SUPPLIED: {
+        uint16_t parameter;
+        uint16_t distance;
+        if (!read_u16(chunk, &ip, &parameter) || !read_u16(chunk, &ip, &distance)) {
+            status = malformed(vm, "truncated operand");
+        } else if (ip + distance > chunk->count) {
+            status = malformed(vm, "jump out of range");
+        } else if (parameter >= 64 ||
+                   ((vm->frames[vm->frame_count - 1].supplied >> parameter) & 1u) != 0) {
+            ip += distance;
+        }
+        break;
+    }
+    case LZ_OP_CLOSURE: {
+        const LzValue *constant = NULL;
+        status = read_constant(vm, chunk, &ip, &constant);
+        if (status != LZ_OK) {
+            break;
+        }
+        if (constant->type != LZ_VAL_OBJECT || constant->as.object->type != LZ_OBJ_FUNCTION) {
+            status = malformed(vm, "closure operand is not a function");
+        } else {
+            status = lz_vm_make_closure(vm, (LzFunction *)constant->as.object);
+        }
+        break;
+    }
+    case LZ_OP_GET_UPVALUE:
+    case LZ_OP_SET_UPVALUE: {
+        uint16_t index;
+        const LzClosure *closure = vm->frames[vm->frame_count - 1].closure;
+        if (!read_u16(chunk, &ip, &index)) {
+            status = malformed(vm, "truncated operand");
+        } else if (closure == NULL || index >= closure->upvalue_count) {
+            status = malformed(vm, "upvalue index out of range");
+        } else if (opcode == LZ_OP_GET_UPVALUE) {
+            status = push(vm, *closure->upvalues[index]->location);
+        } else if (vm->stack_count == 0) {
+            status = malformed(vm, "stack underflow");
+        } else {
+            LzValue *location = closure->upvalues[index]->location;
+            LzValue moved = vm->stack[--vm->stack_count];
+            LzValue old = *location;
+            *location = moved;
+            lz_value_release(&vm->heap, &old);
+        }
+        break;
+    }
+    case LZ_OP_CLOSE_UPVALUE:
+        if (vm->stack_count == 0) {
+            status = malformed(vm, "stack underflow");
+        } else {
+            lz_vm_close_upvalues(vm, vm->stack_count - 1);
+            pop(vm);
+        }
+        break;
+    case LZ_OP_GET_SELF: {
+        const LzClosure *closure = vm->frames[vm->frame_count - 1].closure;
+        if (closure == NULL) {
+            status = malformed(vm, "no running function");
+        } else {
+            status = push(vm, lz_value_object((LzObject *)&closure->base));
+        }
+        break;
+    }
+    case LZ_OP_ARRAY_EXTEND:
+        status = array_extend(vm);
+        break;
+    case LZ_OP_ARRAY_NEW:
+        status = array_new(vm);
+        break;
+    case LZ_OP_ARRAY_PUSH:
+        status = array_push(vm);
+        break;
+    case LZ_OP_INDEX:
+        status = index_op(vm);
+        break;
+    case LZ_OP_SET_INDEX:
+        status = set_index_op(vm);
+        break;
+    case LZ_OP_SLICE:
+        status = slice_op(vm);
+        break;
+    case LZ_OP_RETURN:
+        if (vm->frame_count <= 1) {
+            ip = SIZE_MAX;
+        } else if (!frames_ok) {
+            status = malformed(vm, "a single step cannot leave a function");
+        } else {
+            status = lz_vm_return(vm);
+            if (status == LZ_OK) {
+                const LzCallFrame *caller = &vm->frames[vm->frame_count - 1];
+                *chunk_io = chunk = caller->chunk;
+                ip = caller->ip;
+            }
+        }
+        break;
+    default:
+        status = malformed(vm, "unknown opcode");
+        break;
+    }
+
+    *ip_io = ip;
+    return status;
+}
+
+LzStatus lz_vm_exec_one(LzVM *vm, const LzChunk *chunk, size_t *ip, bool *halted) {
+    size_t next = *ip;
+    const LzChunk *current = chunk;
+    LzStatus status = exec_one(vm, &current, &next, false);
+    *halted = next == SIZE_MAX;
+    *ip = *halted ? *ip + 1 : next;
+    return status;
+}
+
+static LzStatus execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void *context) {
+    (void)context;
+    const LzChunk *chunk = main_chunk;
     size_t ip = 0;
 
     for (;;) {
         *failed_at = ip;
         if (ip >= chunk->count) {
-            return malformed(vm, "chunk ended without OP_RETURN");
+            return ip == SIZE_MAX ? LZ_OK : malformed(vm, "chunk ended without OP_RETURN");
         }
 
         LzStatus status = lz_vm_charge_fuel(vm, 1);
@@ -281,222 +697,55 @@ static LzStatus execute(LzVM *vm, const LzChunk *chunk, size_t *failed_at) {
         }
         vm->instructions++;
 
-        uint8_t opcode = chunk->code[ip++];
-        switch (opcode) {
-        case LZ_OP_CONSTANT: {
-            const LzValue *constant = NULL;
-            status = read_constant(vm, chunk, &ip, &constant);
-            if (status == LZ_OK) {
-                status = push(vm, *constant);
-            }
-            break;
-        }
-        case LZ_OP_NIL:
-            status = push(vm, lz_value_nil());
-            break;
-        case LZ_OP_TRUE:
-            status = push(vm, lz_value_bool(true));
-            break;
-        case LZ_OP_FALSE:
-            status = push(vm, lz_value_bool(false));
-            break;
-        case LZ_OP_POP:
-            if (vm->stack_count == 0) {
-                status = malformed(vm, "stack underflow");
-            } else {
-                pop(vm);
-            }
-            break;
-        case LZ_OP_GET_GLOBAL: {
-            LzString *name;
-            status = read_name(vm, chunk, &ip, &name);
-            if (status != LZ_OK) {
-                break;
-            }
-            const LzValue *value = lz_vm_lookup(vm, name);
-            if (value == NULL) {
-                status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "undefined variable '%s'", name->data);
-            } else {
-                status = push(vm, *value);
-            }
-            break;
-        }
-        case LZ_OP_DEFINE_GLOBAL: {
-            LzString *name;
-            status = read_name(vm, chunk, &ip, &name);
-            if (status != LZ_OK) {
-                break;
-            }
-            if (vm->stack_count == 0) {
-                status = malformed(vm, "stack underflow");
-            } else if (!lz_vm_define_global(vm, name, vm->stack[vm->stack_count - 1])) {
-                status = lz_vm_out_of_memory(vm);
-            } else {
-                pop(vm);
-            }
-            break;
-        }
-        case LZ_OP_CALL:
-            if (ip >= chunk->count) {
-                status = malformed(vm, "truncated operand");
-            } else {
-                status = do_call(vm, chunk->code[ip++]);
-            }
-            break;
-        case LZ_OP_ADD:
-        case LZ_OP_SUBTRACT:
-        case LZ_OP_MULTIPLY:
-        case LZ_OP_DIVIDE:
-        case LZ_OP_FLOOR_DIVIDE:
-        case LZ_OP_MODULO:
-        case LZ_OP_LESS:
-        case LZ_OP_GREATER:
-        case LZ_OP_LESS_EQUAL:
-        case LZ_OP_GREATER_EQUAL:
-            status = binary_op(vm, (LzOpCode)opcode);
-            break;
-        case LZ_OP_GET_LOCAL: {
-            uint16_t slot;
-            if (!read_u16(chunk, &ip, &slot)) {
-                status = malformed(vm, "truncated operand");
-            } else if (slot >= vm->stack_count) {
-                status = malformed(vm, "local slot out of range");
-            } else {
-                status = push(vm, vm->stack[slot]);
-            }
-            break;
-        }
-        case LZ_OP_SET_LOCAL: {
-            uint16_t slot;
-            if (!read_u16(chunk, &ip, &slot)) {
-                status = malformed(vm, "truncated operand");
-            } else if (vm->stack_count == 0 || slot >= vm->stack_count - 1) {
-                status = malformed(vm, "local slot out of range");
-            } else {
-                LzValue moved = vm->stack[--vm->stack_count];
-                lz_value_release(&vm->heap, &vm->stack[slot]);
-                vm->stack[slot] = moved;
-            }
-            break;
-        }
-        case LZ_OP_SET_GLOBAL: {
-            LzString *name;
-            status = read_name(vm, chunk, &ip, &name);
-            if (status != LZ_OK) {
-                break;
-            }
-            if (vm->stack_count == 0) {
-                status = malformed(vm, "stack underflow");
-            } else if (lz_table_get(&vm->globals, name) == NULL) {
-                status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "undefined variable '%s'", name->data);
-            } else if (!lz_vm_define_global(vm, name, vm->stack[vm->stack_count - 1])) {
-                status = lz_vm_out_of_memory(vm);
-            } else {
-                pop(vm);
-            }
-            break;
-        }
-        case LZ_OP_JUMP:
-        case LZ_OP_JUMP_IF_FALSE:
-        case LZ_OP_JUMP_IF_TRUE: {
-            uint16_t distance;
-            if (!read_u16(chunk, &ip, &distance)) {
-                status = malformed(vm, "truncated operand");
-            } else if (ip + distance > chunk->count) {
-                status = malformed(vm, "jump out of range");
-            } else if (opcode == LZ_OP_JUMP) {
-                ip += distance;
-            } else if (vm->stack_count == 0) {
-                status = malformed(vm, "stack underflow");
-            } else if (lz_value_is_truthy(&vm->stack[vm->stack_count - 1]) ==
-                       (opcode == LZ_OP_JUMP_IF_TRUE)) {
-                ip += distance;
-            }
-            break;
-        }
-        case LZ_OP_LOOP: {
-            uint16_t distance;
-            if (!read_u16(chunk, &ip, &distance)) {
-                status = malformed(vm, "truncated operand");
-            } else if (distance > ip) {
-                status = malformed(vm, "jump out of range");
-            } else {
-                ip -= distance;
-            }
-            break;
-        }
-        case LZ_OP_EQUAL:
-            status = equal(vm);
-            break;
-        case LZ_OP_NOT:
-            status = not_op(vm);
-            break;
-        case LZ_OP_NEGATE:
-            status = negate(vm);
-            break;
-        case LZ_OP_CHECK_TYPE: {
-            uint16_t index;
-            if (!read_u16(chunk, &ip, &index)) {
-                status = malformed(vm, "truncated operand");
-            } else if (index >= chunk->type_count) {
-                status = malformed(vm, "type index out of range");
-            } else if (vm->stack_count == 0) {
-                status = malformed(vm, "stack underflow");
-            } else {
-                const LzType *type = &chunk->types[index];
-                const LzValue *top = &vm->stack[vm->stack_count - 1];
-                bool fits;
-                if (lz_value_is_array(top)) {
-                    /* An array is checked item by item, and then restricted to the item type. */
-                    status = lz_vm_charge_fuel(vm, lz_array_cost(lz_value_as_array(top)->count));
-                    fits = (type->kinds & LZ_KIND_ARRAY) != 0 &&
-                           lz_array_conform(lz_value_as_array(top), type->element);
-                } else {
-                    fits = lz_type_matches(type, top);
-                }
-                if (status == LZ_OK && !fits) {
-                    status = type_mismatch(vm, type, top);
-                }
-            }
-            break;
-        }
-        case LZ_OP_ARRAY_NEW:
-            status = array_new(vm);
-            break;
-        case LZ_OP_ARRAY_PUSH:
-            status = array_push(vm);
-            break;
-        case LZ_OP_INDEX:
-            status = index_op(vm);
-            break;
-        case LZ_OP_SET_INDEX:
-            status = set_index_op(vm);
-            break;
-        case LZ_OP_SLICE:
-            status = slice_op(vm);
-            break;
-        case LZ_OP_RETURN:
-            return LZ_OK;
-        default:
-            status = malformed(vm, "unknown opcode");
-            break;
-        }
-
+        status = exec_one(vm, &chunk, &ip, true);
         if (status != LZ_OK) {
             return status;
         }
     }
 }
 
-LzStatus lz_vm_eval(LzVM *vm, const LzChunk *chunk, LzValue *result) {
+LzStatus lz_vm_run_until(LzVM *vm, size_t depth, size_t *failed_at) {
+    const LzCallFrame *top = &vm->frames[vm->frame_count - 1];
+    const LzChunk *chunk = top->chunk;
+    size_t ip = top->ip;
+
+    while (vm->frame_count > depth) {
+        *failed_at = ip;
+        if (ip >= chunk->count) {
+            return malformed(vm, "chunk ended without OP_RETURN");
+        }
+        LzStatus status = lz_vm_charge_fuel(vm, 1);
+        if (status != LZ_OK) {
+            return status;
+        }
+        vm->instructions++;
+        status = exec_one(vm, &chunk, &ip, true);
+        if (status != LZ_OK) {
+            return status;
+        }
+    }
+    return LZ_OK;
+}
+
+LzStatus lz_vm_eval_with(LzVM *vm, const LzChunk *chunk, LzValue *result, LzExecuteFn run,
+                         void *context) {
     size_t failed_at = 0;
     vm->error[0] = '\0';
     vm->error_offset = LZ_NO_OFFSET;
     vm->heap.limit_hit = false;
 
-    LzStatus status = execute(vm, chunk, &failed_at);
-    if (status != LZ_OK && failed_at < chunk->count) {
-        vm->error_offset = chunk->offsets[failed_at];
+    /* Frame 0 is the script itself: no closure, locals from the bottom of the stack. */
+    vm->frame_count = 1;
+    vm->frames[0] = (LzCallFrame){NULL, chunk, 0, 0, LZ_ALL_SUPPLIED, LZ_NO_OFFSET};
+
+    LzStatus status = run(vm, chunk, &failed_at, context);
+    if (status != LZ_OK) {
+        /* The failing instruction belongs to the frame that was on top when it failed. */
+        const LzChunk *failing = vm->frame_count > 0 ? vm->frames[vm->frame_count - 1].chunk : chunk;
+        if (failed_at < failing->count) {
+            vm->error_offset = failing->offsets[failed_at];
+        }
+        lz_vm_capture_trace(vm);
     }
     if (status == LZ_OK && result != NULL) {
         if (vm->stack_count > 0) {
@@ -508,6 +757,10 @@ LzStatus lz_vm_eval(LzVM *vm, const LzChunk *chunk, LzValue *result) {
     }
     lz_vm_reset_stack(vm);
     return status;
+}
+
+LzStatus lz_vm_eval(LzVM *vm, const LzChunk *chunk, LzValue *result) {
+    return lz_vm_eval_with(vm, chunk, result, execute, NULL);
 }
 
 LzStatus lz_vm_run(LzVM *vm, const LzChunk *chunk) {

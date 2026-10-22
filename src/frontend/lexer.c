@@ -17,7 +17,7 @@ static const Keyword keywords[] = {
     {"and", LZ_TOKEN_AND},   {"or", LZ_TOKEN_OR},   {"true", LZ_TOKEN_TRUE},
     {"false", LZ_TOKEN_FALSE}, {"nil", LZ_TOKEN_NIL}, {"let", LZ_TOKEN_LET},
     {"const", LZ_TOKEN_CONST}, {"if", LZ_TOKEN_IF},   {"else", LZ_TOKEN_ELSE},
-    {"while", LZ_TOKEN_WHILE},
+    {"while", LZ_TOKEN_WHILE}, {"fn", LZ_TOKEN_FN},   {"return", LZ_TOKEN_RETURN},
 };
 
 /*
@@ -469,7 +469,7 @@ LzToken lz_lexer_next(LzLexer *lexer) {
     case '+':
         return make_token(lexer, LZ_TOKEN_PLUS, start);
     case '-':
-        return make_token(lexer, LZ_TOKEN_MINUS, start);
+        return make_token(lexer, match(lexer, '>') ? LZ_TOKEN_ARROW : LZ_TOKEN_MINUS, start);
     case '*':
         return make_token(lexer, LZ_TOKEN_STAR, start);
     case '%':
@@ -585,6 +585,12 @@ const char *lz_token_type_name(LzTokenType type) {
         return "ELSE";
     case LZ_TOKEN_WHILE:
         return "WHILE";
+    case LZ_TOKEN_FN:
+        return "FN";
+    case LZ_TOKEN_RETURN:
+        return "RETURN";
+    case LZ_TOKEN_ARROW:
+        return "ARROW";
     }
     return "UNKNOWN";
 }

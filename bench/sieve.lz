@@ -1,0 +1,28 @@
+# Sieve of Eratosthenes: array reads and writes in tight loops.
+let n = 1000000
+let flags = []
+let i = 0
+while i <= n {
+  push(flags, true)
+  i = i + 1
+}
+i = 2
+while i * i <= n {
+  if flags[i] {
+    let j = i * i
+    while j <= n {
+      flags[j] = false
+      j = j + i
+    }
+  }
+  i = i + 1
+}
+let count = 0
+i = 2
+while i <= n {
+  if flags[i] {
+    count = count + 1
+  }
+  i = i + 1
+}
+println(count)

@@ -1,9 +1,11 @@
 add_library(lizard_core STATIC
     core/arith.c
     core/array.c
+    core/call.c
     core/chunk.c
     core/compare.c
     core/debug.c
+    core/function.c
     core/memory.c
     core/number.c
     core/native.c
@@ -26,4 +28,5 @@ endif()
 lz_enable_warnings(lizard_core)
 
 add_subdirectory(frontend)
+add_subdirectory(engine)
 add_subdirectory(cli)

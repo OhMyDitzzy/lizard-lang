@@ -26,6 +26,41 @@ static void test_limits_parse(void) {
     LZ_CHECK(!options.has_fuel && !options.has_max_heap);
 }
 
+static void test_engine_options(void) {
+    LzOptions options;
+
+    char *ge[] = {"lizard", "--engine=ge", "a.lz", NULL};
+    LZ_CHECK(lz_options_parse(&options, 3, ge));
+    LZ_CHECK(options.has_engine && strcmp(options.engine, "ge") == 0);
+    LZ_CHECK(!options.engine_stats);
+
+    char *ref[] = {"lizard", "--engine=ref", "--engine-stats", "a.lz", NULL};
+    LZ_CHECK(lz_options_parse(&options, 4, ref));
+    LZ_CHECK(options.has_engine && strcmp(options.engine, "ref") == 0);
+    LZ_CHECK(options.engine_stats);
+
+    char *aliases[] = {"lizard", "--engine=gecko", "a.lz", NULL};
+    LZ_CHECK(lz_options_parse(&options, 3, aliases));
+    char *reference[] = {"lizard", "--engine=reference", "a.lz", NULL};
+    LZ_CHECK(lz_options_parse(&options, 3, reference));
+
+    /* --engine-stats must not be mistaken for --engine=..., and the other way round. */
+    char *stats_only[] = {"lizard", "--engine-stats", "a.lz", NULL};
+    LZ_CHECK(lz_options_parse(&options, 3, stats_only));
+    LZ_CHECK(!options.has_engine && options.engine_stats);
+
+    char *unknown[] = {"lizard", "--engine=jit", "a.lz", NULL};
+    LZ_CHECK(!lz_options_parse(&options, 3, unknown));
+    LZ_CHECK(strstr(options.error, "--engine") != NULL);
+
+    char *empty[] = {"lizard", "--engine=", "a.lz", NULL};
+    LZ_CHECK(!lz_options_parse(&options, 3, empty));
+
+    char *none[] = {"lizard", "a.lz", NULL};
+    LZ_CHECK(lz_options_parse(&options, 2, none));
+    LZ_CHECK(!options.has_engine && !options.engine_stats);
+}
+
 static void test_invalid_values(void) {
     LzOptions options;
 
@@ -70,6 +105,7 @@ static void test_script_arguments_are_untouched(void) {
 
 int main(void) {
     test_limits_parse();
+    test_engine_options();
     test_invalid_values();
     test_script_arguments_are_untouched();
     return LZ_TEST_RESULT();

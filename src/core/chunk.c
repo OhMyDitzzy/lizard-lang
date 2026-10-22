@@ -17,16 +17,20 @@ void lz_chunk_init(LzChunk *chunk) {
     chunk->type_slot_capacity = 0;
 }
 
-void lz_chunk_free(LzHeap *heap, LzChunk *chunk) {
-    for (size_t i = 0; i < chunk->constant_count; i++) {
-        lz_value_release(heap, &chunk->constants[i]);
-    }
+void lz_chunk_discard(LzChunk *chunk) {
     free(chunk->code);
     free(chunk->offsets);
     free(chunk->constants);
     free(chunk->types);
     free(chunk->type_slots);
     lz_chunk_init(chunk);
+}
+
+void lz_chunk_free(LzHeap *heap, LzChunk *chunk) {
+    for (size_t i = 0; i < chunk->constant_count; i++) {
+        lz_value_release(heap, &chunk->constants[i]);
+    }
+    lz_chunk_discard(chunk);
 }
 
 static bool reserve_code(LzChunk *chunk, size_t extra) {
@@ -230,6 +234,26 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_SLICE";
     case LZ_OP_RETURN:
         return "OP_RETURN";
+    case LZ_OP_CALL_EX:
+        return "OP_CALL_EX";
+    case LZ_OP_CLOSURE:
+        return "OP_CLOSURE";
+    case LZ_OP_GET_UPVALUE:
+        return "OP_GET_UPVALUE";
+    case LZ_OP_SET_UPVALUE:
+        return "OP_SET_UPVALUE";
+    case LZ_OP_CLOSE_UPVALUE:
+        return "OP_CLOSE_UPVALUE";
+    case LZ_OP_GET_SELF:
+        return "OP_GET_SELF";
+    case LZ_OP_CHECK_PARAM:
+        return "OP_CHECK_PARAM";
+    case LZ_OP_CHECK_RETURN:
+        return "OP_CHECK_RETURN";
+    case LZ_OP_JUMP_IF_SUPPLIED:
+        return "OP_JUMP_IF_SUPPLIED";
+    case LZ_OP_ARRAY_EXTEND:
+        return "OP_ARRAY_EXTEND";
     default:
         return "OP_UNKNOWN";
     }
@@ -248,9 +272,18 @@ size_t lz_opcode_length(uint8_t opcode) {
     case LZ_OP_JUMP_IF_TRUE:
     case LZ_OP_LOOP:
     case LZ_OP_CHECK_TYPE:
+    case LZ_OP_CLOSURE:
+    case LZ_OP_GET_UPVALUE:
+    case LZ_OP_SET_UPVALUE:
+    case LZ_OP_CHECK_RETURN:
         return 3;
     case LZ_OP_CALL:
         return 2;
+    case LZ_OP_CALL_EX:
+        return 4;
+    case LZ_OP_CHECK_PARAM:
+    case LZ_OP_JUMP_IF_SUPPLIED:
+        return 5;
     case LZ_OP_NIL:
     case LZ_OP_TRUE:
     case LZ_OP_FALSE:
@@ -274,6 +307,9 @@ size_t lz_opcode_length(uint8_t opcode) {
     case LZ_OP_SET_INDEX:
     case LZ_OP_SLICE:
     case LZ_OP_RETURN:
+    case LZ_OP_CLOSE_UPVALUE:
+    case LZ_OP_GET_SELF:
+    case LZ_OP_ARRAY_EXTEND:
         return 1;
     default:
         return 0;

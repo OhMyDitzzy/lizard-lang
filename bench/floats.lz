@@ -1,0 +1,12 @@
+# Leibniz series for pi: floating point arithmetic and a sign flip, in block locals.
+{
+  let k = 0
+  let sum = 0.0
+  let sign = 1.0
+  while k < 4000000 {
+    sum = sum + sign / (2 * k + 1)
+    sign = -sign
+    k = k + 1
+  }
+  println(sum * 4)
+}

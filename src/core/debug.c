@@ -93,6 +93,44 @@ static size_t constant_instruction(const LzChunk *chunk, size_t offset, const Lz
     return offset + 3;
 }
 
+static unsigned read16(const LzChunk *chunk, size_t at) {
+    return (unsigned)((chunk->code[at] << 8) | chunk->code[at + 1]);
+}
+
+/* Two u16 operands: CHECK_PARAM slot type, JUMP_IF_SUPPLIED parameter distance. */
+static size_t pair_instruction(const LzChunk *chunk, size_t offset, const LzWriter *out) {
+    uint8_t opcode = chunk->code[offset];
+    const char *name = lz_opcode_name(opcode);
+    if (offset + 5 > chunk->count) {
+        put(out, "%s <truncated>\n", name);
+        return chunk->count;
+    }
+    unsigned first = read16(chunk, offset + 1);
+    unsigned second = read16(chunk, offset + 3);
+    if (opcode == LZ_OP_JUMP_IF_SUPPLIED) {
+        put(out, "%-18s %5u %5u -> %04zu\n", name, first, second, offset + 5 + second);
+        return offset + 5;
+    }
+    put(out, "%-18s %5u '", name, first);
+    if (second < chunk->type_count) {
+        lz_type_describe(&chunk->types[second], out);
+    } else {
+        put(out, "<invalid>");
+    }
+    put(out, "'\n");
+    return offset + 5;
+}
+
+static size_t call_ex_instruction(const LzChunk *chunk, size_t offset, const LzWriter *out) {
+    const char *name = lz_opcode_name(chunk->code[offset]);
+    if (offset + 4 > chunk->count) {
+        put(out, "%s <truncated>\n", name);
+        return chunk->count;
+    }
+    put(out, "%-18s %5u named\n", name, (unsigned)chunk->code[offset + 1]);
+    return offset + 4;
+}
+
 static uint32_t shown_position(const LzChunk *chunk, size_t index, const LzSource *source) {
     uint32_t position = chunk->offsets[index];
     return source != NULL ? lz_source_locate(source, position).line : position;
@@ -113,12 +151,21 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_GET_GLOBAL:
     case LZ_OP_DEFINE_GLOBAL:
     case LZ_OP_SET_GLOBAL:
+    case LZ_OP_CLOSURE:
         return constant_instruction(chunk, offset, out);
     case LZ_OP_GET_LOCAL:
     case LZ_OP_SET_LOCAL:
+    case LZ_OP_GET_UPVALUE:
+    case LZ_OP_SET_UPVALUE:
         return slot_instruction(chunk, offset, out);
     case LZ_OP_CHECK_TYPE:
+    case LZ_OP_CHECK_RETURN:
         return type_instruction(chunk, offset, out);
+    case LZ_OP_CHECK_PARAM:
+    case LZ_OP_JUMP_IF_SUPPLIED:
+        return pair_instruction(chunk, offset, out);
+    case LZ_OP_CALL_EX:
+        return call_ex_instruction(chunk, offset, out);
     case LZ_OP_JUMP:
     case LZ_OP_JUMP_IF_FALSE:
     case LZ_OP_JUMP_IF_TRUE:
@@ -150,6 +197,9 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_SET_INDEX:
     case LZ_OP_SLICE:
     case LZ_OP_RETURN:
+    case LZ_OP_CLOSE_UPVALUE:
+    case LZ_OP_GET_SELF:
+    case LZ_OP_ARRAY_EXTEND:
         return simple_instruction(lz_opcode_name(opcode), offset, out);
     default:
         put(out, "unknown opcode %u\n", (unsigned)opcode);

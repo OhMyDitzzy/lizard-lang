@@ -44,7 +44,19 @@ typedef enum LzOpCode {
     LZ_OP_INDEX,         /* pop index, pop array, push array[index] (negative counts from the end) */
     LZ_OP_SET_INDEX,     /* pop value, pop index, pop array: array[index] = value */
     LZ_OP_SLICE,         /* pop end, pop start, pop array, push a new array (nil bound = open) */
-    LZ_OP_RETURN         /* stop executing the chunk */
+    LZ_OP_RETURN,        /* top level: stop executing. In a function: return the top value to the caller */
+
+    /* Functions. Kept after OP_RETURN so the original opcodes keep their numbers. */
+    LZ_OP_CALL_EX,       /* u8 named, u16 names: call with [callee][array of positional args][named values] */
+    LZ_OP_CLOSURE,       /* u16 constant (a function): push a closure that captures its upvalues */
+    LZ_OP_GET_UPVALUE,   /* u16 index: push a captured variable of the running closure */
+    LZ_OP_SET_UPVALUE,   /* u16 index: pop the top value into a captured variable */
+    LZ_OP_CLOSE_UPVALUE, /* close the upvalues at the top slot, then pop it (a captured local going out of scope) */
+    LZ_OP_GET_SELF,      /* push the running closure (a function calling itself by name) */
+    LZ_OP_CHECK_PARAM,   /* u16 slot, u16 type: fail with LZ_ERR_TYPE unless the parameter matches */
+    LZ_OP_CHECK_RETURN,  /* u16 type: fail with LZ_ERR_TYPE unless the value about to be returned matches */
+    LZ_OP_JUMP_IF_SUPPLIED, /* u16 parameter, u16 distance: skip forward if the caller supplied that argument */
+    LZ_OP_ARRAY_EXTEND   /* pop an array and append all its items to the array below it (which stays) */
 } LzOpCode;
 
 #define LZ_CONSTANTS_MAX 65536
@@ -69,6 +81,9 @@ void lz_chunk_init(LzChunk *chunk);
 
 /* Releases the references held by the constant table. */
 void lz_chunk_free(LzHeap *heap, LzChunk *chunk);
+
+/* Frees the arrays without releasing the constants (for a heap that frees every object itself). */
+void lz_chunk_discard(LzChunk *chunk);
 
 bool lz_chunk_write(LzChunk *chunk, uint8_t byte, uint32_t source_offset);
 bool lz_chunk_write_u16(LzChunk *chunk, uint16_t operand, uint32_t source_offset);

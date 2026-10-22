@@ -5,6 +5,7 @@
 
 #include "lizard/builtin.h"
 #include "lizard/compiler.h"
+#include "lizard/engine.h"
 #include "lizard/lexer.h"
 #include "lizard/vm.h"
 #include "lizard/version.h"
@@ -28,6 +29,8 @@ static void print_usage(FILE *stream) {
           "      --dump-tokens Print the tokens of the script and exit\n"
           "      --max-heap=N Limit live heap bytes (suffix K, M or G allowed)\n"
           "      --fuel=N     Limit the number of executed instructions\n"
+          "      --engine=E   Execution engine: ge (default, the fast one) or ref\n"
+          "      --engine-stats  Print what the engine did when the program ends\n"
           "      --           Stop option parsing\n",
           stream);
 }
@@ -41,6 +44,20 @@ static void print_heap_stats(const LzHeap *heap) {
     fprintf(stderr,
             "heap: %zu allocations, peak %zu bytes, %zu objects (%zu bytes) still live at exit\n",
             heap->total_allocations, heap->peak_bytes, heap->live_objects, heap->live_bytes);
+}
+
+static void print_engine_stats(LzEngine engine, const LzEngineStats *stats) {
+    fprintf(stderr, "engine %s: %llu instructions", lz_engine_name(engine),
+            (unsigned long long)stats->instructions);
+    if (engine == LZ_ENGINE_GE && stats->translated) {
+        double ratio = stats->dispatches > 0 ? (double)stats->instructions / (double)stats->dispatches : 1.0;
+        fprintf(stderr, ", %llu dispatches (%.2fx fewer), %llu delegated, %zu fused sites in %zu ops",
+                (unsigned long long)stats->dispatches, ratio, (unsigned long long)stats->delegated,
+                stats->fused_sites, stats->program_size);
+    } else if (engine == LZ_ENGINE_GE) {
+        fputs(" (chunk not translatable: ran on the reference interpreter)", stderr);
+    }
+    fputc('\n', stderr);
 }
 
 static int dump_tokens(const char *path) {
@@ -105,6 +122,22 @@ static void report_runtime_error(const LzVM *vm, const LzSource *source) {
     LzWriter err = lz_writer_from_file(stderr);
     if (vm->error_offset != LZ_NO_OFFSET) {
         lz_source_write_diagnostic(source, vm->error_offset, 0, "error", vm->error, &err);
+        if (vm->trace_count > 0) {
+            fprintf(stderr, "stack trace (innermost call first):\n");
+            for (size_t i = 0; i < vm->trace_count; i++) {
+                const LzTraceEntry *entry = &vm->trace[i];
+                if (entry->offset == LZ_NO_OFFSET) {
+                    fprintf(stderr, "  at %s\n", entry->name);
+                } else {
+                    LzLocation where = lz_source_locate(source, entry->offset);
+                    fprintf(stderr, "  at %s (%s:%u:%u)\n", entry->name, source->name,
+                            (unsigned)where.line, (unsigned)where.column);
+                }
+            }
+            if (vm->trace_total > vm->trace_count) {
+                fprintf(stderr, "  ... %zu more frames\n", vm->trace_total - vm->trace_count);
+            }
+        }
     } else {
         fprintf(stderr, "lizard: error: %s\n", vm->error);
     }
@@ -137,6 +170,12 @@ static int run_script(const LzOptions *options) {
             lz_vm_set_fuel(&vm, options->fuel);
         }
 
+        LzEngine engine = LZ_ENGINE_GE;
+        if (options->has_engine) {
+            (void)lz_engine_from_name(options->engine, &engine); /* validated while parsing */
+        }
+        LzEngineStats stats = {0};
+
         LzDiagnostics diagnostics;
         LzStatus status = lz_compile(&vm, &source, &chunk, &diagnostics);
         if (status == LZ_ERR_COMPILE) {
@@ -145,10 +184,16 @@ static int run_script(const LzOptions *options) {
         } else if (status != LZ_OK) {
             fprintf(stderr, "lizard: error: %s\n", vm.error);
             exit_code = EXIT_RUNTIME_ERROR;
-        } else if (lz_vm_run(&vm, &chunk) != LZ_OK) {
-            lz_writer_flush(&vm.out);
-            report_runtime_error(&vm, &source);
-            exit_code = EXIT_RUNTIME_ERROR;
+        } else {
+            status = lz_engine_run(engine, &vm, &chunk, options->engine_stats ? &stats : NULL);
+            if (status != LZ_OK) {
+                lz_writer_flush(&vm.out);
+                report_runtime_error(&vm, &source);
+                exit_code = EXIT_RUNTIME_ERROR;
+            }
+            if (options->engine_stats) {
+                print_engine_stats(engine, &stats);
+            }
         }
     }
 

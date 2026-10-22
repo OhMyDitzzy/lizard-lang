@@ -14,6 +14,9 @@ typedef struct LzOptions {
     uint64_t max_heap_bytes;
     bool has_fuel;
     uint64_t fuel;
+    bool has_engine;
+    char engine[16]; /* "ref", "reference", "ge" or "gecko"; the default engine when not given */
+    bool engine_stats;
     const char *script_path;
     int script_argc;
     char **script_argv;
