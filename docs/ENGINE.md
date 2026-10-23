@@ -14,31 +14,31 @@ language and differ only in speed.
 
 ## What GE is, and what it is not
 
-GE is **not a JIT**. It never generates machine code. It is an interpreter that
-does, once per run, the work the reference interpreter repeats on every
-instruction: decode operands, resolve jumps, look up globals. It also runs the
-most common instruction sequences as single instructions.
-
-A JIT in the style of LuaJIT is the next level (see [Roadmap](#roadmap-toward-a-jit)).
-GE is the foundation it would stand on: the same IR, the same exactness rules,
-and the same test machinery.
+GE started as an interpreter that does, once per run, the work the reference
+interpreter repeats on every instruction: decode operands, resolve jumps, look up
+globals, and run the most common instruction sequences as single instructions.
+On top of that sits a **baseline JIT** (see [The JIT](#the-jit)) that compiles hot
+loops and functions to x86-64 machine code. Both levels use the same IR, the same
+exactness rules and the same test machinery, and a program the JIT cannot (or may
+not) handle simply keeps running on the interpreter.
 
 ### Results
 
 `bench/run.sh` runs every `bench/*.lz` on both engines. Best of 3 on one
-x86-64 core, `-O3`, no LTO (your numbers will differ; the ratios are what carry over):
+2.1 GHz Xeon core, `-O3`, no LTO (your numbers will differ; the ratios are what
+carry over). "GE" is the interpreter alone (`--jit=off`), "GE+JIT" the default:
 
-| Benchmark | `ref` | `ge` | Speedup |
-| --- | --- | --- | --- |
-| `collatz` (globals, `n / 2`) | 3.43 s | 1.03 s | 3.3x |
-| `collatz_locals` (locals, `//`) | 3.18 s | 0.88 s | 3.6x |
-| `floats` (Leibniz series) | 0.54 s | 0.16 s | 3.2x |
-| `loops` (nested counting loops) | 0.95 s | 0.27 s | 3.4x |
-| `matrix` (150x150 multiply) | 0.57 s | 0.15 s | 3.8x |
-| `prefix_sums` (array in place) | 0.30 s | 0.07 s | 4.3x |
-| `sieve` (1,000,000) | 0.44 s | 0.13 s | 3.4x |
-| `fib` (`fib(32)`, ~7M calls) | 0.76 s | 0.25 s | 3.0x |
-| `calls` (defaults, typed args, closure) | 1.03 s | 0.53 s | 1.9x |
+| Benchmark | `ref` | GE | GE+JIT | JIT vs `ref` | JIT vs GE |
+| --- | --- | --- | --- | --- | --- |
+| `collatz` (globals, `n / 2`) | 4.21 s | 1.16 s | 0.41 s | 10.3x | 2.8x |
+| `collatz_locals` (locals, `//`) | 3.71 s | 1.04 s | 0.11 s | 32.6x | 9.5x |
+| `floats` (Leibniz series) | 0.63 s | 0.18 s | 0.04 s | 16.0x | 4.5x |
+| `loops` (nested counting loops) | 1.21 s | 0.30 s | 0.05 s | 24.7x | 6.0x |
+| `matrix` (150x150 multiply) | 0.67 s | 0.17 s | 0.05 s | 13.8x | 3.4x |
+| `prefix_sums` (array in place) | 0.37 s | 0.07 s | 0.04 s | 8.4x | 1.8x |
+| `sieve` (1,000,000) | 0.58 s | 0.13 s | 0.07 s | 8.4x | 1.9x |
+| `fib` (`fib(32)`, ~7M calls) | 0.70 s | 0.23 s | 0.05 s | 13.4x | 4.6x |
+| `calls` (defaults, typed args, closure) | 0.99 s | 0.47 s | 0.12 s | 7.6x | 3.9x |
 
 `--engine-stats` shows where it comes from. On `collatz`, 515,655,227 bytecode
 instructions run in 161,770,224 dispatches: every instruction is still
@@ -203,9 +203,86 @@ instruction loop supplied by the caller). Both are declared in `vm.h`.
 3. Add a program using it to the corpus in `tests/test_engine.c`, and teach the
    generators in `tests/fuzz_engine.c` about it.
 
+## The JIT
+
+`ge_jit.c` (with the assembler in `ge_x64.h`) compiles a translated program to
+x86-64 machine code. It is a *baseline* JIT: no type feedback, no register
+allocation across instructions, no inlining. What it removes is dispatch,
+operand decoding and most memory traffic for the instruction sequences GE
+already fuses, which is where an interpreter spends its time.
+
+### When it runs
+
+* Platform: Linux or macOS on x86-64 (System V ABI). Elsewhere, or with
+  `-DLZ_ENABLE_JIT=OFF`, the same sources build a stub and everything runs on
+  the interpreter. (Only Linux has been tested.)
+* Policy: the interpreter counts calls and loop back-edges per program; at 50 it
+  compiles the program and enters the native code at the back-edge or call. Code
+  that keeps handing instructions back to the interpreter (more than 256 bail-outs
+  and more than half as many as entries) is retired and left to the interpreter.
+* `--jit=off|on|eager` (or `LZ_JIT=...`, or `lz_engine_set_jit`). `eager`
+  compiles every program on first sight; the test suite uses it to run
+  everything native.
+* **Never with a fuel limit.** Native code does not meter fuel, so a run with
+  `--fuel` (fuel is not `LZ_FUEL_UNLIMITED`) always uses the interpreter, whose
+  accounting is exact. `vm->instructions` is still exact under the JIT.
+
+### Design
+
+Native code works on the VM's own value stack and frame stack, so the state is
+always in the interpreter's form and control can pass either way at an
+instruction boundary:
+
+* The JIT computes, per instruction, how many values the frame has on the stack
+  (a stack-height analysis). Locals and temporaries are then `[r14 + 16 * slot]`
+  operands. A chunk whose heights are inconsistent (hand-made bytecode that
+  underflows the stack) is not compiled.
+* Fused instructions (`BIN`, `CMPJ`, `INDEX`, ...) become one block: read operands
+  in place, check types, compute, store. Int and float paths are both inline (the
+  float path in a cold section). Overflow, division by zero, out of range indexes,
+  strings and everything else unusual **bail out**: all checks of an instruction
+  pass before anything is changed, so the interpreter can run that very
+  instruction and produce the exact result or error.
+* Calls to closures with exactly the declared parameters push the frame inline and
+  use a native `call`; `RETURN` pops it and `ret`s. Recursion stays in machine
+  code. Natives, defaults, rest parameters and errors go through
+  `lz_vm_call`; instructions without an inline form (`DEFINE_GLOBAL`, `CLOSURE`,
+  `ARRAY_*`, `SLICE`, ...) run the reference semantics through `lz_vm_exec_one`.
+  `CALL_EX` bails out to the interpreter.
+* Instruction counts are exact: a block adds its length to `r15` where it ends or
+  calls out, and a bail-out stub compensates for what had not run yet.
+* Machine code lives in `mmap`ed pages written first and then made executable
+  (never writable and executable at once), one mapping per compiled program,
+  freed with the program.
+
+Debugging aids: `LZ_JIT_DUMP=prefix` writes each compiled program to
+`prefix.N.bin` (`objdump -D -b binary -mi386:x86-64 -M intel`).
+
+### Testing
+
+* `test_jit` runs ~65 programs (overflow in the middle of a loop, float modulo,
+  negative indexes, deep recursion and stack overflow, closures, errors inside
+  natively called functions, defaults/rest/named arguments, typed parameters,
+  heap limits, ...) on `ref` and on GE with the JIT eager and with the normal
+  policy, and demands identical results; it also checks that they really ran
+  native and that fuel limits keep them off it.
+* `test_engine`, `fuzz_engine` and the `*_ge` conformance variants run a second
+  time with `LZ_JIT=eager` (the `*_jit` tests in CTest).
+* The whole suite passes under ASan and UBSan, and with `-DLZ_ENABLE_JIT=OFF`.
+
+### Limits
+
+* x86-64 only. An ARM64 backend is a separate program.
+* `CALL_EX`, typed-array element stores, `NOT` of an object and float
+  floor-division bail out (correct, but at interpreter speed).
+* Not compatible with CPU shadow-stack enforcement (CET), because exits unwind
+  the native stack without `ret`.
+* Values live in memory between instructions. Keeping them in registers (and
+  specializing on types) is the next step.
+
 ## Known gaps
 
-* `ARRAY_NEW`, `ARRAY_PUSH`, `SLICE`, `DEFINE_GLOBAL` and `CHECK_TYPE` are
+* `ARRAY_NEW`, `ARRAY_PUSH`, `SLICE` and `DEFINE_GLOBAL` are
   delegated. Building a large array with `push` goes through the native-call fast
   path, but each `push` is still a call.
 * Translation runs on every `lz_ge_eval`. For a host that runs the same chunk
@@ -216,23 +293,18 @@ instruction loop supplied by the caller). Both are declared in `vm.h`.
 * GE needs no compiler extensions: it builds with `-std=c11 -Wpedantic`. Computed
   `goto` dispatch might add some speed on GCC and Clang, at the price of that.
 
-## Roadmap toward a JIT
+## Roadmap
 
-GE removes interpretive overhead; it does not remove interpretation. Native code
-is the next step, and the order matters:
+The baseline JIT is done (above). What remains, in order:
 
-1. **Type feedback.** Record the types each site sees (GE already has per-site
-   state) and specialize: an `ADD` that has only ever seen small ints becomes an
-   int add behind a one-instruction guard.
-2. **A register IR.** Turn the stack bytecode into three-address code over stack
-   slots. This is also what a JIT wants as input, and it makes common
-   subexpressions and dead stores visible.
-3. **A baseline JIT.** Emit machine code from the GE IR for hot loops only
-   (counters on back-edges). Needs one backend per architecture: x86-64 and
-   ARM64 are different programs, and executable memory is restricted on some
-   platforms.
-4. **Only then**, a tracing JIT in the LuaJIT style, with deoptimization back to
-   GE using exactly the delegation mechanism above.
+1. **Type feedback and register allocation.** Record the types each site sees
+   and keep values in registers inside a loop; an `ADD` that has only seen small
+   ints becomes an int add behind a guard.
+2. **Bail-outs that resume.** Today a bail-out re-enters native code at the next
+   leader; resuming in the middle of a block would make guard failures cheaper.
+3. **More inline instructions** (native calls like `push` and `len`, `CALL_EX`).
+4. **An ARM64 backend.**
+5. **Only then**, a tracing JIT in the LuaJIT style.
 
-Every stage can be tested the way GE is: run it against `ref` on the same
-programs and demand identical behaviour.
+Every stage can be tested the way GE and the JIT are: run it against `ref` on
+the same programs and demand identical behaviour.

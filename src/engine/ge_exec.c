@@ -2,6 +2,7 @@
 #include <stdlib.h>
 
 #include "ge_internal.h"
+#include "ge_jit.h"
 #include "lizard/array.h"
 #include "lizard/native.h"
 
@@ -454,6 +455,9 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
     uint64_t delegated = 0;
     LzStatus status = LZ_OK;
     GeIns *ins = code;
+    GeProgram *prog = run->program;
+    GeJitExit jx;
+    uint32_t nt_count = 0; /* hotness to add at the next native_try */
 
 /* The stack height and instruction count must be visible to anything that calls out. */
 #define SYNC_OUT()                                                                                 \
@@ -498,6 +502,10 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
         }                                                                                          \
         executed += ins->span;                                                                     \
     } while (0)
+
+    if (run->jit && run->jit_eager) {
+        goto native_try;
+    }
 
     for (;;) {
         ins = &code[pc];
@@ -645,10 +653,14 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             break;
 
         case LZ_OP_JUMP:
-        case LZ_OP_LOOP:
             TICK(1);
             pc = ins->target;
             break;
+        case LZ_OP_LOOP:
+            TICK(1);
+            pc = ins->target;
+            nt_count = 1;
+            goto native_try; /* a back-edge: hot code gets compiled and entered here */
         case LZ_OP_JUMP_IF_FALSE:
         case LZ_OP_JUMP_IF_TRUE:
             TICK(1);
@@ -738,9 +750,11 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                     base = sp - argc;
                     chunk = &function->chunk;
                     code = callee_program->ins;
+                    prog = callee_program;
                     constants = chunk->constants;
                     pc = 0;
-                    break;
+                    nt_count = 1;
+                    goto native_try;
                 }
                 /* Defaults, a rest parameter, an arity error or a function not translated yet. */
                 bool entered = false;
@@ -829,10 +843,15 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 code = run->program->ins;
             } else {
                 chunk = caller->chunk;
-                code = ((GeProgram *)caller->closure->function->engine_cache)->ins;
+                prog = caller->closure->function->engine_cache;
+                code = prog->ins;
+            }
+            if (caller->closure == NULL) {
+                prog = run->program;
             }
             constants = chunk->constants;
-            break;
+            nt_count = 0;
+            goto native_try;
         }
 
         /* ---- fused instructions ---- */
@@ -1007,8 +1026,84 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
         base = frame->base;
         chunk = &function->chunk;
         code = program->ins;
+        prog = program;
         constants = chunk->constants;
         pc = 0;
+        nt_count = 1;
+        goto native_try;
+    }
+
+    /*
+     * Hot code runs as machine code (ge_jit.c). It returns here when it finishes, hands an
+     * instruction back, or fails; the stack and frames are always in the interpreter's form.
+     */
+    native_try : {
+        if (!run->jit || vm->fuel != LZ_FUEL_UNLIMITED || prog->jit_state >= GE_JIT_FAILED) {
+            continue;
+        }
+        if (prog->jit == NULL) {
+            if (prog->jit_state != GE_JIT_UNTRIED) {
+                continue;
+            }
+            prog->hot += nt_count;
+            if (!run->jit_eager && prog->hot < run->jit_threshold) {
+                continue;
+            }
+            const LzCallFrame *top = &vm->frames[vm->frame_count - 1];
+            size_t entry_depth = top->closure == NULL ? 0 : lz_function_slots(top->closure->function);
+            prog->jit = ge_jit_compile(chunk, prog, entry_depth);
+            prog->jit_state = prog->jit != NULL ? GE_JIT_COMPILED : GE_JIT_FAILED;
+            if (prog->jit == NULL) {
+                continue;
+            }
+            run->jit_programs++;
+            run->jit_bytes += prog->jit->code_size;
+        }
+        SYNC_OUT();
+        if (!ge_jit_enter(vm, prog->jit, pc, base, sp, &jx)) {
+            continue;
+        }
+        SYNC_IN();
+        run->jit_enters++;
+        prog->jit_enters++;
+        dispatches++;
+        if (jx.reason == GE_JX_HALT) {
+            status = LZ_OK;
+            goto done;
+        }
+        if (jx.reason == GE_JX_ENTER) {
+            goto enter_callee;
+        }
+        {
+            const LzCallFrame *top = &vm->frames[vm->frame_count - 1];
+            base = top->base;
+            if (top->closure == NULL) {
+                chunk = main_chunk;
+                prog = run->program;
+            } else {
+                chunk = top->chunk;
+                prog = top->closure->function->engine_cache;
+            }
+            code = prog->ins;
+            constants = chunk->constants;
+            if (jx.reason == GE_JX_RETURNED) {
+                pc = top->ip;
+                nt_count = 0;
+                goto native_try;
+            }
+        }
+        pc = jx.pc;
+        if (jx.reason == GE_JX_FAIL) {
+            status = (LzStatus)jx.status;
+            goto fail;
+        }
+        /* BAIL: the interpreter runs this instruction. Give up on code that keeps bailing. */
+        prog->jit_bails++;
+        if (!run->jit_eager && prog->jit_bails > 256 && prog->jit_bails * 2 > prog->jit_enters) {
+            prog->jit_state = GE_JIT_DISABLED;
+            prog->jit_retired = prog->jit;
+            prog->jit = NULL;
+        }
         continue;
     }
 
@@ -1029,6 +1124,8 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             goto done;
         }
         pc++;
+        nt_count = 0;
+        goto native_try;
     }
     }
 

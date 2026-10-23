@@ -166,6 +166,8 @@ static bool try_fuse(GeIns *ins, size_t count, size_t k) {
     return false;
 }
 
+#include "ge_jit.h"
+
 void ge_cache_free(void *cache) {
     GeProgram *program = cache;
     ge_program_free(program);
@@ -173,6 +175,10 @@ void ge_cache_free(void *cache) {
 }
 
 void ge_program_free(GeProgram *program) {
+    ge_jit_free(program->jit);
+    ge_jit_free(program->jit_retired);
+    program->jit = NULL;
+    program->jit_retired = NULL;
     free(program->ins);
     program->ins = NULL;
     program->count = 0;

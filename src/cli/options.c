@@ -109,6 +109,15 @@ bool lz_options_parse(LzOptions *options, int argc, char **argv) {
             }
             options->has_engine = true;
             (void)snprintf(options->engine, sizeof options->engine, "%s", name);
+        } else if (option_value(arg, "--jit") != NULL) {
+            const char *name = option_value(arg, "--jit");
+            if (strcmp(name, "on") != 0 && strcmp(name, "off") != 0 && strcmp(name, "eager") != 0) {
+                (void)snprintf(options->error, sizeof options->error,
+                               "invalid value for --jit: '%.40s' (expected on, off or eager)", name);
+                return false;
+            }
+            options->has_jit = true;
+            (void)snprintf(options->jit, sizeof options->jit, "%s", name);
         } else if (option_value(arg, "--max-heap") != NULL) {
             uint64_t bytes;
             if (!parse_count(option_value(arg, "--max-heap"), true, &bytes) || bytes > SIZE_MAX) {

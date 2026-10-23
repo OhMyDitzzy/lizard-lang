@@ -17,6 +17,7 @@ endif()
 option(LZ_BUILD_TESTS "Build the test suite" ON)
 option(LZ_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(LZ_ENABLE_SANITIZERS "Build with AddressSanitizer and UBSan" OFF)
+option(LZ_ENABLE_JIT "Build the x86-64 JIT of the Gecko Engine (ignored on other platforms)" ON)
 option(LZ_ENABLE_LTO "Enable link-time optimization when supported" OFF)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

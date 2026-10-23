@@ -47,10 +47,21 @@ typedef struct GeIns {
     uint32_t hint_c;
 } GeIns;
 
+struct GeJit;
+
+/* Where a program stands with the JIT (ge_jit.h). */
+enum { GE_JIT_UNTRIED = 0, GE_JIT_COMPILED = 1, GE_JIT_FAILED = 2, GE_JIT_DISABLED = 3 };
+
 typedef struct GeProgram {
     GeIns *ins;         /* count entries; ins[count - 1] is the GE_OP_END sentinel */
     size_t count;
     size_t fused_sites;
+    struct GeJit *jit;         /* native code for this program, or NULL */
+    struct GeJit *jit_retired; /* code given up on after too many bail-outs (freed with the program) */
+    uint32_t hot;              /* loop back-edges and calls seen by the interpreter */
+    uint32_t jit_enters;       /* times the interpreter entered the native code */
+    uint32_t jit_bails;        /* times the native code handed an instruction back */
+    uint8_t jit_state;
 } GeProgram;
 
 typedef struct GeRun {
@@ -59,6 +70,12 @@ typedef struct GeRun {
     uint64_t delegated;
     size_t function_ops;   /* GE instructions of the function programs translated during the run */
     size_t function_fused; /* fused sites in them */
+    bool jit;              /* may this run use native code? */
+    bool jit_eager;        /* compile every program on first sight (tests) */
+    uint32_t jit_threshold;
+    uint64_t jit_enters;   /* entries into native code */
+    size_t jit_programs;   /* programs compiled during the run */
+    size_t jit_bytes;      /* machine code generated */
 } GeRun;
 
 /*

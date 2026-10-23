@@ -26,6 +26,22 @@ static void test_limits_parse(void) {
     LZ_CHECK(!options.has_fuel && !options.has_max_heap);
 }
 
+static void test_jit_option(void) {
+    LzOptions options;
+    char *eager[] = {"lizard", "--jit=eager", "a.lz", NULL};
+    LZ_CHECK(lz_options_parse(&options, 3, eager));
+    LZ_CHECK(options.has_jit && strcmp(options.jit, "eager") == 0);
+    char *off[] = {"lizard", "--jit=off", "--engine-stats", "a.lz", NULL};
+    LZ_CHECK(lz_options_parse(&options, 4, off));
+    LZ_CHECK(options.has_jit && strcmp(options.jit, "off") == 0 && options.engine_stats);
+    char *none[] = {"lizard", "a.lz", NULL};
+    LZ_CHECK(lz_options_parse(&options, 2, none));
+    LZ_CHECK(!options.has_jit);
+    char *bad[] = {"lizard", "--jit=maybe", "a.lz", NULL};
+    LZ_CHECK(!lz_options_parse(&options, 3, bad));
+    LZ_CHECK(strstr(options.error, "--jit") != NULL);
+}
+
 static void test_engine_options(void) {
     LzOptions options;
 
@@ -106,6 +122,7 @@ static void test_script_arguments_are_untouched(void) {
 int main(void) {
     test_limits_parse();
     test_engine_options();
+    test_jit_option();
     test_invalid_values();
     test_script_arguments_are_untouched();
     return LZ_TEST_RESULT();

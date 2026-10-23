@@ -23,7 +23,29 @@ typedef struct LzEngineStats {
     size_t program_size;   /* GE instructions after translation, 0 when not translated */
     size_t fused_sites;    /* sites where several instructions became one */
     bool translated;       /* false on the reference engine, or when GE fell back to it */
+    uint64_t jit_enters;   /* times the interpreter handed control to native code */
+    size_t jit_programs;   /* programs (script and functions) compiled to machine code */
+    size_t jit_bytes;      /* machine code generated */
 } LzEngineStats;
+
+/*
+ * The Gecko JIT. LZ_JIT_ON compiles hot loops and functions to x86-64 machine code
+ * (Linux and macOS on x86-64; elsewhere it quietly stays off). LZ_JIT_EAGER compiles
+ * every program on first sight, which is what the tests use to run everything native.
+ * The default is LZ_JIT_ON, or whatever the LZ_JIT environment variable says
+ * ("off", "on", "eager") the first time the engine runs. Programs run with a fuel
+ * limit always use the interpreter, so behaviour is identical in every mode.
+ */
+typedef enum LzJitMode {
+    LZ_JIT_OFF = 0,
+    LZ_JIT_ON = 1,
+    LZ_JIT_EAGER = 2,
+} LzJitMode;
+
+void lz_engine_set_jit(LzJitMode mode);
+LzJitMode lz_engine_jit_mode(void);
+bool lz_engine_jit_available(void);
+bool lz_jit_mode_from_name(const char *name, LzJitMode *out);
 
 const char *lz_engine_name(LzEngine engine);
 

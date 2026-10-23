@@ -55,6 +55,7 @@ lz_add_test(test_print)
 
 lz_add_engine_test(test_engine)
 lz_add_engine_test(fuzz_engine)
+lz_add_engine_test(test_jit)
 
 lz_add_ge_variant(test_run)
 lz_add_ge_variant(test_limits)
@@ -62,3 +63,12 @@ lz_add_ge_variant(test_array)
 lz_add_ge_variant(test_compiler)
 lz_add_ge_variant(fuzz_run)
 lz_add_ge_variant(fuzz_compile)
+
+# The Gecko JIT: the whole engine and conformance suite again with every program compiled
+# to machine code on first sight (LZ_JIT=eager). Without a JIT on the platform these are
+# plain GE runs.
+foreach(name test_engine fuzz_engine test_run_ge test_limits_ge test_array_ge test_compiler_ge
+        fuzz_run_ge fuzz_compile_ge)
+    add_test(NAME ${name}_jit COMMAND ${name})
+    set_tests_properties(${name}_jit PROPERTIES ENVIRONMENT "LZ_JIT=eager")
+endforeach()

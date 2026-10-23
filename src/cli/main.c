@@ -31,6 +31,7 @@ static void print_usage(FILE *stream) {
           "      --fuel=N     Limit the number of executed instructions\n"
           "      --engine=E   Execution engine: ge (default, the fast one) or ref\n"
           "      --engine-stats  Print what the engine did when the program ends\n"
+          "      --jit=M      Machine code for hot code: on (default), off or eager\n"
           "      --           Stop option parsing\n",
           stream);
 }
@@ -54,6 +55,10 @@ static void print_engine_stats(LzEngine engine, const LzEngineStats *stats) {
         fprintf(stderr, ", %llu dispatches (%.2fx fewer), %llu delegated, %zu fused sites in %zu ops",
                 (unsigned long long)stats->dispatches, ratio, (unsigned long long)stats->delegated,
                 stats->fused_sites, stats->program_size);
+        if (stats->jit_programs > 0) {
+            fprintf(stderr, ", jit: %zu programs, %zu bytes, %llu entries", stats->jit_programs,
+                    stats->jit_bytes, (unsigned long long)stats->jit_enters);
+        }
     } else if (engine == LZ_ENGINE_GE) {
         fputs(" (chunk not translatable: ran on the reference interpreter)", stderr);
     }
@@ -173,6 +178,11 @@ static int run_script(const LzOptions *options) {
         LzEngine engine = LZ_ENGINE_GE;
         if (options->has_engine) {
             (void)lz_engine_from_name(options->engine, &engine); /* validated while parsing */
+        }
+        if (options->has_jit) {
+            LzJitMode mode = LZ_JIT_ON;
+            (void)lz_jit_mode_from_name(options->jit, &mode); /* validated while parsing */
+            lz_engine_set_jit(mode);
         }
         LzEngineStats stats = {0};
 

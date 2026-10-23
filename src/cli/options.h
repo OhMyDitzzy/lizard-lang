@@ -17,6 +17,8 @@ typedef struct LzOptions {
     bool has_engine;
     char engine[16]; /* "ref", "reference", "ge" or "gecko"; the default engine when not given */
     bool engine_stats;
+    bool has_jit;
+    char jit[8]; /* "on", "off" or "eager"; the engine decides when not given */
     const char *script_path;
     int script_argc;
     char **script_argv;
