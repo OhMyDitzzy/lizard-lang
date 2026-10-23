@@ -29,8 +29,8 @@ typedef struct LzEngineStats {
 } LzEngineStats;
 
 /*
- * The Gecko JIT. LZ_JIT_ON compiles hot loops and functions to x86-64 machine code
- * (Linux and macOS on x86-64; elsewhere it quietly stays off). LZ_JIT_EAGER compiles
+ * The Gecko JIT. LZ_JIT_ON compiles hot loops and functions to machine code
+ * (x86-64 and AArch64 on Linux, Android and macOS; elsewhere it quietly stays off). LZ_JIT_EAGER compiles
  * every program on first sight, which is what the tests use to run everything native.
  * The default is LZ_JIT_ON, or whatever the LZ_JIT environment variable says
  * ("off", "on", "eager") the first time the engine runs. Programs run with a fuel

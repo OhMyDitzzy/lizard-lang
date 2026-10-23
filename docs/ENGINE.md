@@ -205,17 +205,22 @@ instruction loop supplied by the caller). Both are declared in `vm.h`.
 
 ## The JIT
 
-`ge_jit.c` (with the assembler in `ge_x64.h`) compiles a translated program to
-x86-64 machine code. It is a *baseline* JIT: no type feedback, no register
+`ge_jit_x64.c` and `ge_jit_a64.c` (with the assemblers in `ge_x64.h` and
+`ge_a64.h`) compile a translated program to machine code. The text below is
+written for x86-64 (register names); the AArch64 backend is the same design,
+see "AArch64" at the end of this section. It is a *baseline* JIT: no type feedback, no register
 allocation across instructions, no inlining. What it removes is dispatch,
 operand decoding and most memory traffic for the instruction sequences GE
 already fuses, which is where an interpreter spends its time.
 
 ### When it runs
 
-* Platform: Linux or macOS on x86-64 (System V ABI). Elsewhere, or with
+* Platform: x86-64 (`ge_jit_x64.c`, System V ABI) and AArch64 (`ge_jit_a64.c`:
+  Linux, Android/Termux, macOS), both through the same stack analysis
+  (`ge_jit_common.h`) and runtime helpers (`ge_jit_rt.c`). Elsewhere, or with
   `-DLZ_ENABLE_JIT=OFF`, the same sources build a stub and everything runs on
-  the interpreter. (Only Linux has been tested.)
+  the interpreter. If the system refuses executable memory (some hardened
+  Android configurations), the JIT switches itself off and the interpreter runs.
 * Policy: the interpreter counts calls and loop back-edges per program; at 50 it
   compiles the program and enters the native code at the back-edge or call. Code
   that keeps handing instructions back to the interpreter (more than 256 bail-outs
@@ -268,11 +273,34 @@ Debugging aids: `LZ_JIT_DUMP=prefix` writes each compiled program to
   native and that fuel limits keep them off it.
 * `test_engine`, `fuzz_engine` and the `*_ge` conformance variants run a second
   time with `LZ_JIT=eager` (the `*_jit` tests in CTest).
-* The whole suite passes under ASan and UBSan, and with `-DLZ_ENABLE_JIT=OFF`.
+* The whole suite passes under ASan and UBSan (x86-64), with `-DLZ_ENABLE_JIT=OFF`, and
+  under qemu-user on AArch64.
+
+### AArch64
+
+Same structure, different instruction set. Differences worth knowing:
+
+* Registers: x19 the VM, x20 the exit block, x21/x22 the frame's base index and
+  address, x23 the instruction counter, x24/x25 anchors on `vm->stack_count` and
+  `vm->frame_count` (the fields behind the 256 KiB value stack are too far for a
+  scaled load offset from x19). x0-x15 are scratch, x16 holds call targets and
+  x17 is the address scratch of the load/store helpers; x18 is never touched
+  (the platform reserves it).
+* A native function keeps 16 bytes at `sp` (saved `lr` and a scratch slot), so
+  `sp` is always 16-byte aligned. The instruction cache is flushed
+  (`__builtin___clear_cache`) before the pages become executable.
+* Overflow checks use the V flag (`adds`/`subs`/`negs`) and `smulh` for
+  multiplication; float comparisons need no parity handling, since one condition
+  code per comparison is false when unordered.
+* Conditional branches reach +-1 MiB, so a program whose code would exceed
+  1 MB is not compiled (it runs on the interpreter).
+* Tested by running the whole suite (including `test_jit` and the eager variants)
+  under `qemu-aarch64` on a cross-built binary. That checks correctness, not
+  speed: qemu's timings say nothing about a real core.
 
 ### Limits
 
-* x86-64 only. An ARM64 backend is a separate program.
+* Two backends: x86-64 and AArch64.
 * `CALL_EX`, typed-array element stores, `NOT` of an object and float
   floor-division bail out (correct, but at interpreter speed).
 * Not compatible with CPU shadow-stack enforcement (CET), because exits unwind
@@ -303,7 +331,7 @@ The baseline JIT is done (above). What remains, in order:
 2. **Bail-outs that resume.** Today a bail-out re-enters native code at the next
    leader; resuming in the middle of a block would make guard failures cheaper.
 3. **More inline instructions** (native calls like `push` and `len`, `CALL_EX`).
-4. **An ARM64 backend.**
+4. **Other targets** (RISC-V, Windows on either architecture).
 5. **Only then**, a tracing JIT in the LuaJIT style.
 
 Every stage can be tested the way GE and the JIT are: run it against `ref` on

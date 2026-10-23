@@ -4,7 +4,10 @@ add_library(lizard_engine STATIC
     engine.c
     ge_exec.c
     ge_translate.c
-    ge_jit.c)
+    ge_jit.c
+    ge_jit_rt.c
+    ge_jit_x64.c
+    ge_jit_a64.c)
 
 target_include_directories(lizard_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 

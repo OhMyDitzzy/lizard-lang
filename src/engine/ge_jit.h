@@ -12,6 +12,21 @@
  * assumes before changing anything, as in ge_exec.c.
  */
 
+/*
+ * Which backends this build has. LZ_NO_JIT (CMake: -DLZ_ENABLE_JIT=OFF) turns them all off.
+ */
+#if !defined(LZ_NO_JIT) && defined(__x86_64__) && (defined(__linux__) || defined(__APPLE__))
+#define GE_JIT_X64 1
+#else
+#define GE_JIT_X64 0
+#endif
+#if !defined(LZ_NO_JIT) && defined(__aarch64__) && (defined(__linux__) || defined(__APPLE__))
+#define GE_JIT_A64 1
+#else
+#define GE_JIT_A64 0
+#endif
+#define GE_JIT_HAVE_BACKEND (GE_JIT_X64 || GE_JIT_A64)
+
 /* One inline cache for a global-variable access. */
 typedef struct JitSite {
     uint32_t hint;  /* slot in the globals table */

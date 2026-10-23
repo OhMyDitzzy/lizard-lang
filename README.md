@@ -113,15 +113,15 @@ Example: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DLZ_ENABLE_SANITIZERS=ON
 | `--fuel=N` | Limit the number of executed instructions |
 | `--engine=E` | Execution engine: `ge` (default, the fast one) or `ref` (the reference interpreter) |
 | `--engine-stats` | Print what the engine did when the program ends |
-| `--jit=M` | Machine code for hot code (x86-64): `on` (default), `off` or `eager` |
+| `--jit=M` | Machine code for hot code (x86-64, AArch64): `on` (default), `off` or `eager` |
 | `--` | Stop option parsing |
 
 ## Engines
 
 Programs run on the Gecko Engine (`ge`) by default: a faster engine for the same
 bytecode. It is an optimized interpreter (about 3 to 4 times quicker than `ref`)
-plus, on x86-64 Linux/macOS, a JIT that compiles hot loops and functions to machine
-code (about 8 to 30 times quicker than `ref`). `--jit=off` turns the JIT off.
+plus, on x86-64 and AArch64 (Linux, Android/Termux, macOS), a JIT that compiles hot loops and functions to machine
+code (about 8 to 30 times quicker than `ref` on x86-64). `--jit=off` turns the JIT off.
 `--engine=ref` selects the plain reference interpreter, which defines the
 language and behaves identically. `cmake --build build --target bench` compares
 the two on `bench/*.lz`. See [docs/ENGINE.md](docs/ENGINE.md).
