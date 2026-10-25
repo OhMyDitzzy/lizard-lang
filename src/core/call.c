@@ -322,6 +322,7 @@ LzStatus lz_vm_return(LzVM *vm) {
     }
     vm->stack[vm->stack_count++] = result;
     vm->frame_count--;
+    lz_skink_run(vm); /* the frame's slots are gone: cycles it left behind are dead now */
     return LZ_OK;
 }
 
@@ -362,6 +363,7 @@ void lz_vm_close_upvalues(LzVM *vm, size_t level) {
         upvalue->location = &upvalue->closed;
         vm->open_upvalues = upvalue->next_open;
         upvalue->next_open = NULL;
+        lz_skink_note_closed(vm, upvalue); /* before the list lets go: that may be the last reference */
         lz_object_release(&vm->heap, &upvalue->base); /* the list's reference */
     }
 }

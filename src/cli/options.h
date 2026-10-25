@@ -19,6 +19,8 @@ typedef struct LzOptions {
     bool engine_stats;
     bool has_jit;
     char jit[8]; /* "on", "off" or "eager"; the engine decides when not given */
+    bool has_skink;
+    bool skink; /* --skink=on or off; the cycle collector is on when not given */
     const char *script_path;
     int script_argc;
     char **script_argv;

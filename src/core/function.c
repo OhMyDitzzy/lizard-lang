@@ -85,6 +85,8 @@ LzUpvalue *lz_upvalue_new(LzHeap *heap, LzValue *slot) {
     upvalue->location = slot;
     upvalue->closed = lz_value_nil();
     upvalue->next_open = NULL;
+    upvalue->watch.prev = NULL;
+    upvalue->watch.next = NULL;
     return upvalue;
 }
 

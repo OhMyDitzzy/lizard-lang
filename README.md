@@ -109,11 +109,12 @@ Example: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DLZ_ENABLE_SANITIZERS=ON
 | `--heap-stats` | Print heap statistics when the program ends |
 | `--trace-memory` | Log every heap allocation and release to stderr |
 | `--dump-tokens` | Print the tokens of the script and exit |
-| `--max-heap=N` | Limit live heap bytes (suffix `K`, `M` or `G`) |
+| `--max-heap=N` | Limit live heap bytes (suffix `K`, `M` or `G`); dead closure cycles are collected before an allocation is refused |
 | `--fuel=N` | Limit the number of executed instructions |
 | `--engine=E` | Execution engine: `ge` (default, the fast one) or `ref` (the reference interpreter) |
 | `--engine-stats` | Print what the engine did when the program ends |
 | `--jit=M` | Machine code for hot code (x86-64, AArch64): `on` (default), `off` or `eager` |
+| `--skink=M` | Cycle collector for closures: `on` (default) or `off` |
 | `--` | Stop option parsing |
 
 ## Engines

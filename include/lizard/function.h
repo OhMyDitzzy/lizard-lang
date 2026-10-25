@@ -53,11 +53,26 @@ typedef struct LzFunction {
     void (*engine_cache_free)(void *cache);
 } LzFunction;
 
+/* A link of the cycle collector's watch lists (skink.h). next == NULL: on no list. */
+typedef struct LzWatchLink {
+    struct LzWatchLink *prev;
+    struct LzWatchLink *next;
+} LzWatchLink;
+
+/* Needs no list head: the lists are circular, so a neighbour is all there is to patch. */
+static inline void lz_watch_unlink(LzWatchLink *link) {
+    link->prev->next = link->next;
+    link->next->prev = link->prev;
+    link->prev = NULL;
+    link->next = NULL;
+}
+
 typedef struct LzUpvalue {
     LzObject base;
     LzValue *location; /* the stack slot while open, &closed afterwards */
     LzValue closed;
     struct LzUpvalue *next_open; /* the VM's list of open upvalues, highest slot first */
+    LzWatchLink watch;           /* last: the engines address the fields above by offset */
 } LzUpvalue;
 
 typedef struct LzClosure {

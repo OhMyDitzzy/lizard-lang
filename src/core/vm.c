@@ -23,6 +23,9 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->out = out;
     vm->err = err;
     vm->error[0] = '\0';
+    lz_skink_init(&vm->skink);
+    vm->heap.reclaim = lz_skink_reclaim; /* before --max-heap refuses an allocation */
+    vm->heap.reclaim_context = vm;
 }
 
 void lz_vm_set_heap_limit(LzVM *vm, size_t bytes) {
@@ -49,6 +52,7 @@ void lz_vm_reset_stack(LzVM *vm) {
         vm->stack_count--;
         lz_value_release(&vm->heap, &vm->stack[vm->stack_count]);
     }
+    lz_skink_flush(vm); /* the suspects closing reported hold references of their own */
 }
 
 void lz_vm_release_roots(LzVM *vm) {
@@ -56,6 +60,7 @@ void lz_vm_release_roots(LzVM *vm) {
     lz_table_free(&vm->heap, &vm->builtins);
     lz_table_free(&vm->heap, &vm->globals);
     lz_table_free(&vm->heap, &vm->strings);
+    lz_skink_sweep(vm); /* cycles that were only waiting for their last holder; arrays still read their types */
     for (size_t i = 0; i < vm->array_type_count; i++) {
         free(vm->array_types[i]);
     }

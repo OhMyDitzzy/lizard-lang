@@ -32,6 +32,7 @@ static void print_usage(FILE *stream) {
           "      --engine=E   Execution engine: ge (default, the fast one) or ref\n"
           "      --engine-stats  Print what the engine did when the program ends\n"
           "      --jit=M      Machine code for hot code: on (default), off or eager\n"
+          "      --skink=M    Cycle collector for closures: on (default) or off\n"
           "      --           Stop option parsing\n",
           stream);
 }
@@ -45,6 +46,23 @@ static void print_heap_stats(const LzHeap *heap) {
     fprintf(stderr,
             "heap: %zu allocations, peak %zu bytes, %zu objects (%zu bytes) still live at exit\n",
             heap->total_allocations, heap->peak_bytes, heap->live_objects, heap->live_bytes);
+}
+
+static void print_skink_stats(const LzSkinkStats *stats) {
+    if (stats->suspects == 0 && stats->reclaims == 0) {
+        return;
+    }
+    fprintf(stderr,
+            "skink: %llu suspects (%llu watched), %llu trials (%llu from watch lists, %llu over "
+            "budget), %llu dead cycles freed (%llu objects)\n",
+            (unsigned long long)stats->suspects, (unsigned long long)stats->watched,
+            (unsigned long long)stats->trials, (unsigned long long)stats->polls,
+            (unsigned long long)stats->over_budget, (unsigned long long)stats->cycles,
+            (unsigned long long)stats->objects);
+    if (stats->reclaims > 0) {
+        fprintf(stderr, "skink: %llu emergency passes before --max-heap refused an allocation, %llu bytes freed\n",
+                (unsigned long long)stats->reclaims, (unsigned long long)stats->reclaimed);
+    }
 }
 
 static void print_engine_stats(LzEngine engine, const LzEngineStats *stats) {
@@ -159,6 +177,9 @@ static int run_script(const LzOptions *options) {
     LzVM vm;
     lz_vm_init(&vm, lz_writer_from_file(stdout), lz_writer_from_file(stderr));
     vm.heap.trace = options->trace_memory;
+    if (options->has_skink) {
+        vm.skink.enabled = options->skink;
+    }
 
     LzChunk chunk;
     lz_chunk_init(&chunk);
@@ -211,6 +232,7 @@ static int run_script(const LzOptions *options) {
     lz_vm_release_roots(&vm);
     if (options->heap_stats) {
         print_heap_stats(&vm.heap);
+        print_skink_stats(&vm.skink.stats);
     }
     lz_vm_free(&vm);
     lz_source_free(&source);

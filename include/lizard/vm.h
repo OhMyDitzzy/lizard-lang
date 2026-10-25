@@ -5,6 +5,7 @@
 #include "lizard/common.h"
 #include "lizard/function.h"
 #include "lizard/memory.h"
+#include "lizard/skink.h"
 #include "lizard/table.h"
 #include "lizard/writer.h"
 
@@ -58,6 +59,7 @@ struct LzVM {
     size_t trace_count;
     size_t trace_total; /* frames in the whole stack, so a caller can say how many were left out */
     char error[256];
+    LzSkink skink; /* cycle collector, see skink.h; last so the JIT's field offsets stay put */
 };
 
 #define LZ_FUEL_UNLIMITED UINT64_MAX

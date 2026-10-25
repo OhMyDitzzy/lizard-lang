@@ -118,6 +118,15 @@ bool lz_options_parse(LzOptions *options, int argc, char **argv) {
             }
             options->has_jit = true;
             (void)snprintf(options->jit, sizeof options->jit, "%s", name);
+        } else if (option_value(arg, "--skink") != NULL) {
+            const char *name = option_value(arg, "--skink");
+            if (strcmp(name, "on") != 0 && strcmp(name, "off") != 0) {
+                (void)snprintf(options->error, sizeof options->error,
+                               "invalid value for --skink: '%.40s' (expected on or off)", name);
+                return false;
+            }
+            options->has_skink = true;
+            options->skink = strcmp(name, "on") == 0;
         } else if (option_value(arg, "--max-heap") != NULL) {
             uint64_t bytes;
             if (!parse_count(option_value(arg, "--max-heap"), true, &bytes) || bytes > SIZE_MAX) {

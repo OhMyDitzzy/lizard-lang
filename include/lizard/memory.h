@@ -44,6 +44,15 @@ typedef struct LzHeap {
     LzObject *pending; /* dead objects whose release is deferred, see lz_object_release */
     bool draining;
     uint32_t epoch; /* visit stamp for graph walks over arrays, see lz_heap_next_epoch */
+    /*
+     * Optional: asked for room before an allocation is refused because of the limit. It
+     * frees what it can (the VM's cycle collector) and the allocation is tried once more.
+     * It is never re-entered, and an allocation can happen anywhere, so it may free only
+     * what nothing references.
+     */
+    size_t (*reclaim)(void *context, size_t needed_bytes);
+    void *reclaim_context;
+    bool reclaiming;
 } LzHeap;
 
 void lz_heap_init(LzHeap *heap);

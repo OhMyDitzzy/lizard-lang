@@ -619,6 +619,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         } else {
             lz_vm_close_upvalues(vm, vm->stack_count - 1);
             pop(vm);
+            lz_skink_run(vm);
         }
         break;
     case LZ_OP_GET_SELF: {

@@ -273,6 +273,9 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
     }
     case LZ_OBJ_UPVALUE: {
         LzUpvalue *upvalue = (LzUpvalue *)object;
+        if (upvalue->watch.next != NULL) {
+            lz_watch_unlink(&upvalue->watch); /* Skink must never poll a dead upvalue */
+        }
         if (upvalue->location == &upvalue->closed) {
             lz_value_release(heap, &upvalue->closed);
         }

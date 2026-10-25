@@ -19,6 +19,9 @@ void lz_heap_init(LzHeap *heap) {
     heap->pending = NULL;
     heap->draining = false;
     heap->epoch = 0;
+    heap->reclaim = NULL;
+    heap->reclaim_context = NULL;
+    heap->reclaiming = false;
 }
 
 void lz_heap_destroy(LzHeap *heap) {
@@ -42,10 +45,28 @@ void lz_heap_destroy(LzHeap *heap) {
     heap->live_bytes = 0;
 }
 
+static bool over_limit(const LzHeap *heap, size_t bytes) {
+    return heap->live_bytes > heap->limit_bytes || bytes > heap->limit_bytes - heap->live_bytes;
+}
+
+/* True when bytes fit under the limit, after asking the reclaim hook once if they do not. */
+static bool make_room(LzHeap *heap, size_t bytes) {
+    if (!over_limit(heap, bytes)) {
+        return true;
+    }
+    if (heap->reclaim == NULL || heap->reclaiming) {
+        return false;
+    }
+    heap->reclaiming = true;
+    (void)heap->reclaim(heap->reclaim_context, bytes);
+    heap->reclaiming = false;
+    return !over_limit(heap, bytes);
+}
+
 void *lz_heap_alloc(LzHeap *heap, LzObjType type, size_t size) {
     assert(size >= sizeof(LzObject));
 
-    if (heap->live_bytes > heap->limit_bytes || size > heap->limit_bytes - heap->live_bytes) {
+    if (!make_room(heap, size)) {
         heap->limit_hit = true;
         if (heap->trace) {
             fprintf(stderr, "[heap] refuse type=%d size=%zu limit=%zu\n", (int)type, size,
@@ -83,7 +104,7 @@ void *lz_heap_alloc(LzHeap *heap, LzObjType type, size_t size) {
 }
 
 bool lz_heap_charge(LzHeap *heap, size_t bytes) {
-    if (heap->live_bytes > heap->limit_bytes || bytes > heap->limit_bytes - heap->live_bytes) {
+    if (!make_room(heap, bytes)) {
         heap->limit_hit = true;
         return false;
     }

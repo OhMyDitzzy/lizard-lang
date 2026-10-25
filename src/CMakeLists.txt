@@ -10,6 +10,7 @@ add_library(lizard_core STATIC
     core/number.c
     core/native.c
     core/run.c
+    core/skink.c
     core/source.c
     core/table.c
     core/type.c

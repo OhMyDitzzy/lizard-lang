@@ -38,6 +38,44 @@ arrays hold it (`holders`); an array held by nobody cannot be inside the value
 being stored, so the check is free in the common case, and otherwise walks only
 arrays that contain arrays, once each (`mark` plus a heap epoch).
 
+A cycle can still be built through a closure and one of its upvalues (an array
+that holds a closure which captured that array, a closure that captures the
+variable it is stored in). **Skink** (`skink.h`, `core/skink.c`) frees those. It
+never scans the heap: every upvalue that `lz_vm_close_upvalues` closes while its
+value may take part in a cycle (a closure, or an array that is not a typed leaf
+such as `int[]`) is reported with a held reference, and once the returning frame's
+slots are gone (`lz_vm_return`, `OP_CLOSE_UPVALUE`) each suspect gets a local trial
+deletion: the objects reachable from it are visited, the references between them
+are subtracted from their counts, and whatever has no outside reference left is a
+dead cycle and is freed on the spot. A trial has a fixed budget
+(`LZ_SKINK_BUDGET`); a subgraph that does not fit is left alone, so nothing is
+ever freed on a guess and the cost of one frame exit is bounded by a constant. The
+hooks live in C code every engine reaches, so the engines and both JIT back-ends
+are untouched, and `--skink=off` turns it off.
+
+A suspect that survives its trial goes on a watch list (three more levels, due
+every 4th, 16th and 64th tick, so a live structure is looked at ever more rarely).
+That finds a cycle whose last outside reference is dropped after the frame exit,
+and one that was completed after its upvalue closed (a closure pushed into the array
+it captured). The lists are intrusive and circular, hold no references, and an
+upvalue unlinks itself when it is freed (`lz_object_finalize`). A tick is a return or
+block exit that closed at least one upvalue and examines at most two watched
+upvalues; it is defined by the closing, not by the call of `lz_vm_return`, because
+the reference interpreter returns through it every time and the Gecko Engine only
+when it has something to close, and the engines must agree on the heap statistics
+(`test_skink_engines`). `lz_vm_release_roots` ends with one sweep over the watch
+list, so a cycle that was only waiting for the program to finish is freed as well.
+Before an allocation is refused because of `--max-heap`, the heap asks Skink for
+room: `lz_skink_reclaim` runs the same passes over the whole watch list with
+`LZ_SKINK_EMERGENCY_BUDGET` instead of `LZ_SKINK_BUDGET`, so a cycle that holds a
+big array, which no ordinary trial can afford, is freed exactly when the memory is
+needed. More suspects than the pending list holds are put on the watch list without
+a trial instead of being dropped.
+Not covered: an upvalue that held a number, a string or nil when its frame ended
+and is later assigned the closure that closes the cycle (`SET_UPVALUE` is inline in
+the JIT, so a barrier there is deliberately not part of this), and a cycle whose
+program never closes another upvalue (nothing ticks).
+
 Scalars (nil, bool, int, float) live inline in `LzValue` and never touch the
 heap.
 
@@ -280,6 +318,13 @@ hundred bytes of builtins when the CLI applies the limit after installing them.
 A native that fails to allocate returns `lz_vm_out_of_memory(vm)`, which reports
 `LZ_ERR_HEAP_LIMIT` when the limit was the cause and `LZ_ERR_MEMORY` otherwise.
 
+An allocation that would cross the limit first calls `heap->reclaim` once and then
+checks again. The VM installs Skink there (`lz_skink_reclaim`, see Memory model): an
+emergency pass over its watch list that frees dead cycles which were only waiting for
+their next poll, with a budget far bigger than a tick may spend. The hook is never
+re-entered, can run at any allocation, and frees only objects nothing references; its
+scratch memory is malloc'd outside the heap, so it does not count against the limit.
+
 Fuel costs one unit per instruction and persists across `lz_vm_run` calls, so
 the host sets it before each run; `vm->instructions` counts executed
 instructions even when metering is off. A native that does heavy work calls
@@ -359,4 +404,4 @@ area's header, add one row to the table in `registry.c`, and add the source to
 ## Not decided yet
 
 `for` (so `range` is only useful with `while` for now), `break`/`continue`, maps and other collections, indexing and slicing strings, narrowing, the error model, and classes. Removing entries from `LzTable`.
-Garbage collection beyond reference counting (cycles).
+Skink: a store barrier for `SET_UPVALUE` (needs the two JIT emitters and `ge_exec.c`), and a collection before `--max-heap` refuses an allocation.
