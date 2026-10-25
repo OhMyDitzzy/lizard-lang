@@ -40,6 +40,8 @@
 #define O_PR_JIT OFFS(GeProgram, jit)
 #define O_JIT_ENTRY OFFS(struct GeJit, entry_call)
 #define O_UPV_LOC OFFS(LzUpvalue, location)
+#define O_UPV_CLOSED OFFS(LzUpvalue, closed)
+#define O_UPV_WATCHED OFFS(LzUpvalue, watch.next) /* non-NULL: on one of Skink's watch lists */
 #define O_CL_UPVC OFFS(LzClosure, upvalue_count)
 #define O_CL_UPV OFFS(LzClosure, upvalues)
 #define FS ((int32_t)sizeof(LzCallFrame))

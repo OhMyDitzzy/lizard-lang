@@ -1222,8 +1222,29 @@ static void emit_get_upvalue(Cx *c, uint16_t index) {
 static void emit_set_upvalue(Cx *c, uint16_t index) {
     int slow = a_label(X);
     int done = a_label(X);
-    emit_upvalue_location(c, index, slow);
+    int inl = a_label(X);
+    emit_upvalue_location(c, index, slow); /* x0 = the upvalue, x5 = its location */
     mov_rr(X, P_S, 5);
+    /*
+     * An object stored into a closed upvalue may close a reference cycle, and the reference
+     * implementation tells the cycle collector (lz_skink_note_store). Everything that cannot
+     * need that is stored inline: a number, bool or nil, a string, any store into an upvalue
+     * that is already watched, and any store into one that is still open (its frame's close
+     * reports it). This is before the ldp below, which overwrites x0.
+     */
+    ldr_w(X, 1, R_BPTR, 16 * (c->d - 1));
+    cmp_iw(X, 1, LZ_VAL_OBJECT);
+    bcond_l(X, CD_NE, inl);
+    ldr_x(X, 1, R_BPTR, 16 * (c->d - 1) + 8);
+    ldr_w(X, 3, 1, O_OTYPE);
+    cmp_iw(X, 3, LZ_OBJ_STRING);
+    bcond_l(X, CD_EQ, inl);
+    ldr_x(X, 1, 0, O_UPV_WATCHED);
+    cbnz_l(X, 1, inl);
+    add_imm(X, 1, 0, O_UPV_CLOSED);
+    cmp_r(X, 5, 1); /* the location is the upvalue's own slot: it is closed */
+    bcond_l(X, CD_EQ, slow);
+    a_bind(X, inl);
     ldp_x(X, 2, 0, R_BPTR, 16 * (c->d - 1));
     emit_store_drop(c, P_S, 0);
     a_bind(X, done);

@@ -1191,9 +1191,28 @@ static void emit_get_upvalue(Cx *c, uint16_t index) {
 static void emit_set_upvalue(Cx *c, uint16_t index) {
     int slow = x_label(X);
     int done = x_label(X);
-    emit_upvalue_location(c, index, slow);
+    int inl = x_label(X);
+    emit_upvalue_location(c, index, slow); /* RAX = the upvalue, R8 = its location */
     mov_rr(X, R10, R8);
     mov_rm(X, RDX, R14, 16 * (c->d - 1));
+    /*
+     * An object stored into a closed upvalue may close a reference cycle, and the reference
+     * implementation tells the cycle collector (lz_skink_note_store). Everything that cannot
+     * need that is stored inline: a number, bool or nil, a string, any store into an upvalue
+     * that is already watched, and any store into one that is still open (its frame's close
+     * reports it).
+     */
+    alu_ri(X, 0, ALU_CMP, RDX, LZ_VAL_OBJECT);
+    jcc_l(X, CC_NE, inl);
+    mov_rm(X, RCX, R14, 16 * (c->d - 1) + 8);
+    alu_mi(X, 0, ALU_CMP, RCX, O_OTYPE, LZ_OBJ_STRING);
+    jcc_l(X, CC_E, inl);
+    alu_mi(X, 1, ALU_CMP, RAX, O_UPV_WATCHED, 0);
+    jcc_l(X, CC_NE, inl);
+    lea(X, RCX, RAX, O_UPV_CLOSED);
+    alu_rr(X, ALU_CMP, R8, RCX); /* the location is the upvalue's own slot: it is closed */
+    jcc_l(X, CC_E, slow);
+    x_bind(X, inl);
     mov_rm(X, RAX, R14, 16 * (c->d - 1) + 8);
     emit_store_drop(c, R10, 0);
     x_bind(X, done);

@@ -566,6 +566,17 @@ void lz_skink_note_closed(LzVM *vm, LzUpvalue *upvalue) {
     skink->stats.suspects++;
 }
 
+void lz_skink_note_store(LzVM *vm, LzUpvalue *upvalue) {
+    LzSkink *skink = &vm->skink;
+    if (!skink->enabled || upvalue->location != &upvalue->closed || upvalue->watch.next != NULL ||
+        !may_join_cycle(&upvalue->closed)) {
+        return;
+    }
+    watch_push_back(&skink->watch[0], &upvalue->watch);
+    skink->stats.watched++;
+    skink->stats.stored++;
+}
+
 void lz_skink_run(LzVM *vm) {
     LzSkink *skink = &vm->skink;
     /* Every engine closes the same upvalues at the same instructions, but they do not all come

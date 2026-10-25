@@ -605,11 +605,17 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         } else if (vm->stack_count == 0) {
             status = malformed(vm, "stack underflow");
         } else {
-            LzValue *location = closure->upvalues[index]->location;
+            LzUpvalue *upvalue = closure->upvalues[index];
+            LzValue *location = upvalue->location;
             LzValue moved = vm->stack[--vm->stack_count];
             LzValue old = *location;
             *location = moved;
             lz_value_release(&vm->heap, &old);
+            if (moved.type == LZ_VAL_OBJECT) {
+                /* The GE interpreter delegates this instruction to here, and both JIT back-ends
+                 * send every object store here too: they inline only what cannot close a cycle. */
+                lz_skink_note_store(vm, upvalue);
+            }
         }
         break;
     }

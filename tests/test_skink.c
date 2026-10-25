@@ -171,6 +171,58 @@ static void test_no_tick_is_ever_more_than_a_bounded_amount_of_work(void) {
     LZ_CHECK(finish(&program) == 0);
 }
 
+#define ASSIGN_MAKE(VALUE) "fn make() {\n  let slot = nil\n  let c = fn(self) {\n    slot = " VALUE "\n    return 0\n  }\n  return c\n}\n"
+
+static void test_an_object_assigned_to_a_closed_upvalue_is_watched(void) {
+    /* slot held nil when make() returned, so nothing reported it; c(c) then closes the cycle. */
+    const char *text = TICK_FN ASSIGN_MAKE("self") "let c = make()\nc(c)\nc = nil\ntick()\nprintln(\"ok\")\n";
+    Program on;
+    run(&on, text, true);
+    LZ_CHECK(on.run_status == LZ_OK);
+    LZ_CHECK(output_is(&on, "ok\n"));
+    LZ_CHECK(on.vm.skink.stats.stored == 1);
+    LZ_CHECK(on.vm.skink.stats.cycles == 1); /* freed by the tick, not by the final sweep */
+    LZ_CHECK(finish(&on) == 0);
+
+    Program off; /* nothing else would ever find it */
+    run(&off, text, false);
+    LZ_CHECK(finish(&off) > 0);
+}
+
+static void test_an_array_assigned_to_a_closed_upvalue_is_watched(void) {
+    const char *text = TICK_FN ASSIGN_MAKE("[self]") "let c = make()\nc(c)\nc = nil\ntick()\nprintln(\"ok\")\n";
+    Program program;
+    run(&program, text, true);
+    LZ_CHECK(program.run_status == LZ_OK);
+    LZ_CHECK(program.vm.skink.stats.stored == 1);
+    LZ_CHECK(program.vm.skink.stats.cycles == 1); /* closure -> upvalue -> array -> closure */
+    LZ_CHECK(finish(&program) == 0);
+}
+
+static void test_numbers_and_strings_assigned_to_a_closed_upvalue_cost_nothing(void) {
+    Program program;
+    run(&program, "fn make() {\n  let n = 0\n  let s = nil\n  return fn() {\n    n = n + 1\n    s = \"x\"\n"
+                  "    return n\n  }\n}\n"
+                  "let c = make()\nlet i = 0\nwhile i < 100 {\n  c()\n  i = i + 1\n}\nprintln(c())\n",
+        true);
+    LZ_CHECK(output_is(&program, "101\n"));
+    LZ_CHECK(program.vm.skink.stats.stored == 0); /* a string cannot close a cycle either */
+    LZ_CHECK(program.vm.skink.stats.watched == 0);
+    LZ_CHECK(finish(&program) == 0);
+}
+
+static void test_an_assignment_to_an_open_upvalue_is_the_close_s_business(void) {
+    /* While make() runs, slot is open: the store goes to the stack slot, and the close reports it. */
+    Program program;
+    run(&program, "fn make() {\n  let slot = nil\n  let f = fn() { return slot }\n  slot = f\n  return 0\n}\n"
+                  "make()\nprintln(\"ok\")\n",
+        true);
+    LZ_CHECK(program.run_status == LZ_OK);
+    LZ_CHECK(program.vm.skink.stats.stored == 0);
+    LZ_CHECK(program.vm.skink.stats.cycles == 1);
+    LZ_CHECK(finish(&program) == 0);
+}
+
 static void test_memory_stays_flat_in_a_loop(void) {
     const char *text = "fn make() {\n  let f = nil\n  f = fn() { return f }\n  return 0\n}\n"
                        "let i = 0\nwhile i < 3000 {\n  make()\n  i = i + 1\n}\nprintln(\"ok\")\n";
@@ -297,6 +349,10 @@ int main(void) {
     test_a_subgraph_over_the_budget_is_left_alone();
     test_closures_over_numbers_and_typed_arrays_are_never_suspects();
     test_an_error_leaves_no_pending_suspects();
+    test_an_object_assigned_to_a_closed_upvalue_is_watched();
+    test_an_array_assigned_to_a_closed_upvalue_is_watched();
+    test_numbers_and_strings_assigned_to_a_closed_upvalue_cost_nothing();
+    test_an_assignment_to_an_open_upvalue_is_the_close_s_business();
     test_the_heap_limit_triggers_a_collection_before_it_refuses();
     test_the_emergency_pass_has_a_bigger_budget_than_a_tick();
     test_more_suspects_than_the_pending_list_holds_are_still_watched();

@@ -71,10 +71,18 @@ room: `lz_skink_reclaim` runs the same passes over the whole watch list with
 big array, which no ordinary trial can afford, is freed exactly when the memory is
 needed. More suspects than the pending list holds are put on the watch list without
 a trial instead of being dropped.
-Not covered: an upvalue that held a number, a string or nil when its frame ended
-and is later assigned the closure that closes the cycle (`SET_UPVALUE` is inline in
-the JIT, so a barrier there is deliberately not part of this), and a cycle whose
-program never closes another upvalue (nothing ticks).
+An upvalue that held a number, a string or nil when its frame ended was never
+reported, and a closure or array assigned to it later can still close a cycle
+(`slot = self`). `SET_UPVALUE` therefore tells Skink (`lz_skink_note_store`) when it
+stores an object into a closed upvalue that is not watched yet, and the upvalue goes
+on the watch list then. The implementation is shared: the GE interpreter delegates
+`SET_UPVALUE` to the reference one in `run.c`, and the JIT back-ends store inline
+everything that cannot need the barrier (a number, bool or nil; a string; any store
+into an upvalue that is already watched or still open) and send the rest to the same
+code through their slow path.
+
+Not covered: a cycle whose program never closes another upvalue (nothing ticks, so
+nothing is polled until the heap limit or the end of the program asks).
 
 Scalars (nil, bool, int, float) live inline in `LzValue` and never touch the
 heap.
@@ -404,4 +412,4 @@ area's header, add one row to the table in `registry.c`, and add the source to
 ## Not decided yet
 
 `for` (so `range` is only useful with `while` for now), `break`/`continue`, maps and other collections, indexing and slicing strings, narrowing, the error model, and classes. Removing entries from `LzTable`.
-Skink: a store barrier for `SET_UPVALUE` (needs the two JIT emitters and `ge_exec.c`), and a collection before `--max-heap` refuses an allocation.
+Skink: polling that does not depend on an upvalue closing (a tick from allocation counts), and a trial that can cross a subgraph bigger than `LZ_SKINK_EMERGENCY_NODES`.

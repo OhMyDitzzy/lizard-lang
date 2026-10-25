@@ -112,6 +112,22 @@ int main(void) {
     check_program("over the budget (left alone on purpose)",
                   "fn make() {\n  let big = range(20000)\n  let f = nil\n  f = fn() {\n    len(big)\n    return f\n  }\n"
                   "  return 0\n}\nlet i = 0\nwhile i < 10 {\n  make()\n  i = i + 1\n}\nprintln(\"ok\")\n", false);
+    check_program("a closure assigned to a closed upvalue", TICK
+                  "fn make() {\n  let slot = nil\n  let c = fn(self) {\n    slot = self\n    return 0\n  }\n  return c\n}\n"
+                  "let i = 0\nwhile i < 300 {\n  let c = make()\n  c(c)\n  c = nil\n  tick()\n  i = i + 1\n}\n"
+                  "println(\"ok\")\n",
+                  true);
+    check_program("an array assigned to a closed upvalue", TICK
+                  "fn make() {\n  let box = 0\n  let c = fn(self) {\n    box = [self]\n    return 0\n  }\n  return c\n}\n"
+                  "let i = 0\nwhile i < 300 {\n  let c = make()\n  c(c)\n  c = nil\n  tick()\n  i = i + 1\n}\n"
+                  "println(\"ok\")\n",
+                  true);
+    /* numbers stay on the JIT's inline path; strings, arrays and closures go to the reference */
+    check_program("hot scalar and string assignments to a captured variable",
+                  "fn make() {\n  let n = 0\n  let f = 0.5\n  let s = nil\n  return fn() {\n    n = n + 1\n"
+                  "    f = f + 1.5\n    s = \"x\"\n    return n\n  }\n}\n"
+                  "let c = make()\nlet i = 0\nwhile i < 3000 {\n  c()\n  i = i + 1\n}\nprintln(c())\n",
+                  true);
     heap_limit = 700000; /* the heap limit asks for a collection: every engine must reach the same state */
     check_program("under the heap limit",
                   "fn make() {\n  let f = nil\n  f = fn() { return f }\n  return f\n}\n"

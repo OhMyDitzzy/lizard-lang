@@ -49,13 +49,14 @@ static void print_heap_stats(const LzHeap *heap) {
 }
 
 static void print_skink_stats(const LzSkinkStats *stats) {
-    if (stats->suspects == 0 && stats->reclaims == 0) {
+    if (stats->suspects == 0 && stats->watched == 0 && stats->reclaims == 0) {
         return;
     }
     fprintf(stderr,
-            "skink: %llu suspects (%llu watched), %llu trials (%llu from watch lists, %llu over "
-            "budget), %llu dead cycles freed (%llu objects)\n",
+            "skink: %llu suspects (%llu watched, %llu of them by assignment), %llu trials (%llu "
+            "from watch lists, %llu over budget), %llu dead cycles freed (%llu objects)\n",
             (unsigned long long)stats->suspects, (unsigned long long)stats->watched,
+            (unsigned long long)stats->stored,
             (unsigned long long)stats->trials, (unsigned long long)stats->polls,
             (unsigned long long)stats->over_budget, (unsigned long long)stats->cycles,
             (unsigned long long)stats->objects);

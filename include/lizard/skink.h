@@ -46,9 +46,12 @@ struct LzVM;
  *      next poll, or was too big for a trial, is freed there and the allocation
  *      goes on.
  *
- * Not covered: an upvalue that held a number, a string or nil when its frame ended
- * and is later assigned the closure that closes the cycle, and a cycle whose
- * frames never close an upvalue again (nothing ticks, so nothing is polled).
+ *   7. An upvalue that held a number, a string or nil when its frame ended was never
+ *      reported. SET_UPVALUE tells Skink when such a closed upvalue is assigned a
+ *      closure or an array (lz_skink_note_store), and it goes on the watch list then.
+ *
+ * Not covered: a cycle whose program never closes another upvalue (nothing ticks, so
+ * nothing is polled until the heap limit or the end of the program asks).
  */
 
 #define LZ_SKINK_PENDING_MAX 64 /* suspects one frame exit can report; more are skipped */
@@ -61,7 +64,8 @@ struct LzVM;
 
 typedef struct LzSkinkStats {
     uint64_t suspects;     /* upvalues reported at a frame exit */
-    uint64_t watched;      /* suspects that survived their trial and went on a watch list */
+    uint64_t watched;      /* upvalues put on a watch list: survivors of a trial, overflow, assignments */
+    uint64_t stored;       /* of those, closed upvalues that were assigned a container after they closed */
     uint64_t polls;        /* trials started from a watch list (they are counted in trials too) */
     uint64_t dropped;      /* suspects past the pending list: watched without a trial */
     uint64_t trials;       /* trial deletions started */
@@ -87,6 +91,14 @@ void lz_skink_init(LzSkink *skink); /* enabled; the struct must not move afterwa
 
 /* Called by lz_vm_close_upvalues for an upvalue it has just closed, before the list's reference is dropped. */
 void lz_skink_note_closed(struct LzVM *vm, LzUpvalue *upvalue);
+
+/*
+ * Called by SET_UPVALUE after it stored an object. A closed upvalue that held no
+ * container when its frame ended was never reported; this is where it learns to be
+ * watched. (An open upvalue is the stack slot's business: if it closes holding the
+ * object, lz_vm_close_upvalues reports it.)
+ */
+void lz_skink_note_store(struct LzVM *vm, LzUpvalue *upvalue);
 
 /* Examines and releases every reported suspect. Call once the closing frame's slots are gone. */
 void lz_skink_run(struct LzVM *vm);

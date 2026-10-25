@@ -131,6 +131,12 @@ plain and fused instructions alike.
   in GE.
 * `RETURN` drops the frame inline when no variable of it was captured; otherwise
   it calls `lz_vm_return`, which closes the upvalues.
+* `SET_UPVALUE` stores inline only what cannot close a reference cycle: a number,
+  bool or nil, a string, any value into an upvalue that is already on one of Skink's
+  watch lists (`LzUpvalue.watch.next != NULL`) or still open. A closure or array stored
+  into a closed upvalue that is not watched yet goes through the slow path to
+  `lz_vm_exec_one`, where `lz_skink_note_store` puts the upvalue on a watch list; every
+  later store into it is inline again.
 * A function whose code cannot be translated is run by `ref` for the whole call
   (`lz_vm_run_until`), and a failure inside it reports the offset `ref` found.
 * Frame-changing instructions are never given to `lz_vm_exec_one`: they are done
