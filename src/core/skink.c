@@ -68,9 +68,33 @@ typedef enum TrialResult {
  * (int[], string[], ...) or is empty has no reference that could close a cycle. It is
  * not part of the graph: references to it are simply not followed.
  */
+/*
+ * True when no value of the type can be, or contain, a closure. `any` (NULL) can, and so can
+ * a function. An array type does when its own items can: `int[][]` is closed under that,
+ * `any[][]` is not. Types are interned trees, so the depth is only a guard.
+ */
+static bool type_is_closure_free(const LzType *type, unsigned depth) {
+    if (type == NULL) {
+        return false;
+    }
+    uint16_t kinds = lz_type_possible_kinds(type);
+    if ((kinds & LZ_KIND_FUNCTION) != 0) {
+        return false;
+    }
+    if ((kinds & LZ_KIND_ARRAY) != 0) {
+        return depth > 0 && type_is_closure_free(type->element, depth - 1);
+    }
+    return true;
+}
+
+/*
+ * An array restricted to such a type never reaches a closure, however deep it nests, so it
+ * cannot be on a cycle (every cycle runs through a closure). It is a leaf: not part of the
+ * graph, and never a suspect. Getting this wrong can only make Skink miss a cycle, never free
+ * a live object: a reference it does not follow counts as an outside reference.
+ */
 static bool array_is_typed_leaf(const LzArray *array) {
-    return array->element != NULL &&
-           (lz_type_possible_kinds(array->element) & (LZ_KIND_ARRAY | LZ_KIND_FUNCTION)) == 0;
+    return type_is_closure_free(array->element, 16);
 }
 
 static bool array_may_hold_cycles(const LzArray *array) {
@@ -454,6 +478,7 @@ static void poll(LzVM *vm) {
     LzSkink *skink = &vm->skink;
     skink->ticks++;
     unsigned polls = LZ_SKINK_POLLS_PER_TICK;
+    unsigned refunds = LZ_SKINK_REFUNDS_PER_TICK;
     for (size_t level = 0; level < LZ_SKINK_LEVELS && polls > 0; level++) {
         if ((skink->ticks & ((UINT64_C(1) << (2 * level)) - 1)) != 0) {
             continue;
@@ -471,7 +496,12 @@ static void poll(LzVM *vm) {
             size_t next_level = level + 1 < LZ_SKINK_LEVELS ? level + 1 : level;
             watch_push_back(&skink->watch[next_level], front);
             polls--;
+            uint64_t before = skink->stats.objects;
             examine_watched(vm, WATCHED_UPVALUE(front), NULL);
+            if (skink->stats.objects != before && refunds > 0) {
+                refunds--; /* garbage tends to die together: keep going while it is there */
+                polls++;
+            }
         }
     }
 }
@@ -575,6 +605,24 @@ void lz_skink_note_store(LzVM *vm, LzUpvalue *upvalue) {
     watch_push_back(&skink->watch[0], &upvalue->watch);
     skink->stats.watched++;
     skink->stats.stored++;
+}
+
+void lz_skink_alloc_tick(void *context) {
+    LzVM *vm = context;
+    LzSkink *skink = &vm->skink;
+    /* pending is non-empty only between a close and its run, where nothing allocates; be safe */
+    if (!skink->enabled || skink->pending_count > 0) {
+        return;
+    }
+    bool watching = false;
+    for (size_t level = 0; level < LZ_SKINK_LEVELS; level++) {
+        watching = watching || !watch_empty(&skink->watch[level]);
+    }
+    if (!watching) {
+        return;
+    }
+    skink->stats.alloc_ticks++;
+    poll(vm);
 }
 
 void lz_skink_run(LzVM *vm) {

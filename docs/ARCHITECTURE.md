@@ -42,8 +42,8 @@ A cycle can still be built through a closure and one of its upvalues (an array
 that holds a closure which captured that array, a closure that captures the
 variable it is stored in). **Skink** (`skink.h`, `core/skink.c`) frees those. It
 never scans the heap: every upvalue that `lz_vm_close_upvalues` closes while its
-value may take part in a cycle (a closure, or an array that is not a typed leaf
-such as `int[]`) is reported with a held reference, and once the returning frame's
+value may take part in a cycle (a closure, or an array that could reach one) is
+reported with a held reference, and once the returning frame's
 slots are gone (`lz_vm_return`, `OP_CLOSE_UPVALUE`) each suspect gets a local trial
 deletion: the objects reachable from it are visited, the references between them
 are subtracted from their counts, and whatever has no outside reference left is a
@@ -52,6 +52,16 @@ dead cycle and is freed on the spot. A trial has a fixed budget
 ever freed on a guess and the cost of one frame exit is bounded by a constant. The
 hooks live in C code every engine reaches, so the engines and both JIT back-ends
 are untouched, and `--skink=off` turns it off.
+
+An array can reach a closure unless its item type rules it out, however deep: `int[]`,
+`string[]`, `(int | string)[]`, `int?[]` and also `int[][]` and `float[][][]` cannot (every
+cycle runs through a closure, and these hold only scalars, strings and arrays of the same),
+while `any[]`, `any[][]`, `fn`-valued items and any unannotated array can. Such a typed
+array is a leaf for Skink: never a suspect, never a node of a trial. That rests on the item
+type only narrowing (an array stored under `int[][]` has its rows restricted to `int[]`, so
+nothing can push a closure into a row through an alias), and a wrong answer could only make
+Skink miss a cycle, never free a live object, because a reference it does not follow counts
+as an outside reference.
 
 A suspect that survives its trial goes on a watch list (three more levels, due
 every 4th, 16th and 64th tick, so a live structure is looked at ever more rarely).
@@ -81,8 +91,20 @@ everything that cannot need the barrier (a number, bool or nil; a string; any st
 into an upvalue that is already watched or still open) and send the rest to the same
 code through their slow path.
 
-Not covered: a cycle whose program never closes another upvalue (nothing ticks, so
-nothing is polled until the heap limit or the end of the program asks).
+A tick does not need an upvalue to close. Every `LZ_SKINK_ALLOC_PERIOD` (128) object
+allocations the heap calls `heap->on_alloc` (`lz_skink_alloc_tick`), which is one
+more tick of the same clock whenever a watch list is not empty, so a program that builds
+cycles, drops them and goes on allocating is still polled. Allocations are counted by the
+program, not by the clock, so every engine ticks at the same allocations. A poll that
+frees something is refunded (up to 30 per tick): garbage tends to die together, and
+a burst of dead cycles is cleared in a few ticks instead of two per tick. Like the
+emergency pass, a tick can run at any allocation; it is safe because it frees only
+objects whose every reference comes from inside the dead set. The build option
+`-DLZ_SKINK_ALLOC_PERIOD=1` polls at every allocation and is how that claim was
+tested (the whole test suite, the fuzzers and the example programs under ASan).
+
+Not covered: a cycle that dies in a program that neither closes an upvalue nor
+allocates again (nothing ticks until the heap limit or the end of the program asks).
 
 Scalars (nil, bool, int, float) live inline in `LzValue` and never touch the
 heap.
@@ -412,4 +434,4 @@ area's header, add one row to the table in `registry.c`, and add the source to
 ## Not decided yet
 
 `for` (so `range` is only useful with `while` for now), `break`/`continue`, maps and other collections, indexing and slicing strings, narrowing, the error model, and classes. Removing entries from `LzTable`.
-Skink: polling that does not depend on an upvalue closing (a tick from allocation counts), and a trial that can cross a subgraph bigger than `LZ_SKINK_EMERGENCY_NODES`.
+Skink: a trial that can cross a subgraph bigger than `LZ_SKINK_EMERGENCY_NODES`; a run-time "holds no closure" fact for unannotated arrays (they are `any` today, so a captured array of numbers is still a suspect).

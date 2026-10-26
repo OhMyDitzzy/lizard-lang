@@ -223,6 +223,53 @@ static void test_an_assignment_to_an_open_upvalue_is_the_close_s_business(void) 
     LZ_CHECK(finish(&program) == 0);
 }
 
+/* No upvalue closes after keep is dropped, so no frame exit ticks: only allocations can. */
+static void test_dead_cycles_are_found_by_allocation_ticks_alone(void) {
+    Program program;
+    run(&program, "fn make() {\n  let f = nil\n  f = fn() { return f }\n  return f\n}\n"
+                  "let keep = []\nlet i = 0\nwhile i < 200 {\n  push(keep, make())\n  i = i + 1\n}\n"
+                  "keep = nil\nlet j = 0\nlet n = 0\nwhile j < 60000 {\n  let a = [j, j, j]\n  n = n + len(a)\n  j = j + 1\n}\n"
+                  "println(n)\n",
+        true);
+    LZ_CHECK(program.run_status == LZ_OK);
+    LZ_CHECK(output_is(&program, "180000\n"));
+    LZ_CHECK(program.vm.skink.stats.cycles == 200);  /* all of them, before the final sweep */
+    LZ_CHECK(program.vm.skink.stats.alloc_ticks > 0);
+    LZ_CHECK(finish(&program) == 0);
+}
+
+/* How many upvalues one captured variable gets reported as a suspect, and what the program printed. */
+static uint64_t suspects_of(const char *text, const char *expected_output) {
+    Program program;
+    run(&program, text, true);
+    LZ_CHECK(program.run_status == LZ_OK);
+    LZ_CHECK(output_is(&program, expected_output));
+    uint64_t suspects = program.vm.skink.stats.suspects;
+    LZ_CHECK(finish(&program) == 0);
+    return suspects;
+}
+
+#define CAPTURE(DECL, EXPR)                                                                        \
+    "fn make() {\n  " DECL "\n  return fn() { return " EXPR " }\n}\nlet c = make()\nprintln(c())\n"
+
+/*
+ * A typed array whose items can never be a function cannot reach a closure, however deeply
+ * it nests, so it cannot be on a cycle and is never a suspect.
+ */
+static void test_arrays_that_cannot_reach_a_closure_are_never_suspects(void) {
+    LZ_CHECK(suspects_of(CAPTURE("let m: int[] = [1, 2]", "m[1]"), "2\n") == 0);
+    LZ_CHECK(suspects_of(CAPTURE("let m: int[][] = [[1, 2], [3, 4]]", "m[1][0]"), "3\n") == 0);
+    LZ_CHECK(suspects_of(CAPTURE("let m: string[][][] = [[[\"a\"]]]", "m[0][0][0]"), "a\n") == 0);
+    LZ_CHECK(suspects_of(CAPTURE("let m: int?[][] = [[1, nil]]", "m[0][0]"), "1\n") == 0);
+    LZ_CHECK(suspects_of(CAPTURE("let m: (int | string)[][] = [[1, \"x\"]]", "m[0][1]"), "x\n") == 0);
+}
+
+static void test_arrays_that_might_hold_a_closure_are_still_suspects(void) {
+    LZ_CHECK(suspects_of(CAPTURE("let m: any[] = [[1, 2], [3, 4]]", "m[1][0]"), "3\n") == 1);
+    LZ_CHECK(suspects_of(CAPTURE("let m: any[][] = [[1, 2], [3, 4]]", "m[1][0]"), "3\n") == 1);
+    LZ_CHECK(suspects_of(CAPTURE("let m = [[1, 2], [3, 4]]", "m[1][0]"), "3\n") == 1); /* unannotated */
+}
+
 static void test_memory_stays_flat_in_a_loop(void) {
     const char *text = "fn make() {\n  let f = nil\n  f = fn() { return f }\n  return 0\n}\n"
                        "let i = 0\nwhile i < 3000 {\n  make()\n  i = i + 1\n}\nprintln(\"ok\")\n";
@@ -353,6 +400,9 @@ int main(void) {
     test_an_array_assigned_to_a_closed_upvalue_is_watched();
     test_numbers_and_strings_assigned_to_a_closed_upvalue_cost_nothing();
     test_an_assignment_to_an_open_upvalue_is_the_close_s_business();
+    test_dead_cycles_are_found_by_allocation_ticks_alone();
+    test_arrays_that_cannot_reach_a_closure_are_never_suspects();
+    test_arrays_that_might_hold_a_closure_are_still_suspects();
     test_the_heap_limit_triggers_a_collection_before_it_refuses();
     test_the_emergency_pass_has_a_bigger_budget_than_a_tick();
     test_more_suspects_than_the_pending_list_holds_are_still_watched();

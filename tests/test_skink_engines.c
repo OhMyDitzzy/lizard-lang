@@ -112,6 +112,11 @@ int main(void) {
     check_program("over the budget (left alone on purpose)",
                   "fn make() {\n  let big = range(20000)\n  let f = nil\n  f = fn() {\n    len(big)\n    return f\n  }\n"
                   "  return 0\n}\nlet i = 0\nwhile i < 10 {\n  make()\n  i = i + 1\n}\nprintln(\"ok\")\n", false);
+    check_program("dead cycles, then only allocations",
+                  "fn make() {\n  let f = nil\n  f = fn() { return f }\n  return f\n}\n"
+                  "let keep = []\nlet i = 0\nwhile i < 150 {\n  push(keep, make())\n  i = i + 1\n}\nkeep = nil\n"
+                  "let j = 0\nlet n = 0\nwhile j < 20000 {\n  let a = [j, j, j]\n  n = n + len(a)\n  j = j + 1\n}\nprintln(n)\n",
+                  true);
     check_program("a closure assigned to a closed upvalue", TICK
                   "fn make() {\n  let slot = nil\n  let c = fn(self) {\n    slot = self\n    return 0\n  }\n  return c\n}\n"
                   "let i = 0\nwhile i < 300 {\n  let c = make()\n  c(c)\n  c = nil\n  tick()\n  i = i + 1\n}\n"

@@ -21,7 +21,11 @@ void lz_heap_init(LzHeap *heap) {
     heap->epoch = 0;
     heap->reclaim = NULL;
     heap->reclaim_context = NULL;
-    heap->reclaiming = false;
+    heap->on_alloc = NULL;
+    heap->on_alloc_context = NULL;
+    heap->alloc_period = 0;
+    heap->alloc_countdown = 0;
+    heap->in_hook = false;
 }
 
 void lz_heap_destroy(LzHeap *heap) {
@@ -54,16 +58,27 @@ static bool make_room(LzHeap *heap, size_t bytes) {
     if (!over_limit(heap, bytes)) {
         return true;
     }
-    if (heap->reclaim == NULL || heap->reclaiming) {
+    if (heap->reclaim == NULL || heap->in_hook) {
         return false;
     }
-    heap->reclaiming = true;
+    heap->in_hook = true;
     (void)heap->reclaim(heap->reclaim_context, bytes);
-    heap->reclaiming = false;
+    heap->in_hook = false;
     return !over_limit(heap, bytes);
 }
 
+static void alloc_tick(LzHeap *heap) {
+    if (heap->on_alloc == NULL || heap->in_hook || --heap->alloc_countdown != 0) {
+        return;
+    }
+    heap->alloc_countdown = heap->alloc_period;
+    heap->in_hook = true;
+    heap->on_alloc(heap->on_alloc_context);
+    heap->in_hook = false;
+}
+
 void *lz_heap_alloc(LzHeap *heap, LzObjType type, size_t size) {
+    alloc_tick(heap); /* first: what it frees may be what the limit check below needs */
     assert(size >= sizeof(LzObject));
 
     if (!make_room(heap, size)) {

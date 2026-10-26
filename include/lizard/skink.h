@@ -50,8 +50,15 @@ struct LzVM;
  *      reported. SET_UPVALUE tells Skink when such a closed upvalue is assigned a
  *      closure or an array (lz_skink_note_store), and it goes on the watch list then.
  *
- * Not covered: a cycle whose program never closes another upvalue (nothing ticks, so
- * nothing is polled until the heap limit or the end of the program asks).
+ *   8. Every LZ_SKINK_ALLOC_PERIOD object allocations the heap calls
+ *      lz_skink_alloc_tick, which is one more tick of the same clock. A program
+ *      that builds cycles, drops them and goes on allocating without ever closing an
+ *      upvalue again still gets them polled. A poll that frees something is refunded
+ *      (up to LZ_SKINK_REFUNDS_PER_TICK), so a burst of dead cycles is cleared in a
+ *      few ticks instead of two per tick.
+ *
+ * Not covered: a cycle that dies in a program that neither closes an upvalue nor allocates
+ * again (nothing ticks until the heap limit or the end of the program asks).
  */
 
 #define LZ_SKINK_PENDING_MAX 64 /* suspects one frame exit can report; more are skipped */
@@ -59,6 +66,10 @@ struct LzVM;
 #define LZ_SKINK_BUDGET 1024    /* work units one trial may spend, see skink.c */
 #define LZ_SKINK_LEVELS 4       /* watch lists; level n is polled every 4^n ticks */
 #define LZ_SKINK_POLLS_PER_TICK 2
+#define LZ_SKINK_REFUNDS_PER_TICK 30 /* a poll that frees something does not count against the 2 */
+#ifndef LZ_SKINK_ALLOC_PERIOD
+#define LZ_SKINK_ALLOC_PERIOD 128    /* allocations between two ticks that need no upvalue to close */
+#endif
 #define LZ_SKINK_EMERGENCY_NODES 4096     /* a power of two */
 #define LZ_SKINK_EMERGENCY_BUDGET 65536   /* scratch memory for it is malloc'd, outside the heap limit */
 
@@ -67,6 +78,7 @@ typedef struct LzSkinkStats {
     uint64_t watched;      /* upvalues put on a watch list: survivors of a trial, overflow, assignments */
     uint64_t stored;       /* of those, closed upvalues that were assigned a container after they closed */
     uint64_t polls;        /* trials started from a watch list (they are counted in trials too) */
+    uint64_t alloc_ticks;  /* ticks that came from the allocation count, not from a frame exit */
     uint64_t dropped;      /* suspects past the pending list: watched without a trial */
     uint64_t trials;       /* trial deletions started */
     uint64_t over_budget;  /* trials abandoned because the subgraph was too big */
@@ -99,6 +111,9 @@ void lz_skink_note_closed(struct LzVM *vm, LzUpvalue *upvalue);
  * object, lz_vm_close_upvalues reports it.)
  */
 void lz_skink_note_store(struct LzVM *vm, LzUpvalue *upvalue);
+
+/* The heap's allocation hook (context is the LzVM): one tick of the watch lists, when there is anything on them. */
+void lz_skink_alloc_tick(void *vm);
 
 /* Examines and releases every reported suspect. Call once the closing frame's slots are gone. */
 void lz_skink_run(struct LzVM *vm);

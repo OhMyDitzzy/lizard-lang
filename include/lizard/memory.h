@@ -52,7 +52,18 @@ typedef struct LzHeap {
      */
     size_t (*reclaim)(void *context, size_t needed_bytes);
     void *reclaim_context;
-    bool reclaiming;
+    /*
+     * Optional: called every alloc_period object allocations, before the allocation is made,
+     * so that the VM's cycle collector gets a turn in a program that never closes an upvalue.
+     * Allocations are counted by the program, not by the clock, so every engine ticks at the
+     * same allocations. Same rules as reclaim: it may run anywhere, and frees only what
+     * nothing references.
+     */
+    void (*on_alloc)(void *context);
+    void *on_alloc_context;
+    uint32_t alloc_period;
+    uint32_t alloc_countdown;
+    bool in_hook; /* a hook is running: neither is re-entered */
 } LzHeap;
 
 void lz_heap_init(LzHeap *heap);

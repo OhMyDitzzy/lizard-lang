@@ -54,12 +54,13 @@ static void print_skink_stats(const LzSkinkStats *stats) {
     }
     fprintf(stderr,
             "skink: %llu suspects (%llu watched, %llu of them by assignment), %llu trials (%llu "
-            "from watch lists, %llu over budget), %llu dead cycles freed (%llu objects)\n",
+            "from watch lists, %llu over budget), %llu dead cycles freed (%llu objects), "
+            "%llu ticks from allocations\n",
             (unsigned long long)stats->suspects, (unsigned long long)stats->watched,
             (unsigned long long)stats->stored,
             (unsigned long long)stats->trials, (unsigned long long)stats->polls,
             (unsigned long long)stats->over_budget, (unsigned long long)stats->cycles,
-            (unsigned long long)stats->objects);
+            (unsigned long long)stats->objects, (unsigned long long)stats->alloc_ticks);
     if (stats->reclaims > 0) {
         fprintf(stderr, "skink: %llu emergency passes before --max-heap refused an allocation, %llu bytes freed\n",
                 (unsigned long long)stats->reclaims, (unsigned long long)stats->reclaimed);

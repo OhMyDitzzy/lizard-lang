@@ -26,6 +26,10 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     lz_skink_init(&vm->skink);
     vm->heap.reclaim = lz_skink_reclaim; /* before --max-heap refuses an allocation */
     vm->heap.reclaim_context = vm;
+    vm->heap.on_alloc = lz_skink_alloc_tick; /* a tick every LZ_SKINK_ALLOC_PERIOD allocations */
+    vm->heap.on_alloc_context = vm;
+    vm->heap.alloc_period = LZ_SKINK_ALLOC_PERIOD;
+    vm->heap.alloc_countdown = LZ_SKINK_ALLOC_PERIOD;
 }
 
 void lz_vm_set_heap_limit(LzVM *vm, size_t bytes) {
