@@ -73,14 +73,30 @@ block exit that closed at least one upvalue and examines at most two watched
 upvalues; it is defined by the closing, not by the call of `lz_vm_return`, because
 the reference interpreter returns through it every time and the Gecko Engine only
 when it has something to close, and the engines must agree on the heap statistics
-(`test_skink_engines`). `lz_vm_release_roots` ends with one sweep over the watch
-list, so a cycle that was only waiting for the program to finish is freed as well.
-Before an allocation is refused because of `--max-heap`, the heap asks Skink for
-room: `lz_skink_reclaim` runs the same passes over the whole watch list with
-`LZ_SKINK_EMERGENCY_BUDGET` instead of `LZ_SKINK_BUDGET`, so a cycle that holds a
-big array, which no ordinary trial can afford, is freed exactly when the memory is
-needed. More suspects than the pending list holds are put on the watch list without
-a trial instead of being dropped.
+(`test_skink_engines`). More suspects than the pending list holds are put on the
+watch list without a trial instead of being dropped.
+
+**Full passes: dead cycles of any size.** A trial has a budget, so a cycle that holds a big
+structure is left alone by every tick. What frees it is a *full pass*: one trial over everything
+the watch lists lead to, with no limit on its size. Every object is visited once, however many
+upvalues share it (the roots are all the watched upvalues at once, so 300 cycles that hold the
+same big array cost one walk of it, not 300; `full_nodes` counts the visits). Its working memory
+is malloc'd outside the heap and its limit and doubles as needed; if there is none, the pass gives
+up and a bounded fallback takes over. Three things start one:
+
+* *The heap has grown.* In the allocation hook (see below), when the live heap has reached
+  `LZ_SKINK_FULL_GROWTH` (2) times what the last pass left, and at least `LZ_SKINK_FULL_MIN_BYTES`
+  (2 MiB). Garbage therefore stays about as big as what is live, with no `--max-heap` and no
+  setting of any kind. A pass that finds nothing (an eighth of the heap or less) has walked live
+  data for nothing, and the next is put off to `LZ_SKINK_FULL_GROWTH_IDLE` (3) times: a program with
+  a big live structure reachable from closures pays for a few passes, not one per doubling.
+* *An allocation would cross `--max-heap`.* The heap asks Skink for room first (`heap->reclaim`,
+  `lz_skink_reclaim`) and tries again.
+* *The end of the program,* `lz_vm_release_roots` (`lz_skink_sweep`), so a cycle that was only
+  waiting for the program to finish is not reported as left alive. It costs a pass over everything
+  the closures captured, which a heap that is about to be destroyed whole does not need, so
+  `LzSkink.final_sweep` is on for the library and the CLI turns it off unless `--heap-stats` or
+  `--trace-memory` asks for the report.
 An upvalue that held a number, a string or nil when its frame ended was never
 reported, and a closure or array assigned to it later can still close a cycle
 (`slot = self`). `SET_UPVALUE` therefore tells Skink (`lz_skink_note_store`) when it
@@ -98,7 +114,7 @@ cycles, drops them and goes on allocating is still polled. Allocations are count
 program, not by the clock, so every engine ticks at the same allocations. A poll that
 frees something is refunded (up to 30 per tick): garbage tends to die together, and
 a burst of dead cycles is cleared in a few ticks instead of two per tick. Like the
-emergency pass, a tick can run at any allocation; it is safe because it frees only
+full pass, a tick can run at any allocation; it is safe because it frees only
 objects whose every reference comes from inside the dead set. The build option
 `-DLZ_SKINK_ALLOC_PERIOD=1` polls at every allocation and is how that claim was
 tested (the whole test suite, the fuzzers and the example programs under ASan).
@@ -349,11 +365,10 @@ A native that fails to allocate returns `lz_vm_out_of_memory(vm)`, which reports
 `LZ_ERR_HEAP_LIMIT` when the limit was the cause and `LZ_ERR_MEMORY` otherwise.
 
 An allocation that would cross the limit first calls `heap->reclaim` once and then
-checks again. The VM installs Skink there (`lz_skink_reclaim`, see Memory model): an
-emergency pass over its watch list that frees dead cycles which were only waiting for
-their next poll, with a budget far bigger than a tick may spend. The hook is never
+checks again. The VM installs Skink there (`lz_skink_reclaim`, see Memory model): a full
+pass over its watch list, which frees every dead cycle however big. The hook is never
 re-entered, can run at any allocation, and frees only objects nothing references; its
-scratch memory is malloc'd outside the heap, so it does not count against the limit.
+working memory is malloc'd outside the heap, so it does not count against the limit.
 
 Fuel costs one unit per instruction and persists across `lz_vm_run` calls, so
 the host sets it before each run; `vm->instructions` counts executed
@@ -434,4 +449,4 @@ area's header, add one row to the table in `registry.c`, and add the source to
 ## Not decided yet
 
 `for` (so `range` is only useful with `while` for now), `break`/`continue`, maps and other collections, indexing and slicing strings, narrowing, the error model, and classes. Removing entries from `LzTable`.
-Skink: a trial that can cross a subgraph bigger than `LZ_SKINK_EMERGENCY_NODES`; a run-time "holds no closure" fact for unannotated arrays (they are `any` today, so a captured array of numbers is still a suspect).
+Skink: counts kept in the object header instead of a hash table (a full pass would cost a fraction of what it does), and a run-time "holds no closure" fact for unannotated arrays (they are `any` today, so a captured array of numbers is still a suspect).

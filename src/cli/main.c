@@ -49,7 +49,7 @@ static void print_heap_stats(const LzHeap *heap) {
 }
 
 static void print_skink_stats(const LzSkinkStats *stats) {
-    if (stats->suspects == 0 && stats->watched == 0 && stats->reclaims == 0) {
+    if (stats->suspects == 0 && stats->watched == 0 && stats->full_passes == 0) {
         return;
     }
     fprintf(stderr,
@@ -61,9 +61,10 @@ static void print_skink_stats(const LzSkinkStats *stats) {
             (unsigned long long)stats->trials, (unsigned long long)stats->polls,
             (unsigned long long)stats->over_budget, (unsigned long long)stats->cycles,
             (unsigned long long)stats->objects, (unsigned long long)stats->alloc_ticks);
-    if (stats->reclaims > 0) {
-        fprintf(stderr, "skink: %llu emergency passes before --max-heap refused an allocation, %llu bytes freed\n",
-                (unsigned long long)stats->reclaims, (unsigned long long)stats->reclaimed);
+    if (stats->full_passes > 0) {
+        fprintf(stderr, "skink: %llu full passes (%llu before --max-heap refused an allocation), %llu bytes freed\n",
+                (unsigned long long)stats->full_passes, (unsigned long long)stats->reclaims,
+                (unsigned long long)stats->reclaimed);
     }
 }
 
@@ -182,6 +183,8 @@ static int run_script(const LzOptions *options) {
     if (options->has_skink) {
         vm.skink.enabled = options->skink;
     }
+    /* The final sweep only makes the report of what is left alive exact: skip it when nobody asked. */
+    vm.skink.final_sweep = options->heap_stats || options->trace_memory;
 
     LzChunk chunk;
     lz_chunk_init(&chunk);

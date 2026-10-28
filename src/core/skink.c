@@ -9,26 +9,38 @@
 #include <string.h>
 
 /*
- * Work units. A trial may spend LZ_SKINK_BUDGET of them (LZ_SKINK_EMERGENCY_BUDGET in an emergency pass): a visited object costs
+ * Work units. A trial may spend LZ_SKINK_BUDGET of them: a visited object costs
  * NODE_COST, a reference followed costs EDGE_COST, and looking at the items of an
  * array or the slots of a closure costs one unit per SCAN_BATCH of them. That keeps
  * a trial over a big array of numbers cheap, and a trial over anything bigger than
  * the budget bounded.
  */
+/*
+ * Test hook: when non-zero, the Nth allocation of working memory for a full pass fails, once. Every
+ * failure point can then be tried in turn (tests/test_skink.c) to see that a pass that cannot get
+ * its memory gives up cleanly, leaks nothing, and that the next one works.
+ */
+size_t lz_skink_fault_countdown;
+
+static bool fault(void) {
+    return lz_skink_fault_countdown != 0 && --lz_skink_fault_countdown == 0;
+}
+
+static void *work_malloc(size_t bytes) {
+    return fault() ? NULL : malloc(bytes);
+}
+
+static void *work_calloc(size_t count, size_t size) {
+    return fault() ? NULL : calloc(count, size);
+}
+
+static void *work_realloc(void *old, size_t bytes) {
+    return fault() ? NULL : realloc(old, bytes);
+}
+
 #define NODE_COST 4
 #define EDGE_COST 2
 #define SCAN_BATCH 8
-
-/* Memory a trial works in: room for `capacity` nodes (a power of two) and twice as many table slots. */
-typedef struct Scratch {
-    size_t capacity;
-    size_t budget;
-    LzObject **node;
-    int64_t *rc; /* refcount minus the references that come from inside the set */
-    bool *live;
-    uint32_t *work;
-    uint32_t *table; /* node index + 1; 0 is an empty slot */
-} Scratch;
 
 /* The ordinary size, on the stack: one trial per frame exit must not allocate. */
 typedef struct TrialBuffers {
@@ -39,19 +51,23 @@ typedef struct TrialBuffers {
     uint32_t table[LZ_SKINK_MAX_NODES * 2];
 } TrialBuffers;
 
+/* Table slots are indexed by uint32_t (index + 1), so a trial can hold this many nodes at most. */
+#define FULL_MAX_NODES ((size_t)1 << 30)
+
 typedef struct Trial {
     const LzSkink *skink;
-    size_t capacity;
+    size_t capacity; /* nodes the arrays have room for: a power of two */
     size_t table_mask;
     size_t budget;
     size_t count;
     size_t units;
     size_t work_top;
+    bool growable; /* malloc'd arrays that double when the set fills up: a full pass has no size limit */
     LzObject **node;
-    int64_t *rc;
+    int64_t *rc; /* refcount minus the references that come from inside the set */
     bool *live;
     uint32_t *work;
-    uint32_t *table;
+    uint32_t *table; /* node index + 1; 0 is an empty slot */
 } Trial;
 
 typedef bool (*EdgeFn)(Trial *trial, LzObject *target);
@@ -215,10 +231,13 @@ static int64_t pending_holds(const LzSkink *skink, const LzObject *object) {
     return holds;
 }
 
+static size_t hash_bits(const LzObject *object) {
+    uint64_t bits = (uint64_t)((uintptr_t)object >> 4);
+    return (size_t)((bits * UINT64_C(0x9E3779B97F4A7C15)) >> 32);
+}
+
 static size_t hash_slot(const Trial *trial, const LzObject *object) {
-    uintptr_t bits = (uintptr_t)object >> 4;
-    bits ^= bits >> 17;
-    return (size_t)(bits * 2654435761u) & trial->table_mask;
+    return hash_bits(object) & trial->table_mask;
 }
 
 static bool find_node(const Trial *trial, const LzObject *object, size_t *index) {
@@ -236,12 +255,95 @@ static bool find_node(const Trial *trial, const LzObject *object, size_t *index)
     }
 }
 
+/* A trial whose arrays belong to it, with room for `capacity` nodes to begin with and no limit on the work. */
+static bool trial_init_growable(Trial *trial, const LzSkink *skink, size_t capacity) {
+    memset(trial, 0, sizeof *trial);
+    trial->skink = skink;
+    trial->capacity = capacity;
+    trial->table_mask = capacity * 2 - 1;
+    trial->budget = SIZE_MAX;
+    trial->growable = true;
+    trial->node = work_malloc(capacity * sizeof *trial->node);
+    trial->rc = work_malloc(capacity * sizeof *trial->rc);
+    trial->live = work_malloc(capacity * sizeof *trial->live);
+    trial->work = work_malloc(capacity * sizeof *trial->work);
+    trial->table = work_calloc(capacity * 2, sizeof *trial->table);
+    if (trial->node == NULL || trial->rc == NULL || trial->live == NULL || trial->work == NULL ||
+        trial->table == NULL) {
+        free(trial->node);
+        free(trial->rc);
+        free(trial->live);
+        free(trial->work);
+        free(trial->table);
+        return false;
+    }
+    return true;
+}
+
+static void trial_free(Trial *trial) {
+    if (trial->growable) {
+        free(trial->node);
+        free(trial->rc);
+        free(trial->live);
+        free(trial->work);
+        free(trial->table);
+    }
+}
+
+/*
+ * Doubles the room of a growable trial and rehashes. False when there is no memory: the trial
+ * is then given up, with every array still the right size for the capacity it has.
+ */
+static bool trial_grow(Trial *trial) {
+    size_t capacity = trial->capacity * 2;
+    if (!trial->growable || capacity > FULL_MAX_NODES) {
+        return false;
+    }
+    LzObject **node = work_realloc(trial->node, capacity * sizeof *node);
+    if (node == NULL) {
+        return false;
+    }
+    trial->node = node;
+    int64_t *rc = work_realloc(trial->rc, capacity * sizeof *rc);
+    if (rc == NULL) {
+        return false;
+    }
+    trial->rc = rc;
+    bool *live = work_realloc(trial->live, capacity * sizeof *live);
+    if (live == NULL) {
+        return false;
+    }
+    trial->live = live;
+    uint32_t *work = work_realloc(trial->work, capacity * sizeof *work);
+    if (work == NULL) {
+        return false;
+    }
+    trial->work = work;
+    uint32_t *table = work_calloc(capacity * 2, sizeof *table);
+    if (table == NULL) {
+        return false;
+    }
+    size_t mask = capacity * 2 - 1;
+    for (size_t i = 0; i < trial->count; i++) {
+        size_t slot = hash_bits(trial->node[i]) & mask;
+        while (table[slot] != 0) {
+            slot = (slot + 1) & mask;
+        }
+        table[slot] = (uint32_t)(i + 1);
+    }
+    free(trial->table);
+    trial->table = table;
+    trial->table_mask = mask;
+    trial->capacity = capacity;
+    return true;
+}
+
 /* The index of the node, adding it with its starting count. False when the set is full. */
 static bool intern_node(Trial *trial, LzObject *object, size_t *index) {
     if (find_node(trial, object, index)) {
         return true;
     }
-    if (trial->count == trial->capacity) {
+    if (trial->count == trial->capacity && !trial_grow(trial)) {
         return false;
     }
     size_t i = trial->count++;
@@ -269,12 +371,8 @@ static bool visit_discover(Trial *trial, LzObject *target) {
     return trial->units <= trial->budget;
 }
 
-/* Phase 1: everything reachable from the root, with the internal references subtracted. */
-static bool discover(Trial *trial, LzObject *root) {
-    size_t index;
-    if (!intern_node(trial, root, &index)) {
-        return false;
-    }
+/* Phase 1: everything reachable from the nodes already in the set, with the internal references subtracted. */
+static bool expand_all(Trial *trial) {
     for (size_t i = 0; i < trial->count; i++) {
         trial->units += slot_count(trial->node[i]) / SCAN_BATCH;
         if (trial->units > trial->budget || !each_edge(trial, trial->node[i], visit_discover)) {
@@ -282,6 +380,11 @@ static bool discover(Trial *trial, LzObject *root) {
         }
     }
     return true;
+}
+
+static bool discover(Trial *trial, LzObject *root) {
+    size_t index;
+    return intern_node(trial, root, &index) && expand_all(trial);
 }
 
 static bool visit_mark(Trial *trial, LzObject *target) {
@@ -375,46 +478,50 @@ static size_t collect(LzVM *vm, const Trial *trial) {
     return dead;
 }
 
-static TrialResult trial_from(LzVM *vm, LzUpvalue *suspect, size_t *freed, const Scratch *scratch) {
+/* Phases 2 and 3 on a set that discover filled: what is held from outside, and what is dead. */
+static TrialResult finish_trial(LzVM *vm, Trial *trial, size_t *freed) {
+    for (size_t i = 0; i < trial->count; i++) {
+        if (trial->rc[i] < 0) {
+            return TRIAL_INCONSISTENT; /* more internal references than the object has */
+        }
+    }
+    if (!mark_live(trial)) {
+        return TRIAL_INCONSISTENT;
+    }
+    *freed = collect(vm, trial);
+    return *freed > 0 ? TRIAL_FREED : TRIAL_LIVE;
+}
+
+/* An ordinary trial: on the stack, with the fixed size and the budget of a tick. */
+static TrialResult trial_from(LzVM *vm, LzUpvalue *suspect, size_t *freed) {
+    TrialBuffers buffers;
     Trial trial;
     trial.skink = &vm->skink;
-    trial.capacity = scratch->capacity;
-    trial.table_mask = scratch->capacity * 2 - 1;
-    trial.budget = scratch->budget;
+    trial.capacity = LZ_SKINK_MAX_NODES;
+    trial.table_mask = LZ_SKINK_MAX_NODES * 2 - 1;
+    trial.budget = LZ_SKINK_BUDGET;
     trial.count = 0;
     trial.units = 0;
     trial.work_top = 0;
-    trial.node = scratch->node;
-    trial.rc = scratch->rc;
-    trial.live = scratch->live;
-    trial.work = scratch->work;
-    trial.table = scratch->table;
-    memset(trial.table, 0, (trial.table_mask + 1) * sizeof *trial.table);
+    trial.growable = false;
+    trial.node = buffers.node;
+    trial.rc = buffers.rc;
+    trial.live = buffers.live;
+    trial.work = buffers.work;
+    trial.table = buffers.table;
+    memset(trial.table, 0, sizeof buffers.table);
 
     if (!discover(&trial, &suspect->base)) {
         return TRIAL_OVER_BUDGET;
     }
-    for (size_t i = 0; i < trial.count; i++) {
-        if (trial.rc[i] < 0) {
-            return TRIAL_INCONSISTENT; /* more internal references than the object has */
-        }
-    }
-    if (!mark_live(&trial)) {
-        return TRIAL_INCONSISTENT;
-    }
-    *freed = collect(vm, &trial);
-    return *freed > 0 ? TRIAL_FREED : TRIAL_LIVE;
+    return finish_trial(vm, &trial, freed);
 }
 
-/* big is the emergency scratch, or NULL for an ordinary trial on the stack. */
-static void run_trial(LzVM *vm, LzUpvalue *root, const Scratch *big) {
+static void run_trial(LzVM *vm, LzUpvalue *root) {
     LzSkinkStats *stats = &vm->skink.stats;
-    TrialBuffers buffers;
-    Scratch small = {LZ_SKINK_MAX_NODES, LZ_SKINK_BUDGET, buffers.node, buffers.rc,
-                     buffers.live,       buffers.work,    buffers.table};
     stats->trials++;
     size_t freed = 0;
-    switch (trial_from(vm, root, &freed, big != NULL ? big : &small)) {
+    switch (trial_from(vm, root, &freed)) {
     case TRIAL_FREED:
         stats->cycles++;
         stats->objects += freed;
@@ -437,16 +544,16 @@ static void examine(LzVM *vm, LzUpvalue *suspect) {
         !may_join_cycle(&suspect->closed)) {
         return;
     }
-    run_trial(vm, suspect, NULL);
+    run_trial(vm, suspect);
 }
 
 /* A watched upvalue: nothing of Skink's own holds it, and its value may have changed since. */
-static void examine_watched(LzVM *vm, LzUpvalue *upvalue, const Scratch *big) {
+static void examine_watched(LzVM *vm, LzUpvalue *upvalue) {
     if (upvalue->location != &upvalue->closed || !may_join_cycle(&upvalue->closed)) {
         return;
     }
     vm->skink.stats.polls++;
-    run_trial(vm, upvalue, big);
+    run_trial(vm, upvalue);
 }
 
 /* ---- watch lists: circular, the head lives in LzSkink, links live in the upvalues ---- */
@@ -460,6 +567,15 @@ static void watch_init(LzWatchLink *head) {
 
 static bool watch_empty(const LzWatchLink *head) {
     return head->next == head;
+}
+
+static bool watching(const LzSkink *skink) {
+    for (size_t level = 0; level < LZ_SKINK_LEVELS; level++) {
+        if (!watch_empty(&skink->watch[level])) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static void watch_push_back(LzWatchLink *head, LzWatchLink *link) {
@@ -497,7 +613,7 @@ static void poll(LzVM *vm) {
             watch_push_back(&skink->watch[next_level], front);
             polls--;
             uint64_t before = skink->stats.objects;
-            examine_watched(vm, WATCHED_UPVALUE(front), NULL);
+            examine_watched(vm, WATCHED_UPVALUE(front));
             if (skink->stats.objects != before && refunds > 0) {
                 refunds--; /* garbage tends to die together: keep going while it is there */
                 polls++;
@@ -507,11 +623,11 @@ static void poll(LzVM *vm) {
 }
 
 /*
- * Examines every watched upvalue, and goes round again while a pass still frees something:
- * freeing one cycle can drop the last outside reference of another that was looked at
- * earlier in the pass. Entries stay watched, on level 0, unless they die.
+ * The fallback when a full pass cannot get its memory: every watched upvalue gets an ordinary trial
+ * of its own, and the round is repeated while it still frees something (freeing one cycle can drop
+ * the last outside reference of another that was looked at earlier). Entries stay watched, on level 0.
  */
-static void watch_passes(LzVM *vm, const Scratch *big) {
+static void bounded_passes(LzVM *vm) {
     LzSkink *skink = &vm->skink;
     for (int pass = 0; pass < 8; pass++) {
         uint64_t before = skink->stats.objects;
@@ -522,7 +638,7 @@ static void watch_passes(LzVM *vm, const Scratch *big) {
                 LzWatchLink *front = skink->watch[level].next;
                 lz_watch_unlink(front);
                 watch_push_back(&done, front);
-                examine_watched(vm, WATCHED_UPVALUE(front), big);
+                examine_watched(vm, WATCHED_UPVALUE(front));
             }
         }
         while (!watch_empty(&done)) {
@@ -536,38 +652,105 @@ static void watch_passes(LzVM *vm, const Scratch *big) {
     }
 }
 
-/* One malloc, outside the heap and its limit. False when there is no memory: the pass then uses the stack. */
-static bool scratch_alloc(Scratch *scratch) {
-    size_t n = LZ_SKINK_EMERGENCY_NODES;
-    size_t bytes = n * sizeof(LzObject *) + n * sizeof(int64_t) + n * 2 * sizeof(uint32_t) +
-                   n * sizeof(uint32_t) + n * sizeof(bool);
-    char *block = malloc(bytes);
-    if (block == NULL) {
+/*
+ * One trial over everything the watch lists lead to, with no limit on its size: every object is
+ * visited once, so the cost is the size of what is reachable, however many upvalues share it. The
+ * working memory is malloc'd (outside the heap and its limit) and doubles as needed. False when
+ * there was no memory for it, or the counts did not add up: nothing was freed then.
+ */
+static bool full_pass_once(LzVM *vm, bool during_run) {
+    LzSkink *skink = &vm->skink;
+    if (!watching(skink)) {
+        return true; /* nothing to look at: no pass, no memory, no statistics */
+    }
+    Trial trial;
+    if (!trial_init_growable(&trial, skink, 1024)) {
         return false;
     }
-    scratch->capacity = n;
-    scratch->budget = LZ_SKINK_EMERGENCY_BUDGET;
-    scratch->node = (LzObject **)(void *)block;
-    block += n * sizeof(LzObject *);
-    scratch->rc = (int64_t *)(void *)block;
-    block += n * sizeof(int64_t);
-    scratch->table = (uint32_t *)(void *)block;
-    block += n * 2 * sizeof(uint32_t);
-    scratch->work = (uint32_t *)(void *)block;
-    block += n * sizeof(uint32_t);
-    scratch->live = (bool *)(void *)block;
+    bool complete = true;
+    for (size_t level = 0; level < LZ_SKINK_LEVELS && complete; level++) {
+        for (const LzWatchLink *link = skink->watch[level].next;
+             link != &skink->watch[level] && complete; link = link->next) {
+            LzUpvalue *upvalue = WATCHED_UPVALUE(link);
+            size_t index;
+            if (upvalue->location == &upvalue->closed && may_join_cycle(&upvalue->closed)) {
+                complete = intern_node(&trial, &upvalue->base, &index);
+            }
+        }
+    }
+    size_t freed = 0;
+    TrialResult result = TRIAL_OVER_BUDGET;
+    if (complete && expand_all(&trial)) {
+        result = finish_trial(vm, &trial, &freed);
+    }
+    skink->stats.full_nodes += trial.count;
+    trial_free(&trial);
+    if (result == TRIAL_INCONSISTENT) {
+        skink->stats.inconsistent++;
+    }
+    if (result != TRIAL_FREED && result != TRIAL_LIVE) {
+        return false;
+    }
+    if (during_run) {
+        skink->stats.full_passes++; /* the final pass, once the program is over, is not one of them */
+    }
+    if (result == TRIAL_FREED) {
+        skink->stats.cycles++;
+        skink->stats.objects += freed;
+    }
+    /* What is left was just looked at thoroughly: let it back off to the slowest schedule. */
+    for (size_t level = 0; level + 1 < LZ_SKINK_LEVELS; level++) {
+        while (!watch_empty(&skink->watch[level])) {
+            LzWatchLink *front = skink->watch[level].next;
+            lz_watch_unlink(front);
+            watch_push_back(&skink->watch[LZ_SKINK_LEVELS - 1], front);
+        }
+    }
     return true;
 }
 
-static void scratch_free(Scratch *scratch) {
-    free(scratch->node); /* the block starts with the node array */
+/* Full passes until one frees nothing (freeing a cycle can release another that held it). False if the first could not run. */
+static bool full_collect(LzVM *vm, bool during_run) {
+    LzSkink *skink = &vm->skink;
+    for (int pass = 0; pass < 8; pass++) {
+        uint64_t before = skink->stats.objects;
+        if (!full_pass_once(vm, during_run)) {
+            return pass > 0;
+        }
+        if (skink->stats.objects == before) {
+            break;
+        }
+    }
+    return true;
+}
+
+/* The next growth pass is due when the heap has grown to `factor` times what is left after this one. */
+static void schedule_full(LzVM *vm, size_t basis_bytes, size_t factor) {
+    size_t next = basis_bytes * factor;
+    vm->skink.next_full_bytes = next > LZ_SKINK_FULL_MIN_BYTES ? next : LZ_SKINK_FULL_MIN_BYTES;
+}
+
+/* The heap has doubled since the last full pass: whatever is dead and cyclic goes now, however big. */
+static void grow_pass(LzVM *vm) {
+    LzSkink *skink = &vm->skink;
+    size_t before = vm->heap.live_bytes;
+    bool ran = full_collect(vm, true);
+    size_t after = vm->heap.live_bytes;
+    if (after < before) {
+        skink->stats.reclaimed += before - after;
+    }
+    /* Productive (it freed an eighth of the heap or more): stay tight. Idle, or out of memory: back off. */
+    bool productive = ran && after < before && (before - after) * 8 >= before;
+    schedule_full(vm, ran ? after : before, productive ? LZ_SKINK_FULL_GROWTH : LZ_SKINK_FULL_GROWTH_IDLE);
 }
 
 void lz_skink_init(LzSkink *skink) {
     skink->enabled = true;
+    skink->final_sweep = true;
     skink->pending_count = 0;
     skink->ticks = 0;
     skink->closed_any = false;
+    skink->next_full_bytes = LZ_SKINK_FULL_MIN_BYTES;
     for (size_t i = 0; i < LZ_SKINK_LEVELS; i++) {
         watch_init(&skink->watch[i]);
     }
@@ -614,14 +797,13 @@ void lz_skink_alloc_tick(void *context) {
     if (!skink->enabled || skink->pending_count > 0) {
         return;
     }
-    bool watching = false;
-    for (size_t level = 0; level < LZ_SKINK_LEVELS; level++) {
-        watching = watching || !watch_empty(&skink->watch[level]);
-    }
-    if (!watching) {
+    if (!watching(skink)) {
         return;
     }
     skink->stats.alloc_ticks++;
+    if (vm->heap.live_bytes >= skink->next_full_bytes) {
+        grow_pass(vm);
+    }
     poll(vm);
 }
 
@@ -668,14 +850,11 @@ void lz_skink_flush(LzVM *vm) {
 }
 
 void lz_skink_sweep(LzVM *vm) {
-    if (!vm->skink.enabled) {
+    if (!vm->skink.enabled || !vm->skink.final_sweep) {
         return;
     }
-    Scratch big;
-    bool have_big = scratch_alloc(&big);
-    watch_passes(vm, have_big ? &big : NULL);
-    if (have_big) {
-        scratch_free(&big);
+    if (!full_collect(vm, false)) {
+        bounded_passes(vm);
     }
 }
 
@@ -683,18 +862,16 @@ size_t lz_skink_reclaim(void *context, size_t needed_bytes) {
     (void)needed_bytes;
     LzVM *vm = context;
     LzSkink *skink = &vm->skink;
-    if (!skink->enabled || skink->pending_count > 0) {
+    if (!skink->enabled || skink->pending_count > 0 || !watching(skink)) {
         return 0;
     }
     size_t before = vm->heap.live_bytes;
-    Scratch big;
-    bool have_big = scratch_alloc(&big);
-    watch_passes(vm, have_big ? &big : NULL);
-    if (have_big) {
-        scratch_free(&big);
+    if (!full_collect(vm, true)) {
+        bounded_passes(vm);
     }
     size_t freed = before > vm->heap.live_bytes ? before - vm->heap.live_bytes : 0;
     skink->stats.reclaims++;
     skink->stats.reclaimed += freed;
+    schedule_full(vm, vm->heap.live_bytes, LZ_SKINK_FULL_GROWTH);
     return freed;
 }

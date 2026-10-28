@@ -71,7 +71,15 @@ lz_add_ge_variant(fuzz_compile)
 # to machine code on first sight (LZ_JIT=eager). Without a JIT on the platform these are
 # plain GE runs.
 foreach(name test_engine fuzz_engine test_run_ge test_limits_ge test_array_ge test_compiler_ge
-        fuzz_run_ge fuzz_compile_ge)
+        fuzz_run_ge fuzz_compile_ge test_skink_ge)
     add_test(NAME ${name}_jit COMMAND ${name})
     set_tests_properties(${name}_jit PROPERTIES ENVIRONMENT "LZ_JIT=eager")
 endforeach()
+
+if(UNIX)
+    # Skink through the reference interpreter, the Gecko interpreter and the JIT: the output,
+    # the statistics and what is left alive must agree (tests/skink_check.sh, which also fails
+    # when the JIT did not run).
+    add_test(NAME skink_cli
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/skink_check.sh $<TARGET_FILE:lizard>)
+endif()

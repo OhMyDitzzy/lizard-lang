@@ -270,6 +270,109 @@ static void test_arrays_that_might_hold_a_closure_are_still_suspects(void) {
     LZ_CHECK(suspects_of(CAPTURE("let m = [[1, 2], [3, 4]]", "m[1][0]"), "3\n") == 1); /* unannotated */
 }
 
+/*
+ * Dead cycles of any size. Each make() builds a structure of 15000 small arrays (about 2.4 MB)
+ * that a closure holds together with itself, and drops it. No trial of a tick can afford that, and
+ * neither could an earlier pass that stopped at 4096 objects; a full pass has no limit, and the
+ * heap asks for one whenever it has doubled.
+ */
+#define BIG_CYCLES                                                                                  \
+    "fn make() {\n  let big = []\n  let i = 0\n  while i < 15000 {\n    push(big, [i, i])\n"       \
+    "    i = i + 1\n  }\n  let f = nil\n  f = fn() {\n    len(big)\n    return f\n  }\n"            \
+    "  return f\n}\nlet r = 0\nlet n = 0\nwhile r < 8 {\n  let c = make()\n  c = nil\n"               \
+    "  n = n + 1\n  r = r + 1\n}\nprintln(n)\n"
+
+static void test_dead_cycles_bigger_than_any_budget_are_freed_before_the_limit_refuses(void) {
+    heap_limit = 5000000;
+    Program off;
+    run(&off, BIG_CYCLES, false);
+    LZ_CHECK(off.run_status == LZ_ERR_HEAP_LIMIT); /* 8 x 2.4 MB of garbage that is never freed */
+    (void)finish(&off);
+
+    Program on;
+    run(&on, BIG_CYCLES, true);
+    LZ_CHECK(on.run_status == LZ_OK);
+    LZ_CHECK(output_is(&on, "8\n"));
+    LZ_CHECK(on.vm.skink.stats.full_passes >= 1);
+    LZ_CHECK(on.vm.skink.stats.reclaimed > 2000000);
+    LZ_CHECK(finish(&on) == 0);
+    heap_limit = 0;
+}
+
+/* No --max-heap at all: the user never has to set one for the memory to stay bounded. */
+static void test_memory_stays_bounded_without_a_limit_however_big_the_cycles_are(void) {
+    Program off;
+    run(&off, BIG_CYCLES, false);
+    LZ_CHECK(off.run_status == LZ_OK);
+    LZ_CHECK(off.vm.heap.peak_bytes > 15000000);
+    LZ_CHECK(finish(&off) > 100000); /* all eight structures leaked */
+
+    Program on;
+    run(&on, BIG_CYCLES, true);
+    LZ_CHECK(on.run_status == LZ_OK);
+    LZ_CHECK(on.vm.heap.peak_bytes < 4000000); /* about one structure, not eight */
+    LZ_CHECK(on.vm.skink.stats.full_passes >= 4); /* about one per structure; the last goes at the end */
+    LZ_CHECK(finish(&on) == 0);
+}
+
+/*
+ * 300 cycles that all hold the same 10000-array structure (through their own upvalue each). One
+ * trial per upvalue would walk the structure 600 times; a full pass is one trial over the union
+ * and must visit every object once.
+ */
+static void test_a_full_pass_visits_a_shared_structure_once(void) {
+    const char *text =
+        "let big = []\nlet i = 0\nwhile i < 10000 {\n  push(big, [i, i])\n  i = i + 1\n}\n"
+        "fn make(shared) {\n  let f = nil\n  f = fn() {\n    len(shared)\n    return f\n  }\n  return f\n}\n"
+        "let keep = []\nlet k = 0\nwhile k < 300 {\n  push(keep, make(big))\n  k = k + 1\n}\n"
+        "keep = nil\nbig = nil\n"
+        "let more = []\nlet j = 0\nwhile j < 20000 {\n  push(more, [j, j, j, j])\n  j = j + 1\n}\n"
+        "println(len(more))\n";
+    heap_limit = 4000000;
+    Program off;
+    run(&off, text, false);
+    LZ_CHECK(off.run_status == LZ_ERR_HEAP_LIMIT);
+    (void)finish(&off);
+
+    Program on;
+    run(&on, text, true);
+    LZ_CHECK(on.run_status == LZ_OK);
+    LZ_CHECK(output_is(&on, "20000\n"));
+    LZ_CHECK(on.vm.skink.stats.objects > 10000);           /* the structure and the 300 cycles */
+    LZ_CHECK(on.vm.skink.stats.full_nodes > 10000);
+    LZ_CHECK(on.vm.skink.stats.full_nodes < 100000);       /* once per pass; per upvalue it would be millions */
+    LZ_CHECK(finish(&on) == 0);
+    heap_limit = 0;
+}
+
+/*
+ * A full pass that cannot get its working memory gives up and leaves everything as it was. Fail
+ * every one of its allocations in turn (the first, the second, ... the last): the program must
+ * run to the same output each time, and, because only one allocation fails, the passes after it
+ * must work, so nothing may be left alive at the end. LeakSanitizer and ASan check the rest.
+ */
+static void test_a_full_pass_that_cannot_get_memory_gives_up_cleanly(void) {
+    const char *text =
+        "fn make() {\n  let big = []\n  let i = 0\n  while i < 6000 {\n    push(big, [i, i])\n    i = i + 1\n  }\n"
+        "  let f = nil\n  f = fn() {\n    len(big)\n    return f\n  }\n  return f\n}\n"
+        "let r = 0\nlet n = 0\nwhile r < 4 {\n  let c = make()\n  c = nil\n  n = n + 1\n  r = r + 1\n}\nprintln(n)\n";
+    uint64_t gave_up_at_least_once = 0;
+    for (size_t n = 1; n <= 40; n++) {
+        Program program;
+        lz_skink_fault_countdown = n;
+        run(&program, text, true);
+        bool fired = lz_skink_fault_countdown == 0; /* the Nth allocation happened, and failed */
+        lz_skink_fault_countdown = 0;
+        LZ_CHECK(program.run_status == LZ_OK);
+        LZ_CHECK(output_is(&program, "4\n"));
+        LZ_CHECK(program.vm.skink.stats.inconsistent == 0);
+        LZ_CHECK(finish(&program) == 0);
+        gave_up_at_least_once += fired ? 1 : 0;
+    }
+    LZ_CHECK(gave_up_at_least_once >= 20); /* the loop really did hit allocations of the passes */
+    lz_skink_fault_countdown = 0;
+}
+
 static void test_memory_stays_flat_in_a_loop(void) {
     const char *text = "fn make() {\n  let f = nil\n  f = fn() { return f }\n  return 0\n}\n"
                        "let i = 0\nwhile i < 3000 {\n  make()\n  i = i + 1\n}\nprintln(\"ok\")\n";
@@ -286,7 +389,7 @@ static void test_memory_stays_flat_in_a_loop(void) {
     (void)finish(&off);
 }
 
-static void test_a_subgraph_over_the_budget_is_left_alone(void) {
+static void test_a_subgraph_over_a_ticks_budget_is_left_to_a_full_pass(void) {
     Program program;
     run(&program, "fn make() {\n  let big = range(20000)\n  let f = nil\n"
                   "  f = fn() {\n    len(big)\n    return f\n  }\n  return 0\n}\n"
@@ -294,9 +397,9 @@ static void test_a_subgraph_over_the_budget_is_left_alone(void) {
         true);
     LZ_CHECK(program.run_status == LZ_OK);
     LZ_CHECK(output_is(&program, "big\n"));
-    LZ_CHECK(program.vm.skink.stats.over_budget > 0);
+    LZ_CHECK(program.vm.skink.stats.over_budget > 0); /* no tick can afford it */
     LZ_CHECK(program.vm.skink.stats.cycles == 0);
-    (void)finish(&program);
+    LZ_CHECK(finish(&program) == 0);                   /* the final full pass has no limit */
 }
 
 static void test_closures_over_numbers_and_typed_arrays_are_never_suspects(void) {
@@ -349,7 +452,7 @@ static void test_the_heap_limit_triggers_a_collection_before_it_refuses(void) {
     heap_limit = 0;
 }
 
-static void test_the_emergency_pass_has_a_bigger_budget_than_a_tick(void) {
+static void test_a_full_pass_frees_what_no_tick_can_afford(void) {
     const char *text = "fn make() {\n  let big = range(20000)\n  let f = nil\n  f = fn() {\n    len(big)\n"
                        "    return f\n  }\n  return f\n}\n"
                        "let keep = []\npush(keep, make())\npush(keep, make())\npush(keep, make())\nkeep = nil\n"
@@ -361,7 +464,7 @@ static void test_the_emergency_pass_has_a_bigger_budget_than_a_tick(void) {
     LZ_CHECK(program.run_status == LZ_OK);
     LZ_CHECK(output_is(&program, "4000\n"));
     LZ_CHECK(program.vm.skink.stats.over_budget > 0);       /* the ordinary trials gave up on them */
-    LZ_CHECK(program.vm.skink.stats.reclaimed > 900000);    /* the emergency pass did not */
+    LZ_CHECK(program.vm.skink.stats.reclaimed > 900000);    /* a full pass has no budget */
     LZ_CHECK(finish(&program) == 0);
     heap_limit = 0;
 }
@@ -393,7 +496,7 @@ int main(void) {
     test_a_live_watched_structure_is_polled_ever_less_often();
     test_no_tick_is_ever_more_than_a_bounded_amount_of_work();
     test_memory_stays_flat_in_a_loop();
-    test_a_subgraph_over_the_budget_is_left_alone();
+    test_a_subgraph_over_a_ticks_budget_is_left_to_a_full_pass();
     test_closures_over_numbers_and_typed_arrays_are_never_suspects();
     test_an_error_leaves_no_pending_suspects();
     test_an_object_assigned_to_a_closed_upvalue_is_watched();
@@ -403,8 +506,12 @@ int main(void) {
     test_dead_cycles_are_found_by_allocation_ticks_alone();
     test_arrays_that_cannot_reach_a_closure_are_never_suspects();
     test_arrays_that_might_hold_a_closure_are_still_suspects();
+    test_dead_cycles_bigger_than_any_budget_are_freed_before_the_limit_refuses();
+    test_memory_stays_bounded_without_a_limit_however_big_the_cycles_are();
+    test_a_full_pass_visits_a_shared_structure_once();
+    test_a_full_pass_that_cannot_get_memory_gives_up_cleanly();
     test_the_heap_limit_triggers_a_collection_before_it_refuses();
-    test_the_emergency_pass_has_a_bigger_budget_than_a_tick();
+    test_a_full_pass_frees_what_no_tick_can_afford();
     test_more_suspects_than_the_pending_list_holds_are_still_watched();
     return LZ_TEST_RESULT();
 }

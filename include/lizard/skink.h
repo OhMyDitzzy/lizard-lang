@@ -36,15 +36,14 @@ struct LzVM;
  *      Engine only when it has something to close, and the ticks must not differ), and one tick examines at most LZ_SKINK_POLLS_PER_TICK
  *      watched upvalues, so the cost of a tick is bounded too. The lists hold no
  *      references: an upvalue unlinks itself when it is freed.
- *   5. lz_skink_sweep examines the whole watch list once the roots are gone, so a
- *      cycle that was only waiting for the program to end is freed too.
- *
- *   6. Before an allocation is refused because of --max-heap, the heap asks
- *      lz_skink_reclaim for room. That examines the whole watch list, with a much
- *      bigger budget (LZ_SKINK_EMERGENCY_*) than a tick may spend, because a
- *      slow collection beats a heap-limit error. Garbage that was waiting for its
- *      next poll, or was too big for a trial, is freed there and the allocation
- *      goes on.
+ *   5. A trial has a budget, so a cycle that holds a big structure is left alone by
+ *      every tick. A *full pass* frees it: one trial over everything the watch lists
+ *      lead to, with no limit on its size and each object visited once, however many
+ *      upvalues share it. It starts when the live heap has grown to
+ *      LZ_SKINK_FULL_GROWTH times what the last pass left (so garbage stays about as big
+ *      as what is live, with no setting of any kind), when an allocation would cross
+ *      --max-heap (lz_skink_reclaim), and at the end of the program (lz_skink_sweep,
+ *      when LzSkink.final_sweep is on).
  *
  *   7. An upvalue that held a number, a string or nil when its frame ended was never
  *      reported. SET_UPVALUE tells Skink when such a closed upvalue is assigned a
@@ -70,8 +69,20 @@ struct LzVM;
 #ifndef LZ_SKINK_ALLOC_PERIOD
 #define LZ_SKINK_ALLOC_PERIOD 128    /* allocations between two ticks that need no upvalue to close */
 #endif
-#define LZ_SKINK_EMERGENCY_NODES 4096     /* a power of two */
-#define LZ_SKINK_EMERGENCY_BUDGET 65536   /* scratch memory for it is malloc'd, outside the heap limit */
+#ifndef LZ_SKINK_FULL_MIN_BYTES
+#define LZ_SKINK_FULL_MIN_BYTES ((size_t)2 << 20) /* no growth pass below this much live heap */
+#endif
+/*
+ * The next growth pass is due when the heap has grown to this many times what the last one left.
+ * A pass that found garbage keeps the tight factor, so garbage never exceeds about what is live; one
+ * that found (almost) none has paid to walk live data for nothing, and the next is put further off.
+ */
+#ifndef LZ_SKINK_FULL_GROWTH
+#define LZ_SKINK_FULL_GROWTH 2
+#endif
+#ifndef LZ_SKINK_FULL_GROWTH_IDLE
+#define LZ_SKINK_FULL_GROWTH_IDLE 3
+#endif
 
 typedef struct LzSkinkStats {
     uint64_t suspects;     /* upvalues reported at a frame exit */
@@ -85,16 +96,26 @@ typedef struct LzSkinkStats {
     uint64_t inconsistent; /* trials abandoned because the counts did not add up (a bug) */
     uint64_t cycles;       /* trials that found and freed a dead cycle */
     uint64_t objects;      /* objects freed that way */
-    uint64_t reclaims;     /* emergency passes, before --max-heap refused an allocation */
-    uint64_t reclaimed;    /* heap bytes those passes freed */
+    uint64_t full_passes;  /* unbounded passes over the whole watch list while the program ran (see skink.h, 6) */
+    uint64_t full_nodes;   /* objects those passes visited: each one once per pass, however many upvalues share it */
+    uint64_t reclaims;     /* of the full passes, those that ran before --max-heap refused an allocation */
+    uint64_t reclaimed;    /* heap bytes freed by full passes while the program ran */
 } LzSkinkStats;
 
 typedef struct LzSkink {
     bool enabled;
+    /*
+     * lz_vm_release_roots ends with lz_skink_sweep. It makes what is left alive after the roots
+     * are gone mean something (a cycle that was only waiting for the program to end is not a leak),
+     * and costs a trial over everything the closures captured, which a heap that is about to be
+     * destroyed whole does not need. On by default; the CLI turns it off unless the report is wanted.
+     */
+    bool final_sweep;
     size_t pending_count;
     LzUpvalue *pending[LZ_SKINK_PENDING_MAX]; /* every entry owns one reference */
     uint64_t ticks;
     bool closed_any; /* an upvalue was closed since the last lz_skink_run */
+    size_t next_full_bytes; /* the live heap size at which the next growth pass is due */
     LzWatchLink watch[LZ_SKINK_LEVELS]; /* circular lists; the element in the array is the head */
     LzSkinkStats stats;
 } LzSkink;
@@ -112,6 +133,9 @@ void lz_skink_note_closed(struct LzVM *vm, LzUpvalue *upvalue);
  */
 void lz_skink_note_store(struct LzVM *vm, LzUpvalue *upvalue);
 
+/* Test hook, see skink.c: make the Nth allocation of a full pass's working memory fail, once. 0 = off. */
+extern size_t lz_skink_fault_countdown;
+
 /* The heap's allocation hook (context is the LzVM): one tick of the watch lists, when there is anything on them. */
 void lz_skink_alloc_tick(void *vm);
 
@@ -122,7 +146,7 @@ void lz_skink_run(struct LzVM *vm);
 void lz_skink_flush(struct LzVM *vm);
 
 /*
- * The heap's reclaim hook (context is the LzVM): an emergency pass over the watch list.
+ * The heap's reclaim hook (context is the LzVM): a full pass over the watch list.
  * Returns the heap bytes it freed.
  */
 size_t lz_skink_reclaim(void *vm, size_t needed_bytes);

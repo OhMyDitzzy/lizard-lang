@@ -109,9 +109,9 @@ int main(void) {
     check_program("block exits",
                   "let i = 0\nwhile i < 200 {\n  {\n    let f = nil\n    f = fn() { return f }\n  }\n  i = i + 1\n}\n"
                   "println(\"ok\")\n", true);
-    check_program("over the budget (left alone on purpose)",
+    check_program("over the budget of a tick (a full pass takes it)",
                   "fn make() {\n  let big = range(20000)\n  let f = nil\n  f = fn() {\n    len(big)\n    return f\n  }\n"
-                  "  return 0\n}\nlet i = 0\nwhile i < 10 {\n  make()\n  i = i + 1\n}\nprintln(\"ok\")\n", false);
+                  "  return 0\n}\nlet i = 0\nwhile i < 10 {\n  make()\n  i = i + 1\n}\nprintln(\"ok\")\n", true);
     check_program("dead cycles, then only allocations",
                   "fn make() {\n  let f = nil\n  f = fn() { return f }\n  return f\n}\n"
                   "let keep = []\nlet i = 0\nwhile i < 150 {\n  push(keep, make())\n  i = i + 1\n}\nkeep = nil\n"
@@ -132,6 +132,12 @@ int main(void) {
                   "fn make() {\n  let n = 0\n  let f = 0.5\n  let s = nil\n  return fn() {\n    n = n + 1\n"
                   "    f = f + 1.5\n    s = \"x\"\n    return n\n  }\n}\n"
                   "let c = make()\nlet i = 0\nwhile i < 3000 {\n  c()\n  i = i + 1\n}\nprintln(c())\n",
+                  true);
+    heap_limit = 3000000; /* big dead cycles under a limit: the growth and the limit passes must agree too */
+    check_program("big dead cycles under the heap limit",
+                  "fn make() {\n  let big = []\n  let i = 0\n  while i < 8000 {\n    push(big, [i, i])\n    i = i + 1\n  }\n"
+                  "  let f = nil\n  f = fn() {\n    len(big)\n    return f\n  }\n  return f\n}\n"
+                  "let r = 0\nlet n = 0\nwhile r < 6 {\n  let c = make()\n  c = nil\n  n = n + 1\n  r = r + 1\n}\nprintln(n)\n",
                   true);
     heap_limit = 700000; /* the heap limit asks for a collection: every engine must reach the same state */
     check_program("under the heap limit",
