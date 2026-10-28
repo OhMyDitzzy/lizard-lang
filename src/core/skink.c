@@ -85,36 +85,27 @@ typedef enum TrialResult {
  * not part of the graph: references to it are simply not followed.
  */
 /*
- * True when no value of the type can be, or contain, a closure. `any` (NULL) can, and so can
- * a function. An array type does when its own items can: `int[][]` is closed under that,
- * `any[][]` is not. Types are interned trees, so the depth is only a guard.
+ * An array restricted to a type that cannot hold a closure (lz_type_closure_free) never reaches
+ * one, however deep it nests, so it cannot be on a cycle (every cycle runs through a closure): it
+ * is a leaf for Skink. Registration uses only this, because the type can only narrow and so the
+ * answer never changes; see may_join_cycle.
  */
-static bool type_is_closure_free(const LzType *type, unsigned depth) {
-    if (type == NULL) {
-        return false;
-    }
-    uint16_t kinds = lz_type_possible_kinds(type);
-    if ((kinds & LZ_KIND_FUNCTION) != 0) {
-        return false;
-    }
-    if ((kinds & LZ_KIND_ARRAY) != 0) {
-        return depth > 0 && type_is_closure_free(type->element, depth - 1);
-    }
-    return true;
+static bool array_is_typed_leaf(const LzArray *array) {
+    return lz_type_closure_free(array->element);
 }
 
 /*
- * An array restricted to such a type never reaches a closure, however deep it nests, so it
- * cannot be on a cycle (every cycle runs through a closure). It is a leaf: not part of the
- * graph, and never a suspect. Getting this wrong can only make Skink miss a cycle, never free
- * a live object: a reference it does not follow counts as an outside reference.
+ * Whether an array is a node of the graph a trial walks, which is whether it has a reference a
+ * cycle could run along *now*. A typed leaf has none. Neither has an array whose
+ * may_hold_closures flag is false (a flat array of numbers and strings, annotated or not): no
+ * item is a closure or an array that could be given one. Leaving it out is exact, not a guess:
+ * a node without an outgoing edge cannot be on a cycle, and the flag turns true in the very
+ * store that gives it one, so the next trial sees the edge. Getting it wrong could only make
+ * Skink miss a cycle, never free a live object (a reference it does not follow counts as an
+ * outside reference), and lz_array_check_flags keeps the flag honest in the tests.
  */
-static bool array_is_typed_leaf(const LzArray *array) {
-    return type_is_closure_free(array->element, 16);
-}
-
 static bool array_may_hold_cycles(const LzArray *array) {
-    return array->count != 0 && !array_is_typed_leaf(array);
+    return array->count != 0 && array->may_hold_closures && !array_is_typed_leaf(array);
 }
 
 /* Objects that can take part in a cycle. Strings, natives and functions are leaves. */

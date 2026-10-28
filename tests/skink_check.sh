@@ -177,13 +177,13 @@ println(n)
 EOF
 
 # Dead cycles of any size, one after another, with no --max-heap to ask for room: each holds a
-# structure of 15000 small arrays (about 2.4 MB). The memory has to stay near one structure.
+# structure of 8000 rows (about 1.9 MB). The memory has to stay near one structure.
 cat >"$dir/big_cycles.lz" <<'EOF'
 fn make() {
   let big = []
   let i = 0
-  while i < 15000 {
-    push(big, [i, i])
+  while i < 8000 {
+    push(big, [i, []])
     i = i + 1
   }
   let f = nil

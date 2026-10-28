@@ -63,6 +63,26 @@ nothing can push a closure into a row through an alias), and a wrong answer coul
 Skink miss a cycle, never free a live object, because a reference it does not follow counts
 as an outside reference.
 
+**A run-time fact for the arrays that have no annotation.** `[1, 2, 3]` has the type `any`, so the
+type says nothing about it, but the program does: `LzArray.may_hold_closures` is false until a
+store gives the array a closure, or a row that is not closure-free by its type (a row of an
+unannotated array could be given a closure later, and nothing tells the arrays that hold it, so
+the holder has to assume the worst; a row typed `int[]` cannot, and does not count). It is
+kept in the one place every store passes (`lz_array_note_store`: `append`, `insert_at`,
+`set`, and the slice, copy and `+` that build an array from old items), it never goes back to
+false, and `lz_array_check_flags` walks the whole heap and counts the arrays whose flag is
+false although an item could reach a closure; the tests run it at the end of every program,
+and it is what shows a store that forgot (mutating `copy_range` to skip the call makes it
+fail). An array with the flag false has no reference a cycle could run along, so it is not a
+node of any trial: a flat array of numbers or strings costs a closure that captures it nothing,
+and a structure of such rows (an array of `[x, y]` pairs) is walked as one array, not as
+thousands of nodes. Leaving it out is exact, not a guess: a node with no outgoing edge cannot be
+on a cycle, and the flag turns true in the very store that gives it one, so the next trial sees
+it. The registration rule is deliberately *not* narrowed the same way: an upvalue that holds a flat
+array is still a suspect and still watched, because a closure pushed into the array after its
+frame returned is exactly how a cycle forms later, and nothing would then know which upvalues
+hold the array.
+
 A suspect that survives its trial goes on a watch list (three more levels, due
 every 4th, 16th and 64th tick, so a live structure is looked at ever more rarely).
 That finds a cycle whose last outside reference is dropped after the frame exit,
@@ -449,4 +469,4 @@ area's header, add one row to the table in `registry.c`, and add the source to
 ## Not decided yet
 
 `for` (so `range` is only useful with `while` for now), `break`/`continue`, maps and other collections, indexing and slicing strings, narrowing, the error model, and classes. Removing entries from `LzTable`.
-Skink: counts kept in the object header instead of a hash table (a full pass would cost a fraction of what it does), and a run-time "holds no closure" fact for unannotated arrays (they are `any` today, so a captured array of numbers is still a suspect).
+Skink: counts kept in the object header instead of a hash table (a full pass would cost a fraction of what it does), and a way to register a flat array's holders without a suspect per captured array (it needs the holders of an array, which only a back-pointer or a heap walk can give).

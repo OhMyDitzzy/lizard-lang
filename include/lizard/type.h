@@ -67,6 +67,13 @@ LzType lz_type_of_value(const LzValue *value);
 /* Every kind the type can hold, counting the kinds of its literals. */
 uint16_t lz_type_possible_kinds(const LzType *type);
 
+/*
+ * True when no value of the type can be, or contain, a closure, however deeply arrays nest:
+ * int, string, int?, (int | string), int[][], ... but not any (NULL), fn, or any[]. Types only
+ * narrow, so an array restricted to such an item type stays closure-free for good.
+ */
+bool lz_type_closure_free(const LzType *type);
+
 /* The same kinds with no literals: `"r" | "w"` becomes `string`. */
 LzType lz_type_widen(const LzType *type);
 

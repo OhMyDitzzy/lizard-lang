@@ -110,7 +110,7 @@ int main(void) {
                   "let i = 0\nwhile i < 200 {\n  {\n    let f = nil\n    f = fn() { return f }\n  }\n  i = i + 1\n}\n"
                   "println(\"ok\")\n", true);
     check_program("over the budget of a tick (a full pass takes it)",
-                  "fn make() {\n  let big = range(20000)\n  let f = nil\n  f = fn() {\n    len(big)\n    return f\n  }\n"
+                  "fn make() {\n  let big = []\n  let i = 0\n  while i < 3000 {\n    push(big, [i, []])\n    i = i + 1\n  }\n  let f = nil\n  f = fn() {\n    len(big)\n    return f\n  }\n"
                   "  return 0\n}\nlet i = 0\nwhile i < 10 {\n  make()\n  i = i + 1\n}\nprintln(\"ok\")\n", true);
     check_program("dead cycles, then only allocations",
                   "fn make() {\n  let f = nil\n  f = fn() { return f }\n  return f\n}\n"
@@ -135,7 +135,7 @@ int main(void) {
                   true);
     heap_limit = 3000000; /* big dead cycles under a limit: the growth and the limit passes must agree too */
     check_program("big dead cycles under the heap limit",
-                  "fn make() {\n  let big = []\n  let i = 0\n  while i < 8000 {\n    push(big, [i, i])\n    i = i + 1\n  }\n"
+                  "fn make() {\n  let big = []\n  let i = 0\n  while i < 8000 {\n    push(big, [i, []])\n    i = i + 1\n  }\n"
                   "  let f = nil\n  f = fn() {\n    len(big)\n    return f\n  }\n  return f\n}\n"
                   "let r = 0\nlet n = 0\nwhile r < 6 {\n  let c = make()\n  c = nil\n  n = n + 1\n  r = r + 1\n}\nprintln(n)\n",
                   true);

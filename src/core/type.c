@@ -152,6 +152,24 @@ uint16_t lz_type_possible_kinds(const LzType *type) {
     return kinds;
 }
 
+bool lz_type_closure_free(const LzType *type) {
+    /* `any` (NULL) can hold a closure, so can a function; an array type can when its items can. */
+    for (unsigned depth = 0; depth < 16; depth++) {
+        if (type == NULL) {
+            return false;
+        }
+        uint16_t kinds = lz_type_possible_kinds(type);
+        if ((kinds & LZ_KIND_FUNCTION) != 0) {
+            return false;
+        }
+        if ((kinds & LZ_KIND_ARRAY) == 0) {
+            return true;
+        }
+        type = type->element;
+    }
+    return false; /* nested deeper than any program writes: say nothing rather than guess */
+}
+
 LzType lz_type_widen(const LzType *type) {
     LzType widened = lz_type_of_kinds(lz_type_possible_kinds(type));
     widened.element = type->element;

@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "chunk_helpers.h"
+#include "lizard/array.h"
 #include "lizard/builtin.h"
 #include "test_util.h"
 
@@ -40,6 +41,7 @@ static void setup(LzVM *vm, LzBuffer *out, LzBuffer *err) {
 
 static void teardown(LzVM *vm, LzChunk *chunk, LzBuffer *out, LzBuffer *err) {
     lz_chunk_free(&vm->heap, chunk);
+    LZ_CHECK(lz_array_check_flags(&vm->heap) == 0); /* every store told its array about closures */
     lz_vm_release_roots(vm);
     LZ_CHECK(vm->heap.live_objects == 0);
     lz_vm_free(vm);
@@ -117,6 +119,7 @@ static void test_native_result_is_owned(void) {
     LZ_CHECK(output_is(&out, "hi\n"));
 
     lz_chunk_free(&vm.heap, &chunk);
+    LZ_CHECK(lz_array_check_flags(&vm.heap) == 0);
     lz_vm_release_roots(&vm);
     LZ_CHECK(vm.heap.live_objects == 0);
     lz_vm_free(&vm);

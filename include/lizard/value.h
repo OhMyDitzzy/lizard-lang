@@ -50,6 +50,15 @@ typedef struct LzArray {
     size_t holders;   /* how many array items currently hold this array */
     uint32_t mark;    /* graph-walk stamp, see lz_heap_next_epoch */
     bool has_arrays;  /* some item may be an array (never reset); lets walks skip flat arrays */
+    /*
+     * Some item is a closure, or an array that is not closure-free by its type (so it could
+     * be given a closure later); never reset. False means the array has no reference a cycle
+     * could run along, now or until a store into it says otherwise: a flat array of numbers and
+     * strings, or of rows typed like int[]. It is what lets the cycle collector skip such an
+     * array, whether it is annotated or not. Kept by lz_array_note_store, and checked as an
+     * invariant over the whole heap by lz_array_check_flags.
+     */
+    bool may_hold_closures;
 } LzArray;
 
 typedef enum LzOrder {
