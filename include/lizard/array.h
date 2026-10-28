@@ -79,14 +79,6 @@ static inline uint64_t lz_array_cost(size_t n) {
  * the caller appends or assigns, then calls lz_array_note_store.
  */
 LzStatus lz_array_check_store(LzVM *vm, LzArray *array, const LzValue *value);
-
-/*
- * Walks the whole heap and counts the arrays whose may_hold_closures flag is false although
- * an item is a closure or an array that could still be given one: 0 when every store went
- * through lz_array_note_store. For tests; it is a full walk.
- */
-size_t lz_array_check_flags(const LzHeap *heap);
-
 void lz_array_note_store(LzArray *array, const LzValue *value);
 
 /* Checked append: lz_array_check_store plus lz_array_append. */

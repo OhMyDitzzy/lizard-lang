@@ -5,7 +5,6 @@
 #include "lizard/builtin.h"
 #include "lizard/compiler.h"
 #include "lizard/skink.h"
-#include "lizard/array.h"
 #include "lizard/vm.h"
 #include "test_util.h"
 
@@ -47,7 +46,6 @@ static size_t finish(Program *program) {
     LZ_CHECK(program->vm.skink.pending_count == 0);
     LZ_CHECK(program->vm.skink.stats.inconsistent == 0);
     lz_chunk_free(&program->vm.heap, &program->chunk);
-    LZ_CHECK(lz_array_check_flags(&program->vm.heap) == 0);
     lz_vm_release_roots(&program->vm);
     size_t leaked = program->vm.heap.live_objects;
     lz_vm_free(&program->vm);
@@ -273,15 +271,13 @@ static void test_arrays_that_might_hold_a_closure_are_still_suspects(void) {
 }
 
 /*
- * Dead cycles of any size. Each make() builds a structure of 8000 rows (about 1.9 MB) that a
- * closure holds together with itself, and drops it. A row is [i, []], an array holding an
- * untyped array: it could be given a closure, so it is a node a trial has to visit (a flat
- * [i, i] is not: see test_flat_arrays_cost_nothing). No trial of a tick can afford that, and
+ * Dead cycles of any size. Each make() builds a structure of 15000 small arrays (about 2.4 MB)
+ * that a closure holds together with itself, and drops it. No trial of a tick can afford that, and
  * neither could an earlier pass that stopped at 4096 objects; a full pass has no limit, and the
  * heap asks for one whenever it has doubled.
  */
 #define BIG_CYCLES                                                                                  \
-    "fn make() {\n  let big = []\n  let i = 0\n  while i < 8000 {\n    push(big, [i, []])\n"       \
+    "fn make() {\n  let big = []\n  let i = 0\n  while i < 15000 {\n    push(big, [i, i])\n"       \
     "    i = i + 1\n  }\n  let f = nil\n  f = fn() {\n    len(big)\n    return f\n  }\n"            \
     "  return f\n}\nlet r = 0\nlet n = 0\nwhile r < 8 {\n  let c = make()\n  c = nil\n"               \
     "  n = n + 1\n  r = r + 1\n}\nprintln(n)\n"
@@ -290,7 +286,7 @@ static void test_dead_cycles_bigger_than_any_budget_are_freed_before_the_limit_r
     heap_limit = 5000000;
     Program off;
     run(&off, BIG_CYCLES, false);
-    LZ_CHECK(off.run_status == LZ_ERR_HEAP_LIMIT); /* 8 x 1.9 MB of garbage that is never freed */
+    LZ_CHECK(off.run_status == LZ_ERR_HEAP_LIMIT); /* 8 x 2.4 MB of garbage that is never freed */
     (void)finish(&off);
 
     Program on;
@@ -308,7 +304,7 @@ static void test_memory_stays_bounded_without_a_limit_however_big_the_cycles_are
     Program off;
     run(&off, BIG_CYCLES, false);
     LZ_CHECK(off.run_status == LZ_OK);
-    LZ_CHECK(off.vm.heap.peak_bytes > 12000000);
+    LZ_CHECK(off.vm.heap.peak_bytes > 15000000);
     LZ_CHECK(finish(&off) > 100000); /* all eight structures leaked */
 
     Program on;
@@ -320,19 +316,19 @@ static void test_memory_stays_bounded_without_a_limit_however_big_the_cycles_are
 }
 
 /*
- * 300 cycles that all hold the same 12000-row structure (through their own upvalue each). One
+ * 300 cycles that all hold the same 10000-array structure (through their own upvalue each). One
  * trial per upvalue would walk the structure 600 times; a full pass is one trial over the union
  * and must visit every object once.
  */
 static void test_a_full_pass_visits_a_shared_structure_once(void) {
     const char *text =
-        "let big = []\nlet i = 0\nwhile i < 12000 {\n  push(big, [i, []])\n  i = i + 1\n}\n"
+        "let big = []\nlet i = 0\nwhile i < 10000 {\n  push(big, [i, i])\n  i = i + 1\n}\n"
         "fn make(shared) {\n  let f = nil\n  f = fn() {\n    len(shared)\n    return f\n  }\n  return f\n}\n"
         "let keep = []\nlet k = 0\nwhile k < 300 {\n  push(keep, make(big))\n  k = k + 1\n}\n"
         "keep = nil\nbig = nil\n"
         "let more = []\nlet j = 0\nwhile j < 20000 {\n  push(more, [j, j, j, j])\n  j = j + 1\n}\n"
         "println(len(more))\n";
-    heap_limit = 4200000;
+    heap_limit = 4000000;
     Program off;
     run(&off, text, false);
     LZ_CHECK(off.run_status == LZ_ERR_HEAP_LIMIT);
@@ -357,7 +353,7 @@ static void test_a_full_pass_visits_a_shared_structure_once(void) {
  */
 static void test_a_full_pass_that_cannot_get_memory_gives_up_cleanly(void) {
     const char *text =
-        "fn make() {\n  let big = []\n  let i = 0\n  while i < 6000 {\n    push(big, [i, []])\n    i = i + 1\n  }\n"
+        "fn make() {\n  let big = []\n  let i = 0\n  while i < 6000 {\n    push(big, [i, i])\n    i = i + 1\n  }\n"
         "  let f = nil\n  f = fn() {\n    len(big)\n    return f\n  }\n  return f\n}\n"
         "let r = 0\nlet n = 0\nwhile r < 4 {\n  let c = make()\n  c = nil\n  n = n + 1\n  r = r + 1\n}\nprintln(n)\n";
     uint64_t gave_up_at_least_once = 0;
@@ -375,113 +371,6 @@ static void test_a_full_pass_that_cannot_get_memory_gives_up_cleanly(void) {
     }
     LZ_CHECK(gave_up_at_least_once >= 20); /* the loop really did hit allocations of the passes */
     lz_skink_fault_countdown = 0;
-}
-
-/* ---- the may_hold_closures flag: what a run-time fact about an unannotated array buys ---- */
-
-static size_t count_flagged_arrays(const LzHeap *heap) {
-    size_t flagged = 0;
-    for (const LzObject *object = heap->head; object != NULL; object = object->next) {
-        if (object->type == LZ_OBJ_ARRAY && ((const LzArray *)object)->may_hold_closures) {
-            flagged++;
-        }
-    }
-    return flagged;
-}
-
-/*
- * A flat array of numbers or strings has no reference a cycle could run along, annotated or not.
- * It is not a node of any trial, so a closure that captures a 20000-item one costs nothing: the
- * frame exit finds the cycle at once (it used to be over a tick's budget and wait for a full pass).
- */
-static void test_flat_arrays_cost_nothing(void) {
-    Program program;
-    run(&program, "fn make() {\n  let data = range(20000)\n  let names = [\"a\", \"b\"]\n  let f = nil\n"
-                  "  f = fn() {\n    len(data)\n    len(names)\n    return f\n  }\n  return 0\n}\n"
-                  "make()\nprintln(\"flat\")\n",
-        true);
-    LZ_CHECK(program.run_status == LZ_OK);
-    LZ_CHECK(output_is(&program, "flat\n"));
-    LZ_CHECK(program.vm.skink.stats.over_budget == 0);
-    LZ_CHECK(program.vm.skink.stats.cycles == 1); /* freed at the frame exit, not by a later pass */
-    LZ_CHECK(count_flagged_arrays(&program.vm.heap) == 0);
-    LZ_CHECK(finish(&program) == 0);
-}
-
-/* The flag is exactly "some item is a closure, or a row that could be given one". */
-static void test_the_flag_says_which_arrays_could_reach_a_closure(void) {
-    Program program;
-    run(&program, "let flat = [1, 2, 3]\nlet words = [\"a\", \"b\"]\nlet typed: int[][] = [[1], [2]]\n"
-                  "let rows = [[1, 2], [3, 4]]\nlet with_closure = []\npush(with_closure, fn() { return 1 })\n"
-                  "let nested = [[]]\nprintln(len(flat) + len(words) + len(typed) + len(rows))\n",
-        true);
-    LZ_CHECK(program.run_status == LZ_OK);
-    LZ_CHECK(output_is(&program, "9\n"));
-    /* rows (it holds untyped rows), with_closure (a closure), nested (an untyped row), and typed,
-     * which was flagged while it was built from untyped rows and stays so (it is a leaf by its type) */
-    LZ_CHECK(count_flagged_arrays(&program.vm.heap) == 4);
-    LZ_CHECK(finish(&program) == 0);
-}
-
-/*
- * Every way a closure can get into an array says so: push, insert, a[i] = v, a literal, and the three
- * that build a new array from old items without going through append (a slice, a copy, a + b).
- * lz_array_check_flags walks the whole heap and fails if any array holding a closure, or a row that
- * could be given one, is not flagged (finish() runs it too).
- */
-static void test_every_way_to_store_a_closure_into_an_array_sets_the_flag(void) {
-    Program program;
-    run(&program, "let pushed = []\npush(pushed, fn() { return 1 })\n"
-                  "let inserted = [1]\ninsert(inserted, 0, fn() { return 2 })\n"
-                  "let assigned = [1, 2]\nassigned[1] = fn() { return 3 }\n"
-                  "let literal = [fn() { return 4 }]\n"
-                  "let sliced = pushed[0:1]\nlet copied = copy(inserted)\nlet joined = literal + [5]\n"
-                  "let rows = []\npush(rows, [])\n"
-                  "println(len(pushed) + len(inserted) + len(assigned) + len(literal) + len(sliced) + len(copied) + len(joined))\n",
-        true);
-    LZ_CHECK(program.run_status == LZ_OK);
-    LZ_CHECK(output_is(&program, "11\n")); /* 1 + 2 + 2 + 1 + 1 + 2 + 2 */
-    LZ_CHECK(lz_array_check_flags(&program.vm.heap) == 0);
-    /* the seven arrays that hold a closure, and rows, which holds an untyped row */
-    LZ_CHECK(count_flagged_arrays(&program.vm.heap) == 8);
-    LZ_CHECK(finish(&program) == 0);
-}
-
-/*
- * The flag turns true in the store that gives an array a closure, so the next trial sees the edge
- * even when the store comes long after the array was first looked at. Here the closure is pushed into
- * a row of an array that an upvalue closed over while it held nothing: the cycle outer -> inner -> f ->
- * upvalue -> outer exists only after make() has returned.
- */
-static void test_a_closure_pushed_into_a_row_after_the_frame_exit_still_closes_the_cycle(void) {
-    Program program;
-    run(&program, TICK_FN "fn make() {\n  let outer = []\n  let inner = []\n  push(outer, inner)\n"
-                          "  let f = fn() { return outer }\n  return [f, inner]\n}\n"
-                          "let r = make()\npush(r[1], r[0])\nr = nil\ntick()\nprintln(\"ok\")\n",
-        true);
-    LZ_CHECK(program.run_status == LZ_OK);
-    LZ_CHECK(output_is(&program, "ok\n"));
-    LZ_CHECK(program.vm.skink.stats.cycles == 1); /* found by the tick, not by the final sweep */
-    LZ_CHECK(finish(&program) == 0);
-}
-
-/* The invariant checker has to be able to fail, or every run that passes it proves nothing. */
-static void test_the_flag_checker_catches_a_wrong_flag(void) {
-    Program program;
-    run(&program, "let handlers = []\npush(handlers, fn() { return 1 })\nprintln(\"ok\")\n", true);
-    LZ_CHECK(program.run_status == LZ_OK);
-    LzArray *holder = NULL;
-    for (LzObject *object = program.vm.heap.head; object != NULL; object = object->next) {
-        if (object->type == LZ_OBJ_ARRAY && ((LzArray *)object)->count > 0) {
-            holder = (LzArray *)object;
-        }
-    }
-    LZ_CHECK(holder != NULL && holder->may_hold_closures);
-    LZ_CHECK(lz_array_check_flags(&program.vm.heap) == 0);
-    holder->may_hold_closures = false; /* as if a store had forgotten to say so */
-    LZ_CHECK(lz_array_check_flags(&program.vm.heap) == 1);
-    holder->may_hold_closures = true;
-    LZ_CHECK(finish(&program) == 0);
 }
 
 static void test_memory_stays_flat_in_a_loop(void) {
@@ -502,13 +391,13 @@ static void test_memory_stays_flat_in_a_loop(void) {
 
 static void test_a_subgraph_over_a_ticks_budget_is_left_to_a_full_pass(void) {
     Program program;
-    run(&program, "fn make() {\n  let big = []\n  let i = 0\n  while i < 3000 {\n    push(big, [i, []])\n"
-                  "    i = i + 1\n  }\n  let f = nil\n  f = fn() {\n    len(big)\n    return f\n  }\n  return 0\n}\n"
+    run(&program, "fn make() {\n  let big = range(20000)\n  let f = nil\n"
+                  "  f = fn() {\n    len(big)\n    return f\n  }\n  return 0\n}\n"
                   "make()\nprintln(\"big\")\n",
         true);
     LZ_CHECK(program.run_status == LZ_OK);
     LZ_CHECK(output_is(&program, "big\n"));
-    LZ_CHECK(program.vm.skink.stats.over_budget > 0); /* 3000 nodes: no tick can afford that */
+    LZ_CHECK(program.vm.skink.stats.over_budget > 0); /* no tick can afford it */
     LZ_CHECK(program.vm.skink.stats.cycles == 0);
     LZ_CHECK(finish(&program) == 0);                   /* the final full pass has no limit */
 }
@@ -564,23 +453,18 @@ static void test_the_heap_limit_triggers_a_collection_before_it_refuses(void) {
 }
 
 static void test_a_full_pass_frees_what_no_tick_can_afford(void) {
-    const char *text = "fn make() {\n  let big = []\n  let i = 0\n  while i < 3000 {\n    push(big, [i, []])\n"
-                       "    i = i + 1\n  }\n  let f = nil\n  f = fn() {\n    len(big)\n    return f\n  }\n  return f\n}\n"
+    const char *text = "fn make() {\n  let big = range(20000)\n  let f = nil\n  f = fn() {\n    len(big)\n"
+                       "    return f\n  }\n  return f\n}\n"
                        "let keep = []\npush(keep, make())\npush(keep, make())\npush(keep, make())\nkeep = nil\n"
                        "let more = []\nlet j = 0\nwhile j < 4000 {\n  push(more, [j, j, j, j])\n  j = j + 1\n}\n"
                        "println(len(more))\n";
-    heap_limit = 2500000;
-    Program off;
-    run(&off, text, false);
-    LZ_CHECK(off.run_status == LZ_ERR_HEAP_LIMIT);
-    (void)finish(&off);
-
+    heap_limit = 1400000;
     Program program;
     run(&program, text, true);
     LZ_CHECK(program.run_status == LZ_OK);
     LZ_CHECK(output_is(&program, "4000\n"));
     LZ_CHECK(program.vm.skink.stats.over_budget > 0);       /* the ordinary trials gave up on them */
-    LZ_CHECK(program.vm.skink.stats.reclaimed > 1500000);   /* a full pass has no budget */
+    LZ_CHECK(program.vm.skink.stats.reclaimed > 900000);    /* a full pass has no budget */
     LZ_CHECK(finish(&program) == 0);
     heap_limit = 0;
 }
@@ -620,11 +504,6 @@ int main(void) {
     test_numbers_and_strings_assigned_to_a_closed_upvalue_cost_nothing();
     test_an_assignment_to_an_open_upvalue_is_the_close_s_business();
     test_dead_cycles_are_found_by_allocation_ticks_alone();
-    test_flat_arrays_cost_nothing();
-    test_the_flag_says_which_arrays_could_reach_a_closure();
-    test_a_closure_pushed_into_a_row_after_the_frame_exit_still_closes_the_cycle();
-    test_every_way_to_store_a_closure_into_an_array_sets_the_flag();
-    test_the_flag_checker_catches_a_wrong_flag();
     test_arrays_that_cannot_reach_a_closure_are_never_suspects();
     test_arrays_that_might_hold_a_closure_are_still_suspects();
     test_dead_cycles_bigger_than_any_budget_are_freed_before_the_limit_refuses();

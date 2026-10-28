@@ -45,7 +45,6 @@ LzArray *lz_array_new(LzHeap *heap, size_t capacity) {
     array->mark = 0;
     array->holders = 0;
     array->has_arrays = false;
-    array->may_hold_closures = false;
     if (!lz_array_reserve(heap, array, capacity)) {
         lz_object_release(heap, &array->base);
         return NULL;
@@ -55,42 +54,9 @@ LzArray *lz_array_new(LzHeap *heap, size_t capacity) {
 
 void lz_array_note_store(LzArray *array, const LzValue *value) {
     if (lz_value_is_array(value)) {
-        LzArray *inner = lz_value_as_array(value);
         array->has_arrays = true;
-        inner->holders++;
-        /* The row may be given a closure later, and nothing tells the arrays that hold it:
-         * only a row that cannot ever hold one (by its type) is safe to leave unflagged. */
-        if (!lz_type_closure_free(inner->element)) {
-            array->may_hold_closures = true;
-        }
-    } else if (value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_CLOSURE) {
-        array->may_hold_closures = true;
+        lz_value_as_array(value)->holders++;
     }
-}
-
-size_t lz_array_check_flags(const LzHeap *heap) {
-    size_t violations = 0;
-    for (const LzObject *object = heap->head; object != NULL; object = object->next) {
-        if (object->type != LZ_OBJ_ARRAY) {
-            continue;
-        }
-        const LzArray *array = (const LzArray *)object;
-        if (array->may_hold_closures) {
-            continue;
-        }
-        for (size_t i = 0; i < array->count; i++) {
-            const LzValue *item = &array->items[i];
-            if (item->type != LZ_VAL_OBJECT) {
-                continue;
-            }
-            if (item->as.object->type == LZ_OBJ_CLOSURE ||
-                (item->as.object->type == LZ_OBJ_ARRAY &&
-                 !lz_type_closure_free(((const LzArray *)item->as.object)->element))) {
-                violations++;
-            }
-        }
-    }
-    return violations;
 }
 
 static bool grow_for_one_more(LzHeap *heap, LzArray *array) {

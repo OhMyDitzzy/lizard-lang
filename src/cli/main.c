@@ -9,7 +9,7 @@
 #include "lizard/lexer.h"
 #include "lizard/vm.h"
 #include "lizard/version.h"
-#include "options.h"
+#include "lizard/utils/argparse.h"
 
 enum {
     EXIT_USAGE = 64,
@@ -17,25 +17,6 @@ enum {
     EXIT_NO_INPUT = 66,
     EXIT_RUNTIME_ERROR = 70
 };
-
-static void print_usage(FILE *stream) {
-    fputs("Usage: lizard [options] <script.lz> [script arguments]\n"
-          "\n"
-          "Options:\n"
-          "  -h, --help       Show this help and exit\n"
-          "  -V, --version    Show the version and exit\n"
-          "      --heap-stats Print heap statistics when the program ends\n"
-          "      --trace-memory  Log every heap allocation and release to stderr\n"
-          "      --dump-tokens Print the tokens of the script and exit\n"
-          "      --max-heap=N Limit live heap bytes (suffix K, M or G allowed)\n"
-          "      --fuel=N     Limit the number of executed instructions\n"
-          "      --engine=E   Execution engine: ge (default, the fast one) or ref\n"
-          "      --engine-stats  Print what the engine did when the program ends\n"
-          "      --jit=M      Machine code for hot code: on (default), off or eager\n"
-          "      --skink=M    Cycle collector for closures: on (default) or off\n"
-          "      --           Stop option parsing\n",
-          stream);
-}
 
 static bool has_lz_extension(const char *path) {
     const char *dot = strrchr(path, '.');
@@ -169,22 +150,26 @@ static void report_runtime_error(const LzVM *vm, const LzSource *source) {
     }
 }
 
-static int run_script(const LzOptions *options) {
+static int run_script(const char *script_path, bool heap_stats, bool trace_memory,
+                      bool dump_tokens_flag, bool has_max_heap, uint64_t max_heap_bytes,
+                      bool has_fuel, uint64_t fuel, bool has_engine, const char *engine,
+                      bool engine_stats, bool has_jit, const char *jit,
+                      bool has_skink, bool skink) {
     LzSource source;
     char error[200];
-    if (!lz_source_read_file(&source, options->script_path, error, sizeof error)) {
+    if (!lz_source_read_file(&source, script_path, error, sizeof error)) {
         fprintf(stderr, "lizard: %s\n", error);
         return EXIT_NO_INPUT;
     }
 
     LzVM vm;
     lz_vm_init(&vm, lz_writer_from_file(stdout), lz_writer_from_file(stderr));
-    vm.heap.trace = options->trace_memory;
-    if (options->has_skink) {
-        vm.skink.enabled = options->skink;
+    vm.heap.trace = trace_memory;
+    if (has_skink) {
+        vm.skink.enabled = skink;
     }
     /* The final sweep only makes the report of what is left alive exact: skip it when nobody asked. */
-    vm.skink.final_sweep = options->heap_stats || options->trace_memory;
+    vm.skink.final_sweep = heap_stats || trace_memory;
 
     LzChunk chunk;
     lz_chunk_init(&chunk);
@@ -194,20 +179,20 @@ static int run_script(const LzOptions *options) {
         fprintf(stderr, "lizard: %s\n", vm.error);
         exit_code = EXIT_RUNTIME_ERROR;
     } else {
-        if (options->has_max_heap) {
-            lz_vm_set_heap_limit(&vm, (size_t)options->max_heap_bytes);
+        if (has_max_heap) {
+            lz_vm_set_heap_limit(&vm, (size_t)max_heap_bytes);
         }
-        if (options->has_fuel) {
-            lz_vm_set_fuel(&vm, options->fuel);
+        if (has_fuel) {
+            lz_vm_set_fuel(&vm, fuel);
         }
 
-        LzEngine engine = LZ_ENGINE_GE;
-        if (options->has_engine) {
-            (void)lz_engine_from_name(options->engine, &engine); /* validated while parsing */
+        LzEngine eng = LZ_ENGINE_GE;
+        if (has_engine) {
+            (void)lz_engine_from_name(engine, &eng); /* validated while parsing */
         }
-        if (options->has_jit) {
+        if (has_jit) {
             LzJitMode mode = LZ_JIT_ON;
-            (void)lz_jit_mode_from_name(options->jit, &mode); /* validated while parsing */
+            (void)lz_jit_mode_from_name(jit, &mode); /* validated while parsing */
             lz_engine_set_jit(mode);
         }
         LzEngineStats stats = {0};
@@ -221,21 +206,21 @@ static int run_script(const LzOptions *options) {
             fprintf(stderr, "lizard: error: %s\n", vm.error);
             exit_code = EXIT_RUNTIME_ERROR;
         } else {
-            status = lz_engine_run(engine, &vm, &chunk, options->engine_stats ? &stats : NULL);
+            status = lz_engine_run(eng, &vm, &chunk, engine_stats ? &stats : NULL);
             if (status != LZ_OK) {
                 lz_writer_flush(&vm.out);
                 report_runtime_error(&vm, &source);
                 exit_code = EXIT_RUNTIME_ERROR;
             }
-            if (options->engine_stats) {
-                print_engine_stats(engine, &stats);
+            if (engine_stats) {
+                print_engine_stats(eng, &stats);
             }
         }
     }
 
     lz_chunk_free(&vm.heap, &chunk);
     lz_vm_release_roots(&vm);
-    if (options->heap_stats) {
+    if (heap_stats) {
         print_heap_stats(&vm.heap);
         print_skink_stats(&vm.skink.stats);
     }
@@ -245,31 +230,130 @@ static int run_script(const LzOptions *options) {
 }
 
 int main(int argc, char **argv) {
-    LzOptions options;
-    if (!lz_options_parse(&options, argc, argv)) {
-        fprintf(stderr, "lizard: %s\nTry 'lizard --help'.\n", options.error);
+    bool show_help = false;
+    bool show_version = false;
+    bool heap_stats = false;
+    bool trace_memory = false;
+    bool dump_tokens_flag = false;
+    bool engine_stats = false;
+    bool has_max_heap = false;
+    uint64_t max_heap_bytes = 0;
+    const char *max_heap_str = NULL;
+    bool has_fuel = false;
+    uint64_t fuel = 0;
+    const char *fuel_str = NULL;
+    bool has_engine = false;
+    const char *engine = NULL;
+    bool has_jit = false;
+    const char *jit = NULL;
+    bool has_skink = false;
+    bool skink = false;
+    const char *skink_str = NULL;
+    const char *script_path = NULL;
+
+    const char *engine_choices[] = {"ge", "gecko", "ref", "reference", NULL};
+    const char *jit_choices[] = {"on", "off", "eager", NULL};
+    const char *skink_choices[] = {"on", "off", NULL};
+
+    LzArg args[] = {
+        LZ_ARG_HELP("h", "help", &show_help),
+        LZ_ARG_VERSION("V", "version", &show_version),
+        LZ_ARG_FLAG(NULL, "heap-stats", "Print heap statistics when the program ends", &heap_stats),
+        LZ_ARG_FLAG(NULL, "trace-memory", "Log every heap allocation and release to stderr", &trace_memory),
+        LZ_ARG_FLAG(NULL, "dump-tokens", "Print the tokens of the script and exit", &dump_tokens_flag),
+        LZ_ARG_FLAG(NULL, "engine-stats", "Print what the engine did when the program ends", &engine_stats),
+        LZ_ARG_OPTION(NULL, "max-heap", "Limit live heap bytes (suffix K, M or G allowed)", "N", &max_heap_str, NULL),
+        LZ_ARG_OPTION(NULL, "fuel", "Limit the number of executed instructions", "N", &fuel_str, NULL),
+        LZ_ARG_OPTION(NULL, "engine", "Execution engine: ge (default, the fast one) or ref", "E", &engine, NULL),
+        LZ_ARG_OPTION(NULL, "jit", "Machine code for hot code: on (default), off or eager", "M", &jit, NULL),
+        LZ_ARG_OPTION(NULL, "skink", "Cycle collector for closures: on (default) or off", "M", &skink_str, NULL),
+        LZ_ARG_POSITIONAL("script", "Lizard script file to execute", "FILE", &script_path, true),
+        LZ_ARG_END
+    };
+
+    /* Set choices for validation */
+    args[8].choices = engine_choices;
+    args[8].num_choices = 4;
+    args[9].choices = jit_choices;
+    args[9].num_choices = 3;
+    args[10].choices = skink_choices;
+    args[10].num_choices = 2;
+
+    LzArgParser parser;
+    lz_argparse_init(&parser, "lizard");
+    // TODO: Just put the website domain, we can built the web later
+    lz_argparse_set_description(&parser, "Lizard is a General Purpose programming language which is multi-functional and designed to be easy to understand. See more information at: lizardlang.org");
+    lz_argparse_set_version(&parser, LZ_VERSION_STRING);
+    lz_argparse_set_args(&parser, args, sizeof(args) / sizeof(args[0]) - 1);
+    lz_argparse_enable_color(&parser, true);
+
+    LzArgParseResult result = lz_argparse_parse(&parser, argc, argv);
+
+    if (show_help) {
+        return EXIT_SUCCESS;
+    }
+    if (show_version) {
+        /* Version is already printed by the parser */
+        return EXIT_SUCCESS;
+    }
+
+    if (!result.success) {
+        fprintf(stderr, "lizard: %s\nTry 'lizard --help'.\n", result.error_message);
+        lz_argparse_free_result(&result);
         return EXIT_USAGE;
     }
 
-    if (options.show_help) {
-        print_usage(stdout);
-        return EXIT_SUCCESS;
+    /* Check for --max-heap value */
+    if (max_heap_str) {
+        if (!lz_parse_count(max_heap_str, true, &max_heap_bytes) || max_heap_bytes > SIZE_MAX) {
+            fprintf(stderr, "lizard: invalid value for --max-heap: '%s'\n", max_heap_str);
+            lz_argparse_free_result(&result);
+            return EXIT_USAGE;
+        }
+        has_max_heap = true;
     }
-    if (options.show_version) {
-        printf("lizard %s\n", LZ_VERSION_STRING);
-        return EXIT_SUCCESS;
+
+    /* Check for --fuel value */
+    if (fuel_str) {
+        if (!lz_parse_count(fuel_str, false, &fuel)) {
+            fprintf(stderr, "lizard: invalid value for --fuel: '%s'\n", fuel_str);
+            lz_argparse_free_result(&result);
+            return EXIT_USAGE;
+        }
+        has_fuel = true;
     }
-    if (options.script_path == NULL) {
-        print_usage(stderr);
-        return EXIT_USAGE;
+
+    /* Check if --engine was explicitly provided */
+    has_engine = (engine != NULL);
+    if (has_engine && strcmp(engine, "ge") == 0) {
+        /* If user explicitly passed --engine=ge, we still respect it */
     }
-    if (options.dump_tokens) {
-        return dump_tokens(options.script_path);
+
+    /* Check if --jit was explicitly provided */
+    has_jit = (jit != NULL);
+    if (has_jit && strcmp(jit, "on") == 0) {
+        /* If user explicitly passed --jit=on, we still respect it */
     }
-    if (!has_lz_extension(options.script_path)) {
+
+    /* Check if --skink was explicitly provided */
+    has_skink = (skink_str != NULL);
+    if (has_skink) {
+        skink = (strcmp(skink_str, "on") == 0);
+    }
+
+    if (dump_tokens_flag) {
+        lz_argparse_free_result(&result);
+        return dump_tokens(script_path);
+    }
+
+    if (!has_lz_extension(script_path)) {
         fprintf(stderr, "lizard: warning: '%s' does not have the .lz extension\n",
-                options.script_path);
+                script_path);
     }
 
-    return run_script(&options);
+    lz_argparse_free_result(&result);
+    return run_script(script_path, heap_stats, trace_memory, dump_tokens_flag,
+                      has_max_heap, max_heap_bytes, has_fuel, fuel,
+                      has_engine, engine, engine_stats, has_jit, jit,
+                      has_skink, skink);
 }

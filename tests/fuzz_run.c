@@ -4,7 +4,6 @@
 #include <string.h>
 #include <stdlib.h>
 
-#include "lizard/array.h"
 #include "lizard/builtin.h"
 #include "test_util.h"
 
@@ -124,7 +123,6 @@ static void run_one(void) {
     LZ_CHECK(vm.stack_count == 0);
 
     lz_chunk_free(&vm.heap, &chunk);
-    LZ_CHECK(lz_array_check_flags(&vm.heap) == 0); /* whatever the random program did */
     lz_vm_release_roots(&vm);
     LZ_CHECK(vm.heap.live_objects == 0);
     LZ_CHECK(vm.heap.live_bytes == 0);
