@@ -28,7 +28,7 @@ function(lz_setup_buildinfo)
     # The JIT exists for x86-64 and AArch64 on Linux and macOS only (src/engine/ge_jit.h).
     set(jit OFF)
     if(LZ_ENABLE_JIT AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|aarch64|arm64|ARM64)$"
-       AND CMAKE_SYSTEM_NAME MATCHES "^(Linux|Darwin)$")
+       AND CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android|Darwin)$")
         set(jit ON)
     endif()
 

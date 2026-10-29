@@ -1035,7 +1035,12 @@ static Expr variable(Parser *parser) {
 
     const LzValue *defined = lz_vm_lookup(parser->vm, name);
     if (defined == NULL) {
-        error_with_name(parser, &token, "undefined variable '", "'");
+        /*
+         * Sequential execution: a name that is not defined yet is not a compile error. The
+         * program runs statement by statement and fails, with the source position, at the
+         * statement that really uses a name that does not exist when it runs.
+         */
+        emit_named(parser, LZ_OP_GET_GLOBAL, name, token.offset);
         return any_expr();
     }
 
@@ -1837,7 +1842,8 @@ static void assignment_statement(Parser *parser) {
         if (lz_vm_lookup(parser->vm, name) != NULL) {
             error_with_name(parser, &name_token, "cannot assign to builtin '", "'");
         } else {
-            error_with_name(parser, &name_token, "undefined variable '", "'");
+            /* Sequential execution: checked when the assignment runs (SET_GLOBAL). */
+            emit_named(parser, LZ_OP_SET_GLOBAL, name, name_token.offset);
         }
     } else if (symbol->is_const || symbol->kind == SYMBOL_CONSTANT) {
         error_with_name(parser, &name_token, "cannot assign to constant '", "'");

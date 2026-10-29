@@ -104,6 +104,17 @@ static void check_output(const char *text, const char *expected) {
     finish(&program);
 }
 
+/* The program compiles, prints `expected` and then fails at run time with `message`. */
+static void check_runtime_error(const char *text, const char *expected, const char *message) {
+    Program program;
+    run(&program, text, 0, 0);
+    LZ_CHECK(program.compile_status == LZ_OK);
+    LZ_CHECK(program.run_status == LZ_ERR_RUNTIME);
+    LZ_CHECK(strstr(program.vm.error, message) != NULL);
+    LZ_CHECK(strcmp(program.out.data != NULL ? program.out.data : "", expected) == 0);
+    finish(&program);
+}
+
 static void check_compile_error(const char *text, const char *message) {
     Program program;
     run(&program, text, 0, 0);
@@ -240,14 +251,12 @@ static void test_syntax_forms(void) {
 }
 
 static void test_compile_errors(void) {
-    check_compile_error("println(y)\n", "undefined variable 'y'");
     check_compile_error("let x = 1\nlet x = 2\n", "already declared");
     check_compile_error("{ let a = 1\n let a = 2 }\n", "already declared");
     check_compile_error("const X = 1\nX = 2\n", "cannot assign to constant 'X'");
     check_compile_error("const X = five()\nX = 2\n", "cannot assign to constant 'X'");
     check_compile_error("{ const X = 1\n X = 2 }\n", "cannot assign to constant 'X'");
     check_compile_error("println = 1\n", "cannot assign to builtin 'println'");
-    check_compile_error("y = 1\n", "undefined variable 'y'");
     check_compile_error("1 = 2\n", "invalid assignment target");
     check_compile_error("let x = \n", "expected expression");
     check_compile_error("let = 1\n", "expected variable name");
@@ -267,18 +276,29 @@ static void test_compile_errors(void) {
     check_compile_error("const Z = 1 / 0\n", "division by zero");
     check_compile_error("const Z = 9223372036854775807 + 1\n", "integer overflow");
     check_compile_error("const Z = \"a\" + 1\n", "operator '+' cannot be applied to \"a\" and 1");
-    check_compile_error("{ let a = a }\n", "undefined variable 'a'");
+}
+
+/* Sequential execution: an undefined name fails when its statement runs, not before. */
+static void test_sequential_execution(void) {
+    check_runtime_error("println(\"Hello, World!\")\nprintj(\"Hello\")\n", "Hello, World!\n",
+                        "undefined variable 'printj'");
+    check_runtime_error("println(1)\nprintln(y)\nprintln(2)\n", "1\n", "undefined variable 'y'");
+    check_runtime_error("println(1)\ny = 1\nprintln(2)\n", "1\n", "undefined variable 'y'");
+    check_runtime_error("println(1)\n{ let a = a }\n", "1\n", "undefined variable 'a'");
+    /* Never reached: no error. */
+    check_output("if false { println(nope) }\nprintln(1)\n", "1\n");
+    /* Defined later, used inside a function that only runs afterwards. */
+    check_output("fn f() { g() }\nfn g() { println(7) }\nf()\n", "7\n");
 }
 
 static void test_recovery_reports_several_errors(void) {
     Program program;
-    run(&program, "let x = 1\nlet x = 2\nprintln(y)\nconst Z = 1 / 0\nx = = 3\nprintln(x)\n", 0, 0);
+    run(&program, "let x = 1\nlet x = 2\nconst Z = 1 / 0\nx = = 3\nprintln(x)\n", 0, 0);
     LZ_CHECK(program.compile_status == LZ_ERR_COMPILE);
-    LZ_CHECK(program.diagnostics.count == 4);
+    LZ_CHECK(program.diagnostics.count == 3);
     LZ_CHECK(strstr(program.diagnostics.items[0].message, "already declared") != NULL);
-    LZ_CHECK(strstr(program.diagnostics.items[1].message, "undefined variable 'y'") != NULL);
-    LZ_CHECK(strstr(program.diagnostics.items[2].message, "division by zero") != NULL);
-    LZ_CHECK(strstr(program.diagnostics.items[3].message, "expected expression") != NULL);
+    LZ_CHECK(strstr(program.diagnostics.items[1].message, "division by zero") != NULL);
+    LZ_CHECK(strstr(program.diagnostics.items[2].message, "expected expression") != NULL);
 
     LzBuffer text = {0};
     LzWriter writer = lz_writer_from_buffer(&text);
@@ -906,6 +926,7 @@ int main(void) {
     test_constants();
     test_syntax_forms();
     test_compile_errors();
+    test_sequential_execution();
     test_recovery_reports_several_errors();
     test_many_errors_are_capped();
     test_limits_in_the_compiler();
