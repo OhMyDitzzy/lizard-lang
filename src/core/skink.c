@@ -4,6 +4,7 @@
 #include "lizard/type.h"
 #include "lizard/vm.h"
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,10 +31,6 @@ static void *work_malloc(size_t bytes) {
     return fault() ? NULL : malloc(bytes);
 }
 
-static void *work_calloc(size_t count, size_t size) {
-    return fault() ? NULL : calloc(count, size);
-}
-
 static void *work_realloc(void *old, size_t bytes) {
     return fault() ? NULL : realloc(old, bytes);
 }
@@ -48,26 +45,24 @@ typedef struct TrialBuffers {
     int64_t rc[LZ_SKINK_MAX_NODES];
     bool live[LZ_SKINK_MAX_NODES];
     uint32_t work[LZ_SKINK_MAX_NODES];
-    uint32_t table[LZ_SKINK_MAX_NODES * 2];
 } TrialBuffers;
 
-/* Table slots are indexed by uint32_t (index + 1), so a trial can hold this many nodes at most. */
+/* A node's slot in LzObject.trial is a uint32_t (index + 1), so a trial can hold this many nodes at most. */
 #define FULL_MAX_NODES ((size_t)1 << 30)
 
 typedef struct Trial {
     const LzSkink *skink;
     size_t capacity; /* nodes the arrays have room for: a power of two */
-    size_t table_mask;
     size_t budget;
     size_t count;
     size_t units;
     size_t work_top;
     bool growable; /* malloc'd arrays that double when the set fills up: a full pass has no size limit */
+    bool tagged;   /* some node has its LzObject.trial set: trial_untag must run before they can be freed */
     LzObject **node;
     int64_t *rc; /* refcount minus the references that come from inside the set */
     bool *live;
     uint32_t *work;
-    uint32_t *table; /* node index + 1; 0 is an empty slot */
 } Trial;
 
 typedef bool (*EdgeFn)(Trial *trial, LzObject *target);
@@ -223,6 +218,9 @@ static bool each_edge(Trial *trial, LzObject *node, EdgeFn visit) {
 /* The references the pending list itself holds: they come from Skink, not from the program. */
 static int64_t pending_holds(const LzSkink *skink, const LzObject *object) {
     int64_t holds = 0;
+    if (object->type != LZ_OBJ_UPVALUE) {
+        return 0; /* only upvalues are ever pending */
+    }
     for (size_t i = 0; i < skink->pending_count; i++) {
         if (&skink->pending[i]->base == object) {
             holds++;
@@ -231,28 +229,30 @@ static int64_t pending_holds(const LzSkink *skink, const LzObject *object) {
     return holds;
 }
 
-static size_t hash_bits(const LzObject *object) {
-    uint64_t bits = (uint64_t)((uintptr_t)object >> 4);
-    return (size_t)((bits * UINT64_C(0x9E3779B97F4A7C15)) >> 32);
-}
-
-static size_t hash_slot(const Trial *trial, const LzObject *object) {
-    return hash_bits(object) & trial->table_mask;
-}
-
+/*
+ * The node set is indexed through the objects themselves: LzObject.trial holds a node's index + 1
+ * for as long as the trial runs (0 = not in the set), so every lookup is one load. The slots are
+ * cleared by trial_untag, which has to run before the trial ends and before anything is freed.
+ */
 static bool find_node(const Trial *trial, const LzObject *object, size_t *index) {
-    size_t slot = hash_slot(trial, object);
-    for (;;) {
-        uint32_t entry = trial->table[slot];
-        if (entry == 0) {
-            return false;
-        }
-        if (trial->node[entry - 1] == object) {
-            *index = (size_t)entry - 1;
-            return true;
-        }
-        slot = (slot + 1) & trial->table_mask;
+    if (object->trial == 0) {
+        return false;
     }
+    *index = (size_t)object->trial - 1;
+    assert(*index < trial->count && trial->node[*index] == object);
+    (void)trial; /* only the assert looks at it */
+    return true;
+}
+
+/* Clears every slot the trial set. Idempotent: collect frees nodes, so nothing may touch them afterwards. */
+static void trial_untag(Trial *trial) {
+    if (!trial->tagged) {
+        return;
+    }
+    for (size_t i = 0; i < trial->count; i++) {
+        trial->node[i]->trial = 0;
+    }
+    trial->tagged = false;
 }
 
 /* A trial whose arrays belong to it, with room for `capacity` nodes to begin with and no limit on the work. */
@@ -260,21 +260,17 @@ static bool trial_init_growable(Trial *trial, const LzSkink *skink, size_t capac
     memset(trial, 0, sizeof *trial);
     trial->skink = skink;
     trial->capacity = capacity;
-    trial->table_mask = capacity * 2 - 1;
     trial->budget = SIZE_MAX;
     trial->growable = true;
     trial->node = work_malloc(capacity * sizeof *trial->node);
     trial->rc = work_malloc(capacity * sizeof *trial->rc);
     trial->live = work_malloc(capacity * sizeof *trial->live);
     trial->work = work_malloc(capacity * sizeof *trial->work);
-    trial->table = work_calloc(capacity * 2, sizeof *trial->table);
-    if (trial->node == NULL || trial->rc == NULL || trial->live == NULL || trial->work == NULL ||
-        trial->table == NULL) {
+    if (trial->node == NULL || trial->rc == NULL || trial->live == NULL || trial->work == NULL) {
         free(trial->node);
         free(trial->rc);
         free(trial->live);
         free(trial->work);
-        free(trial->table);
         return false;
     }
     return true;
@@ -286,12 +282,11 @@ static void trial_free(Trial *trial) {
         free(trial->rc);
         free(trial->live);
         free(trial->work);
-        free(trial->table);
     }
 }
 
 /*
- * Doubles the room of a growable trial and rehashes. False when there is no memory: the trial
+ * Doubles the room of a growable trial (no rehash: the slots live in the objects). False when there is no memory: the trial
  * is then given up, with every array still the right size for the capacity it has.
  */
 static bool trial_grow(Trial *trial) {
@@ -319,21 +314,6 @@ static bool trial_grow(Trial *trial) {
         return false;
     }
     trial->work = work;
-    uint32_t *table = work_calloc(capacity * 2, sizeof *table);
-    if (table == NULL) {
-        return false;
-    }
-    size_t mask = capacity * 2 - 1;
-    for (size_t i = 0; i < trial->count; i++) {
-        size_t slot = hash_bits(trial->node[i]) & mask;
-        while (table[slot] != 0) {
-            slot = (slot + 1) & mask;
-        }
-        table[slot] = (uint32_t)(i + 1);
-    }
-    free(trial->table);
-    trial->table = table;
-    trial->table_mask = mask;
     trial->capacity = capacity;
     return true;
 }
@@ -350,11 +330,8 @@ static bool intern_node(Trial *trial, LzObject *object, size_t *index) {
     trial->node[i] = object;
     trial->rc[i] = (int64_t)object->refcount - pending_holds(trial->skink, object);
     trial->live[i] = false;
-    size_t slot = hash_slot(trial, object);
-    while (trial->table[slot] != 0) {
-        slot = (slot + 1) & trial->table_mask;
-    }
-    trial->table[slot] = (uint32_t)(i + 1);
+    object->trial = (uint32_t)(i + 1);
+    trial->tagged = true;
     trial->units += NODE_COST;
     *index = i;
     return true;
@@ -482,12 +459,15 @@ static size_t collect(LzVM *vm, const Trial *trial) {
 static TrialResult finish_trial(LzVM *vm, Trial *trial, size_t *freed) {
     for (size_t i = 0; i < trial->count; i++) {
         if (trial->rc[i] < 0) {
+            trial_untag(trial);
             return TRIAL_INCONSISTENT; /* more internal references than the object has */
         }
     }
     if (!mark_live(trial)) {
+        trial_untag(trial);
         return TRIAL_INCONSISTENT;
     }
+    trial_untag(trial); /* before collect: it frees nodes, and the slots are of no use to it */
     *freed = collect(vm, trial);
     return *freed > 0 ? TRIAL_FREED : TRIAL_LIVE;
 }
@@ -498,20 +478,19 @@ static TrialResult trial_from(LzVM *vm, LzUpvalue *suspect, size_t *freed) {
     Trial trial;
     trial.skink = &vm->skink;
     trial.capacity = LZ_SKINK_MAX_NODES;
-    trial.table_mask = LZ_SKINK_MAX_NODES * 2 - 1;
     trial.budget = LZ_SKINK_BUDGET;
     trial.count = 0;
     trial.units = 0;
     trial.work_top = 0;
     trial.growable = false;
+    trial.tagged = false;
     trial.node = buffers.node;
     trial.rc = buffers.rc;
     trial.live = buffers.live;
     trial.work = buffers.work;
-    trial.table = buffers.table;
-    memset(trial.table, 0, sizeof buffers.table);
 
     if (!discover(&trial, &suspect->base)) {
+        trial_untag(&trial);
         return TRIAL_OVER_BUDGET;
     }
     return finish_trial(vm, &trial, freed);
@@ -684,6 +663,7 @@ static bool full_pass_once(LzVM *vm, bool during_run) {
         result = finish_trial(vm, &trial, &freed);
     }
     skink->stats.full_nodes += trial.count;
+    trial_untag(&trial); /* no-op when finish_trial ran: its nodes may be gone */
     trial_free(&trial);
     if (result == TRIAL_INCONSISTENT) {
         skink->stats.inconsistent++;

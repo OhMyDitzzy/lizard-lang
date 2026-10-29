@@ -40,13 +40,22 @@ static void run(Program *program, const char *text, bool skink) {
     }
 }
 
+/* A trial indexes its nodes through LzObject.trial and must leave every slot at 0, however it ended. */
+static void check_no_trial_slot_is_left_set(const LzHeap *heap) {
+    for (const LzObject *object = heap->head; object != NULL; object = object->next) {
+        LZ_CHECK(object->trial == 0);
+    }
+}
+
 /* Returns what was still alive once the roots were released: a leaked cycle, if any. */
 static size_t finish(Program *program) {
+    check_no_trial_slot_is_left_set(&program->vm.heap);
     LZ_CHECK(program->vm.stack_count == 0);
     LZ_CHECK(program->vm.skink.pending_count == 0);
     LZ_CHECK(program->vm.skink.stats.inconsistent == 0);
     lz_chunk_free(&program->vm.heap, &program->chunk);
     lz_vm_release_roots(&program->vm);
+    check_no_trial_slot_is_left_set(&program->vm.heap);
     size_t leaked = program->vm.heap.live_objects;
     lz_vm_free(&program->vm);
     lz_buffer_free(&program->out);

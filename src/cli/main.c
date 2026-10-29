@@ -151,7 +151,7 @@ static void report_runtime_error(const LzVM *vm, const LzSource *source) {
 }
 
 static int run_script(const char *script_path, bool heap_stats, bool trace_memory,
-                      bool dump_tokens_flag, bool has_max_heap, uint64_t max_heap_bytes,
+                      bool has_max_heap, uint64_t max_heap_bytes,
                       bool has_fuel, uint64_t fuel, bool has_engine, const char *engine,
                       bool engine_stats, bool has_jit, const char *jit,
                       bool has_skink, bool skink) {
@@ -352,7 +352,7 @@ int main(int argc, char **argv) {
     }
 
     lz_argparse_free_result(&result);
-    return run_script(script_path, heap_stats, trace_memory, dump_tokens_flag,
+    return run_script(script_path, heap_stats, trace_memory,
                       has_max_heap, max_heap_bytes, has_fuel, fuel,
                       has_engine, engine, engine_stats, has_jit, jit,
                       has_skink, skink);

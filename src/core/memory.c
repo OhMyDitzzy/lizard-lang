@@ -100,6 +100,7 @@ void *lz_heap_alloc(LzHeap *heap, LzObjType type, size_t size) {
     object->size = size;
     object->refcount = 1;
     object->type = type;
+    object->trial = 0;
     if (heap->head != NULL) {
         heap->head->prev = object;
     }

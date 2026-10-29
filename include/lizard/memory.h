@@ -22,6 +22,13 @@ typedef struct LzObject {
     size_t size;
     uint32_t refcount;
     LzObjType type;
+    /*
+     * Owned by the cycle collector (skink.c): while a trial deletion is running, the index + 1 of
+     * this object in the trial's node set, so that finding a node from a pointer is one load and
+     * not a hash lookup. 0 whenever no trial is running; a trial clears every slot it set before
+     * it ends and before it frees anything.
+     */
+    uint32_t trial;
 } LzObject;
 
 #define LZ_HEAP_UNLIMITED SIZE_MAX

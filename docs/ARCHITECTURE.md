@@ -107,6 +107,13 @@ everything that cannot need the barrier (a number, bool or nil; a string; any st
 into an upvalue that is already watched or still open) and send the rest to the same
 code through their slow path.
 
+A trial finds a node from its pointer through `LzObject.trial` (the node's index + 1 in the
+trial's set, 0 when no trial runs), not through a hash table: one load per lookup, no table to
+clear or rehash, and a full pass that grows its set only reallocates flat arrays. The slots are
+set while a trial is interning nodes and cleared (`trial_untag`) before it ends and before
+it frees anything, however it ended; `test_skink` checks that no slot is left set. The slot costs
+4 bytes in the object header, 8 with padding.
+
 A tick does not need an upvalue to close. Every `LZ_SKINK_ALLOC_PERIOD` (128) object
 allocations the heap calls `heap->on_alloc` (`lz_skink_alloc_tick`), which is one
 more tick of the same clock whenever a watch list is not empty, so a program that builds
@@ -449,4 +456,4 @@ area's header, add one row to the table in `registry.c`, and add the source to
 ## Not decided yet
 
 `for` (so `range` is only useful with `while` for now), `break`/`continue`, maps and other collections, indexing and slicing strings, narrowing, the error model, and classes. Removing entries from `LzTable`.
-Skink: counts kept in the object header instead of a hash table (a full pass would cost a fraction of what it does), and a run-time "holds no closure" fact for unannotated arrays (they are `any` today, so a captured array of numbers is still a suspect).
+Skink: a run-time "holds no closure" fact for unannotated arrays (they are `any` today, so a captured array of numbers is still a suspect).

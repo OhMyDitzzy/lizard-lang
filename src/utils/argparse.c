@@ -392,8 +392,8 @@ LzArgParseResult lz_argparse_parse(LzArgParser *parser, int argc, char **argv) {
 
     if (ctx.error_buffer[0] != '\0') {
         result.success = false;
-        strncpy(result.error_buffer, ctx.error_buffer, sizeof(result.error_buffer) - 1);
-        result.error_buffer[sizeof(result.error_buffer) - 1] = '\0';
+        _Static_assert(sizeof(result.error_buffer) == sizeof(ctx.error_buffer), "same size");
+        memcpy(result.error_buffer, ctx.error_buffer, sizeof(result.error_buffer)); /* ctx's is always NUL-terminated */
         result.error_message = result.error_buffer;
         result.positional_args = ctx.positional_args;
         result.positional_count = (int)ctx.positional_count;
@@ -426,8 +426,8 @@ LzArgParseResult lz_argparse_parse(LzArgParser *parser, int argc, char **argv) {
 
     if (!check_required(parser, &ctx)) {
         result.success = false;
-        strncpy(result.error_buffer, ctx.error_buffer, sizeof(result.error_buffer) - 1);
-        result.error_buffer[sizeof(result.error_buffer) - 1] = '\0';
+        _Static_assert(sizeof(result.error_buffer) == sizeof(ctx.error_buffer), "same size");
+        memcpy(result.error_buffer, ctx.error_buffer, sizeof(result.error_buffer)); /* ctx's is always NUL-terminated */
         result.error_message = result.error_buffer;
         result.positional_args = ctx.positional_args;
         result.positional_count = (int)ctx.positional_count;
