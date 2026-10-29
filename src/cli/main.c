@@ -283,7 +283,7 @@ int main(int argc, char **argv) {
     lz_argparse_init(&parser, "lizard");
     // TODO: Just put the website domain, we can built the web later
     lz_argparse_set_description(&parser, "Lizard is a General Purpose programming language which is multi-functional and designed to be easy to understand. See more information at: lizardlang.org");
-    lz_argparse_set_version(&parser, LZ_VERSION_STRING);
+    lz_argparse_set_version(&parser, LZ_VERSION_LONG);
     lz_argparse_set_args(&parser, args, sizeof(args) / sizeof(args[0]) - 1);
     lz_argparse_enable_color(&parser, true);
 

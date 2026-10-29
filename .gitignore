@@ -5,3 +5,5 @@ compile_commands.json
 *.o
 *.a
 *.out
+dist/
+.buildinfo

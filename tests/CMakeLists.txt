@@ -82,4 +82,16 @@ if(UNIX)
     # when the JIT did not run).
     add_test(NAME skink_cli
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/skink_check.sh $<TARGET_FILE:lizard>)
+
+    # `lizard --version`: the version, the kind of build, the channel, all consistent with BUILDINFO.
+    add_test(NAME version_cli
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/version_check.sh $<TARGET_FILE:lizard>
+                ${PROJECT_BINARY_DIR}/generated/BUILDINFO)
+
+    # build.sh: usage text, option errors, and that it detects this machine.
+    find_program(LZ_BASH bash)
+    if(LZ_BASH)
+        add_test(NAME build_script
+            COMMAND ${LZ_BASH} ${CMAKE_CURRENT_SOURCE_DIR}/build_script_check.sh ${PROJECT_SOURCE_DIR}/build.sh)
+    endif()
 endif()

@@ -84,7 +84,13 @@ Requires a C11 compiler and CMake 3.16 or newer.
     cmake --build build
     ctest --test-dir build --output-on-failure
 
-The binary is written to `build/bin/lizard`.
+The binary is written to `build/bin/lizard`. `./build.sh` does the same and more: it detects the
+platform, builds, runs the tests, and writes (optionally signed) release tarballs per platform and
+ABI. See [docs/BUILDING.md](docs/BUILDING.md); `lizard --version` shows the commit and kind of build.
+
+    ./build.sh check                      # build and test
+    ./build.sh package --targets=all      # one tarball per target that has a toolchain
+    ./build.sh package --official         # signed release (clean tree, GPG key)
 
 ### Build options
 
@@ -95,6 +101,9 @@ The binary is written to `build/bin/lizard`.
 | `LZ_WARNINGS_AS_ERRORS` | `OFF` | Compile with `-Werror` |
 | `LZ_ENABLE_SANITIZERS` | `OFF` | AddressSanitizer and UBSan |
 | `LZ_ENABLE_LTO` | `OFF` | Link-time optimization when supported |
+| `LZ_ENABLE_JIT` | `ON` | The Gecko JIT (x86-64 and AArch64 on Linux and macOS; ignored elsewhere) |
+| `LZ_STATIC` | `OFF` | Static executable |
+| `LZ_BUILD_CHANNEL` | `local` | `local` (unsigned) or `official` (needs a clean tree and `LZ_SIGNING_KEY`) |
 
 Example: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DLZ_ENABLE_SANITIZERS=ON`
 

@@ -19,12 +19,18 @@ option(LZ_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(LZ_ENABLE_SANITIZERS "Build with AddressSanitizer and UBSan" OFF)
 option(LZ_ENABLE_JIT "Build the JIT of the Gecko Engine (x86-64 and AArch64; ignored on other platforms)" ON)
 option(LZ_ENABLE_LTO "Enable link-time optimization when supported" OFF)
+option(LZ_STATIC "Link the lizard executable statically (no shared libc needed)" OFF)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 include(cmake/CompilerWarnings.cmake)
 include(cmake/Sanitizers.cmake)
+include(cmake/BuildInfo.cmake)
+
+if(LZ_STATIC AND NOT MSVC)
+    add_link_options(-static)
+endif()
 
 if(LZ_ENABLE_LTO)
     include(CheckIPOSupported)
@@ -36,10 +42,8 @@ if(LZ_ENABLE_LTO)
     endif()
 endif()
 
-configure_file(
-    include/lizard/version.h.in
-    ${CMAKE_BINARY_DIR}/generated/lizard/version.h
-    @ONLY)
+# version.h and BUILDINFO: commit, build kind (release/snapshot/dirty/source), channel (local/official)
+lz_setup_buildinfo()
 
 add_subdirectory(src)
 add_subdirectory(builtin)
@@ -59,6 +63,9 @@ if(UNIX)
 endif()
 
 install(TARGETS lizard RUNTIME DESTINATION bin)
+install(FILES README.md ${LZ_BUILDINFO_FILE} DESTINATION share/doc/lizard)
+install(DIRECTORY docs/ DESTINATION share/doc/lizard/docs FILES_MATCHING PATTERN "*.md")
+install(DIRECTORY examples/ DESTINATION share/lizard/examples FILES_MATCHING PATTERN "*.lz")
 
 message(STATUS "Lizard ${PROJECT_VERSION} (${CMAKE_BUILD_TYPE})")
 message(STATUS "  tests: ${LZ_BUILD_TESTS}  sanitizers: ${LZ_ENABLE_SANITIZERS}  werror: ${LZ_WARNINGS_AS_ERRORS}  lto: ${LZ_ENABLE_LTO}")
