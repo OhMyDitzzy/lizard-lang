@@ -200,6 +200,7 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_CLOSE_UPVALUE:
     case LZ_OP_GET_SELF:
     case LZ_OP_ARRAY_EXTEND:
+    case LZ_OP_SWAP:
         return simple_instruction(lz_opcode_name(opcode), offset, out);
     default:
         put(out, "unknown opcode %u\n", (unsigned)opcode);

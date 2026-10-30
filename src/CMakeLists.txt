@@ -11,7 +11,9 @@ add_library(lizard_core STATIC
     core/native.c
     core/run.c
     core/skink.c
+    core/report.c
     core/source.c
+    core/suggest.c
     core/table.c
     core/type.c
     core/value.c

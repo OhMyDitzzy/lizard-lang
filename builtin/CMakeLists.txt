@@ -1,6 +1,11 @@
 add_library(lizard_builtin STATIC
     registry.c
     array/array.c
+    array/higher.c
+    method/casemap.c
+    method/method.c
+    method/number.c
+    method/text.c
     convert/convert.c
     io/print.c)
 

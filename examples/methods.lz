@@ -1,0 +1,18 @@
+# Methods of strings, numbers and arrays.
+
+let line = "  Alice, Bob,  Carol "
+let names = line.trim().split(",").map(fn(s) => s.trim())
+println(names)                                   # ["Alice", "Bob", "Carol"]
+println(names.map(fn(s) => s.to_upper()).join(" & "))
+
+let word = "Lizard"
+println(word.to_lower(), word.repeat(2), word.starts_with("Li"))
+println(word.chars())
+println(word.slice(1, 4), word.slice(-2), word.index_of("ar"))
+println("a-b-c".replace("-", "+"))
+
+println((-7).abs(), 2.7.floor(), 2.5.round(), 2.pow(16), 81.sqrt())
+println(3.min(9), 3.max(9))
+
+println(42.to_string() + "!", "12".to_int() + 1)
+println([1, 2, 3].first(), [1, 2, 3].last(), [].is_empty())

@@ -276,6 +276,9 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
             ok = d >= 2;
             nd = d - 1;
             break;
+        case LZ_OP_SWAP:
+            ok = d >= 2; /* the depth does not change */
+            break;
         case LZ_OP_NEGATE:
         case LZ_OP_NOT:
         case LZ_OP_CHECK_TYPE:

@@ -13,6 +13,7 @@ LzNative *lz_native_new(LzHeap *heap, LzString *name, LzNativeFn fn, int min_arg
     native->min_args = min_args;
     native->max_args = max_args;
     native->result_kinds = LZ_KINDS_ANY;
+    native->data = NULL;
     return native;
 }
 
@@ -24,5 +25,6 @@ LzStatus lz_native_call(LzVM *vm, const LzNative *native, int argc, const LzValu
         return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): wrong number of arguments (%d given)",
                                native->name->data, argc);
     }
+    vm->current_native = native; /* read at entry by natives that share one function, see methods */
     return native->fn(vm, argc, argv, result);
 }

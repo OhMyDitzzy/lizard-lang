@@ -23,6 +23,7 @@ typedef struct LzNative {
     int min_args;
     int max_args;
     uint16_t result_kinds; /* what a call can return; LZ_KINDS_ANY when unknown */
+    const void *data;      /* private to whoever made the native (a method dispatcher keeps its group here) */
 } LzNative;
 
 /* The returned object holds its own reference to name. */

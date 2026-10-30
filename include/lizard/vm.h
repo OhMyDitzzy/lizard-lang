@@ -44,6 +44,7 @@ struct LzVM {
     LzTable strings;
     LzTable globals;
     LzTable builtins;
+    LzTable methods; /* name -> dispatcher native of the methods called as value.name(...) */
     LzType **array_types; /* interned item types of array types, see lz_vm_array_of */
     size_t array_type_count;
     size_t array_type_capacity;
@@ -59,10 +60,17 @@ struct LzVM {
     size_t trace_count;
     size_t trace_total; /* frames in the whole stack, so a caller can say how many were left out */
     char error[256];
+    uint32_t native_call_offset; /* source call site of the native that is running, for callback traces */
+    unsigned native_depth;       /* callbacks nested inside natives right now, see lz_vm_call_value */
+    const struct LzNative *current_native; /* the native lz_native_call is about to run; valid at its entry only */
+    bool trace_fixed;            /* a failed callback already recorded the trace and its frames are gone */
     LzSkink skink; /* cycle collector, see skink.h; last so the JIT's field offsets stay put */
 };
 
 #define LZ_FUEL_UNLIMITED UINT64_MAX
+
+/* Deepest chain of callbacks run by natives (map inside map ...): each one nests the C stack. */
+#define LZ_NATIVE_DEPTH_MAX 128
 
 void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err);
 
@@ -143,6 +151,21 @@ void lz_vm_reset_stack(LzVM *vm);
 LzStatus lz_vm_call(LzVM *vm, size_t argc, size_t resume_ip, uint32_t call_offset, bool *entered);
 
 /*
+ * Calls a function value from inside a native (map, filter, ...) and runs it to the
+ * end. argv are borrowed; *result is a new reference the caller owns. The callee may be
+ * a closure or another native. On failure vm->error and vm->error_offset describe the
+ * failing instruction inside the callback and vm->trace the call stack at that moment;
+ * the callback's frames are already unwound, so the native just returns the status.
+ *
+ * Callbacks run on the reference interpreter whatever engine started the program, and
+ * nest at most LZ_NATIVE_DEPTH_MAX deep. A native may call this many times; the items it
+ * passes must be retained by the native, because the callback can change the array they
+ * came from.
+ */
+LzStatus lz_vm_call_value(LzVM *vm, const LzValue *callee, size_t argc, const LzValue *argv,
+                          LzValue *result);
+
+/*
  * OP_CALL_EX: [callee][array of positional arguments][named_count named values].
  * names is the constant holding the argument names, separated by NUL bytes. The
  * array is spread onto the stack, then the call proceeds as lz_vm_call.
@@ -183,6 +206,9 @@ LzString *lz_vm_intern(LzVM *vm, const char *chars, size_t length);
 
 bool lz_vm_define_global(LzVM *vm, LzString *name, LzValue value);
 bool lz_vm_define_builtin(LzVM *vm, LzString *name, LzValue value);
+
+/* Methods live apart from globals and builtins, so `trim` the method and `trim` your variable never meet. */
+bool lz_vm_define_method(LzVM *vm, LzString *name, LzValue value);
 
 /* Globals shadow builtins. name must be interned. NULL when undefined. */
 const LzValue *lz_vm_lookup(const LzVM *vm, const LzString *name);

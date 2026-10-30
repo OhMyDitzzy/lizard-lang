@@ -9,6 +9,8 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     lz_table_init(&vm->strings);
     lz_table_init(&vm->globals);
     lz_table_init(&vm->builtins);
+    lz_table_init(&vm->methods);
+    vm->current_native = NULL;
     vm->array_types = NULL;
     vm->array_type_count = 0;
     vm->array_type_capacity = 0;
@@ -18,6 +20,9 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->fuel = LZ_FUEL_UNLIMITED;
     vm->instructions = 0;
     vm->error_offset = LZ_NO_OFFSET;
+    vm->native_call_offset = LZ_NO_OFFSET;
+    vm->native_depth = 0;
+    vm->trace_fixed = false;
     vm->trace_count = 0;
     vm->trace_total = 0;
     vm->out = out;
@@ -61,6 +66,7 @@ void lz_vm_reset_stack(LzVM *vm) {
 
 void lz_vm_release_roots(LzVM *vm) {
     lz_vm_reset_stack(vm);
+    lz_table_free(&vm->heap, &vm->methods);
     lz_table_free(&vm->heap, &vm->builtins);
     lz_table_free(&vm->heap, &vm->globals);
     lz_table_free(&vm->heap, &vm->strings);
@@ -103,6 +109,10 @@ bool lz_vm_define_global(LzVM *vm, LzString *name, LzValue value) {
 
 bool lz_vm_define_builtin(LzVM *vm, LzString *name, LzValue value) {
     return lz_table_set(&vm->heap, &vm->builtins, name, value);
+}
+
+bool lz_vm_define_method(LzVM *vm, LzString *name, LzValue value) {
+    return lz_table_set(&vm->heap, &vm->methods, name, value);
 }
 
 const LzValue *lz_vm_lookup(const LzVM *vm, const LzString *name) {

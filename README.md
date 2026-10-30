@@ -43,6 +43,8 @@ area(3.0, h = 2.0)                   # named arguments, in any order
 sum(1, 2, *[3, 4])                   # * spreads an array into arguments
 ```
 
+* A function whose body is one expression can be written `fn(x) => expression`, which is
+  `fn(x) { return expression }`: `fn(n: int) -> bool => n > 2`. The body may start on the next line.
 * Parameters and the result may carry types; a typed call that is wrong is a
   compile-time error when the callee is known, and a run-time error otherwise.
   A function with `-> T` must return on every path ("missing return").
@@ -69,6 +71,10 @@ Indexing out of range is a runtime error. A slice clamps instead.
 | `join(xs, sep)` | items to text, separated by `sep` |
 | `range(n)`, `range(a, b)` | the ints `0..n-1` or `a..b-1` |
 | `sum(xs)`, `min(xs)`, `max(xs)` | numbers only; `min` and `max` fail on an empty array |
+| `map(xs, f)`, `filter(xs, f)` | a new array of `f(item)`, or of the items for which `f(item)` is truthy |
+| `reduce(xs, f, init)` | folds the items: `acc = f(acc, item)`, starting from `init` |
+| `each(xs, f)` | calls `f(item)` for every item, returns `nil` |
+| `find(xs, f)`, `any(xs, f)`, `all(xs, f)` | first item with a truthy `f(item)` (or `nil`), or whether some / every item has one |
 
 `int[]`, `string[]`, `int[][]`, `(int | string)[]` and `int?[]` are types. An
 array stored under such a type is checked once and then restricted to it, so
@@ -124,7 +130,93 @@ Example: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DLZ_ENABLE_SANITIZERS=ON
 | `--engine-stats` | Print what the engine did when the program ends |
 | `--jit=M` | Machine code for hot code (x86-64, AArch64): `on` (default), `off` or `eager` |
 | `--skink=M` | Cycle collector for closures: `on` (default) or `off` |
+| `--color=W` | Colour in error messages: `auto` (default: only on a terminal, `NO_COLOR` turns it off), `always` or `never` |
 | `--` | Stop option parsing |
+
+### Methods and callbacks
+
+`receiver.name(args)` is `name(receiver, args)`: any function whose first parameter is the
+receiver can be written as a method, builtins and your own functions alike.
+
+```
+let nums = [1, 2, 3, 4, 5, 6]
+nums.filter(fn(n) => n > 2).map(fn(n) => n * 10)    # [30, 40, 50, 60]
+nums.reduce(fn(acc, n) => acc + n, 0)               # 21
+nums.map(string)                                    # any function value is a callback
+fn double(n) { return n * 2 }
+5.double()                                          # 10
+
+nums                                                # a chain may continue on the next line
+  .filter(fn(n) => n > 2)
+  .len()
+```
+
+### Methods of values
+
+Strings, numbers and arrays have methods of their own. They are called like the ones above
+(`value.name(args)`), and the names are snake_case.
+
+| For | Methods |
+| --- | --- |
+| every value | `to_string()`, `to_bool()` |
+| int, float, string | `to_int()`, `to_float()` (a string is parsed) |
+| string | `to_upper()`, `to_lower()`, `trim()`, `trim_start()`, `trim_end()`, `split(sep)`, `contains(s)`, `starts_with(s)`, `ends_with(s)`, `replace(old, new)`, `repeat(n)`, `index_of(s)`, `chars()`, `slice(from, to)`, `is_empty()` |
+| array | `first()`, `last()` (`nil` when empty), `is_empty()`, and the functions above (`xs.len()`, `xs.contains(v)`, `xs.join(sep)`, ...) |
+| int, float | `abs()`, `floor()`, `ceil()`, `round()`, `sqrt()`, `pow(n)`, `min(other)`, `max(other)` |
+
+```
+"  Hello, Lizard ".trim().to_lower()      # "hello, lizard"
+"a,b,c".split(",")                        # ["a", "b", "c"]
+"héllo".slice(1, 3)                       # "él"   (positions count characters, like len)
+2.5.round(), 7.pow(2), 16.sqrt()          # 3, 49, 4.0
+nums.map(fn(n) => n.to_string()).join("-")
+```
+
+Text is UTF-8: lengths and positions count characters and searching works on bytes.
+`to_upper`/`to_lower` use Unicode's simple case mapping, one character to one (`é` to `É`,
+`ж` to `Ж`, `α` to `Α`), so `ß` stays `ß` and there is no locale-specific rule (Turkish
+dotless i, final sigma). `trim` removes Unicode white space, including the no-break space.
+Bytes that are not valid UTF-8 pass through unchanged. `round` rounds halves away from zero,
+and `floor`, `ceil` and `round` give an int. `slice` takes negative positions and clamps, like
+an array slice. A kind that has no method of that name uses the function of the same name when
+there is one, and otherwise fails with `int has no method 'to_lower' (it works on string)`.
+A function or variable of your own with the same name always wins over a method.
+
+A callback gets the item only. The array is visited up to the length it had when the call
+began, so a callback that pushes to it cannot loop forever; items it removes are not visited.
+Callbacks run on the reference interpreter and may nest 128 deep. An error inside a callback
+points at the failing line there, and the stack trace goes through to the call that started it.
+Fields (`value.name` without a call) do not exist yet.
+
+## Error messages
+
+Errors show the source line, the offending span, and, when a name does not exist,
+a "did you mean" suggestion drawn as the corrected line (`+` letters to add,
+`~` letters to change, `-` letters to remove):
+
+```
+error: undefined function 'printj'
+ --> hello.lz:2:1
+  |
+2 | printj("Hello World!")
+  | ^^^^^^ not found in this scope
+  |
+help: did you mean `print`?
+  |
+2 | print("Hello World!")
+  |      - remove `j`
+  |
+help: or maybe `println`?
+  |
+2 | println("Hello World!")
+  |      ~~
+```
+
+Candidates are the builtins, the functions and variables of the script that are in
+scope at that point, type names (`let x: intt`) and parameter names (`f(hieght = 1)`).
+Names that later come from `import` need no extra work: once they are symbols or
+globals of the VM they are offered too (see `suggest_names` in `src/frontend/compiler.c`
+and `include/lizard/suggest.h`). A call is only matched with things that can be called.
 
 ## Engines
 

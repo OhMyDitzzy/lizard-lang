@@ -311,6 +311,7 @@ bool ge_translate(const LzChunk *chunk, GeProgram *program) {
         case LZ_OP_CHECK_PARAM:
         case LZ_OP_CHECK_RETURN:
         case LZ_OP_ARRAY_EXTEND:
+        case LZ_OP_SWAP:
             in->op = GE_OP_DELEGATE;
             break;
         default:

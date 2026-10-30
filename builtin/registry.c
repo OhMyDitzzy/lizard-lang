@@ -1,9 +1,11 @@
 #include <string.h>
 
 #include "array/array.h"
+#include "array/higher.h"
 #include "convert/convert.h"
 #include "io/io.h"
 #include "lizard/builtin.h"
+#include "method/method.h"
 
 static const LzBuiltin builtins[] = {
     {"print", lz_builtin_print, 0, LZ_VARIADIC, LZ_KIND_NIL},
@@ -28,6 +30,13 @@ static const LzBuiltin builtins[] = {
     {"sum", lz_builtin_sum, 1, 1, LZ_KINDS_NUMBER},
     {"min", lz_builtin_min, 1, 1, LZ_KINDS_NUMBER},
     {"max", lz_builtin_max, 1, 1, LZ_KINDS_NUMBER},
+    {"map", lz_builtin_map, 2, 2, LZ_KIND_ARRAY},
+    {"filter", lz_builtin_filter, 2, 2, LZ_KIND_ARRAY},
+    {"reduce", lz_builtin_reduce, 3, 3, LZ_KINDS_ANY},
+    {"each", lz_builtin_each, 2, 2, LZ_KIND_NIL},
+    {"find", lz_builtin_find, 2, 2, LZ_KINDS_ANY},
+    {"any", lz_builtin_any, 2, 2, LZ_KIND_BOOL},
+    {"all", lz_builtin_all, 2, 2, LZ_KIND_BOOL},
 };
 
 #define BUILTIN_COUNT (sizeof builtins / sizeof builtins[0])
@@ -68,5 +77,5 @@ LzStatus lz_builtin_install(LzVM *vm) {
             return lz_vm_out_of_memory(vm);
         }
     }
-    return LZ_OK;
+    return lz_method_install(vm);
 }

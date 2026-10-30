@@ -1,3 +1,7 @@
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L /* fileno, isatty */
+#endif
+
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -7,9 +11,17 @@
 #include "lizard/compiler.h"
 #include "lizard/engine.h"
 #include "lizard/lexer.h"
+#include "lizard/report.h"
 #include "lizard/vm.h"
 #include "lizard/version.h"
 #include "lizard/utils/argparse.h"
+
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 enum {
     EXIT_USAGE = 64,
@@ -17,6 +29,52 @@ enum {
     EXIT_NO_INPUT = 66,
     EXIT_RUNTIME_ERROR = 70
 };
+
+/* Colour for error reports: --color=auto|always|never, NO_COLOR, FORCE_COLOR. */
+static bool stderr_is_terminal(void) {
+#ifdef _WIN32
+    if (!_isatty(_fileno(stderr))) {
+        return false;
+    }
+    HANDLE handle = GetStdHandle(STD_ERROR_HANDLE);
+    DWORD mode = 0;
+    if (handle == INVALID_HANDLE_VALUE || !GetConsoleMode(handle, &mode)) {
+        return false;
+    }
+    /* Older consoles print the escape codes as text unless virtual terminal output is on. */
+    return SetConsoleMode(handle, mode | 0x0004 /* ENABLE_VIRTUAL_TERMINAL_PROCESSING */) != 0;
+#else
+    const char *term = getenv("TERM");
+    return isatty(fileno(stderr)) && (term == NULL || strcmp(term, "dumb") != 0);
+#endif
+}
+
+static bool env_set(const char *name) {
+    const char *value = getenv(name);
+    return value != NULL && value[0] != '\0';
+}
+
+static bool decide_color(const char *mode) {
+    if (mode != NULL && strcmp(mode, "always") == 0) {
+        return true;
+    }
+    if (mode != NULL && strcmp(mode, "never") == 0) {
+        return false;
+    }
+    if (env_set("NO_COLOR")) {
+        return false;
+    }
+    if (env_set("FORCE_COLOR") || env_set("CLICOLOR_FORCE")) {
+        return true;
+    }
+    return stderr_is_terminal();
+}
+
+/* "lizard: error: message" for failures that have no place in the source. */
+static void report_plain_error(bool color, const char *message) {
+    fprintf(stderr, "%slizard: error%s: %s\n", color ? "\x1b[1;31m" : "", color ? "\x1b[0m" : "",
+            message);
+}
 
 static bool has_lz_extension(const char *path) {
     const char *dot = strrchr(path, '.');
@@ -67,7 +125,7 @@ static void print_engine_stats(LzEngine engine, const LzEngineStats *stats) {
     fputc('\n', stderr);
 }
 
-static int dump_tokens(const char *path) {
+static int dump_tokens(const char *path, bool color) {
     LzSource source;
     char error[200];
     if (!lz_source_read_file(&source, path, error, sizeof error)) {
@@ -98,8 +156,12 @@ static int dump_tokens(const char *path) {
         if (token.type == LZ_TOKEN_ERROR) {
             failed = true;
             fflush(stdout);
-            lz_source_write_diagnostic(&source, token.offset, token.length, "error",
-                                       token.value.error, &err);
+            LzReport report = {0};
+            report.severity = "error";
+            report.message = token.value.error;
+            report.offset = token.offset;
+            report.length = token.length;
+            lz_report_write(&source, &report, color, &err);
         } else {
             unsigned column = 1;
             for (size_t i = line_start; i < token.offset; i++) {
@@ -125,36 +187,68 @@ static int dump_tokens(const char *path) {
     return failed ? EXIT_DATA_ERROR : EXIT_SUCCESS;
 }
 
-static void report_runtime_error(const LzVM *vm, const LzSource *source) {
-    LzWriter err = lz_writer_from_file(stderr);
-    if (vm->error_offset != LZ_NO_OFFSET) {
-        lz_source_write_diagnostic(source, vm->error_offset, 0, "error", vm->error, &err);
-        if (vm->trace_count > 0) {
-            fprintf(stderr, "stack trace (innermost call first):\n");
-            for (size_t i = 0; i < vm->trace_count; i++) {
-                const LzTraceEntry *entry = &vm->trace[i];
-                if (entry->offset == LZ_NO_OFFSET) {
-                    fprintf(stderr, "  at %s\n", entry->name);
-                } else {
-                    LzLocation where = lz_source_locate(source, entry->offset);
-                    fprintf(stderr, "  at %s (%s:%u:%u)\n", entry->name, source->name,
-                            (unsigned)where.line, (unsigned)where.column);
-                }
-            }
-            if (vm->trace_total > vm->trace_count) {
-                fprintf(stderr, "  ... %zu more frames\n", vm->trace_total - vm->trace_count);
-            }
-        }
-    } else {
-        fprintf(stderr, "lizard: error: %s\n", vm->error);
+static void report_runtime_error(const LzVM *vm, const LzSource *source,
+                                 const LzDiagnostics *diagnostics, bool color) {
+    if (vm->error_offset == LZ_NO_OFFSET) {
+        report_plain_error(color, vm->error);
+        return;
     }
+
+    LzWriter err = lz_writer_from_file(stderr);
+    LzReport report = {0};
+    report.severity = "error";
+    report.message = vm->error;
+    report.offset = vm->error_offset;
+    report.length = 0;
+
+    /* An undefined name: the compiler kept what it knew about the names in scope. */
+    char headline[160];
+    const LzNameHint *hint = lz_diagnostics_find_hint(diagnostics, vm->error_offset);
+    if (hint != NULL && strncmp(vm->error, "undefined variable '", 20) == 0) {
+        report.length = hint->length;
+        report.label = "not found in this scope";
+        report.suggestions = &hint->suggestions;
+        if (hint->is_method) {
+            (void)snprintf(headline, sizeof headline, "undefined method%s", vm->error + 18);
+            report.message = headline;
+            report.label = "no function or method with this name";
+        } else if (hint->is_call) {
+            (void)snprintf(headline, sizeof headline, "undefined function%s", vm->error + 18);
+            report.message = headline;
+        }
+    }
+
+    LzReportFrame frames[LZ_TRACE_MAX];
+    char names[LZ_TRACE_MAX][48];
+    for (size_t i = 0; i < vm->trace_count && i < LZ_TRACE_MAX; i++) {
+        const LzTraceEntry *entry = &vm->trace[i];
+        (void)snprintf(names[i], sizeof names[i], "%s", entry->name);
+        frames[i].name = names[i];
+        frames[i].has_location = entry->offset != LZ_NO_OFFSET;
+        frames[i].line = 0;
+        frames[i].column = 0;
+        if (frames[i].has_location) {
+            LzLocation where = lz_source_locate(source, entry->offset);
+            frames[i].line = where.line;
+            frames[i].column = where.column;
+        }
+    }
+    if (vm->trace_count > 0) {
+        report.frames = frames;
+        report.frame_count = vm->trace_count < LZ_TRACE_MAX ? vm->trace_count : LZ_TRACE_MAX;
+        if (vm->trace_total > vm->trace_count) {
+            report.frames_omitted = vm->trace_total - vm->trace_count;
+        }
+    }
+
+    lz_report_write(source, &report, color, &err);
 }
 
 static int run_script(const char *script_path, bool heap_stats, bool trace_memory,
                       bool has_max_heap, uint64_t max_heap_bytes,
                       bool has_fuel, uint64_t fuel, bool has_engine, const char *engine,
                       bool engine_stats, bool has_jit, const char *jit,
-                      bool has_skink, bool skink) {
+                      bool has_skink, bool skink, bool color) {
     LzSource source;
     char error[200];
     if (!lz_source_read_file(&source, script_path, error, sizeof error)) {
@@ -200,16 +294,17 @@ static int run_script(const char *script_path, bool heap_stats, bool trace_memor
         LzDiagnostics diagnostics;
         LzStatus status = lz_compile(&vm, &source, &chunk, &diagnostics);
         if (status == LZ_ERR_COMPILE) {
-            lz_diagnostics_write(&diagnostics, &source, &vm.err);
+            lz_writer_flush(&vm.out);
+            lz_diagnostics_report(&diagnostics, &source, color, &vm.err);
             exit_code = EXIT_DATA_ERROR;
         } else if (status != LZ_OK) {
-            fprintf(stderr, "lizard: error: %s\n", vm.error);
+            report_plain_error(color, vm.error);
             exit_code = EXIT_RUNTIME_ERROR;
         } else {
             status = lz_engine_run(eng, &vm, &chunk, engine_stats ? &stats : NULL);
             if (status != LZ_OK) {
                 lz_writer_flush(&vm.out);
-                report_runtime_error(&vm, &source);
+                report_runtime_error(&vm, &source, &diagnostics, color);
                 exit_code = EXIT_RUNTIME_ERROR;
             }
             if (engine_stats) {
@@ -249,11 +344,13 @@ int main(int argc, char **argv) {
     bool has_skink = false;
     bool skink = false;
     const char *skink_str = NULL;
+    const char *color_str = NULL;
     const char *script_path = NULL;
 
     const char *engine_choices[] = {"ge", "gecko", "ref", "reference", NULL};
     const char *jit_choices[] = {"on", "off", "eager", NULL};
     const char *skink_choices[] = {"on", "off", NULL};
+    const char *color_choices[] = {"auto", "always", "never", NULL};
 
     LzArg args[] = {
         LZ_ARG_HELP("h", "help", &show_help),
@@ -267,6 +364,7 @@ int main(int argc, char **argv) {
         LZ_ARG_OPTION(NULL, "engine", "Execution engine: ge (default, the fast one) or ref", "E", &engine, NULL),
         LZ_ARG_OPTION(NULL, "jit", "Machine code for hot code: on (default), off or eager", "M", &jit, NULL),
         LZ_ARG_OPTION(NULL, "skink", "Cycle collector for closures: on (default) or off", "M", &skink_str, NULL),
+        LZ_ARG_OPTION(NULL, "color", "Colour in error messages: auto (default), always or never", "WHEN", &color_str, NULL),
         LZ_ARG_POSITIONAL("script", "Lizard script file to execute", "FILE", &script_path, true),
         LZ_ARG_END
     };
@@ -278,6 +376,8 @@ int main(int argc, char **argv) {
     args[9].num_choices = 3;
     args[10].choices = skink_choices;
     args[10].num_choices = 2;
+    args[11].choices = color_choices;
+    args[11].num_choices = 3;
 
     LzArgParser parser;
     lz_argparse_init(&parser, "lizard");
@@ -343,7 +443,7 @@ int main(int argc, char **argv) {
 
     if (dump_tokens_flag) {
         lz_argparse_free_result(&result);
-        return dump_tokens(script_path);
+        return dump_tokens(script_path, decide_color(color_str));
     }
 
     if (!has_lz_extension(script_path)) {
@@ -355,5 +455,5 @@ int main(int argc, char **argv) {
     return run_script(script_path, heap_stats, trace_memory,
                       has_max_heap, max_heap_bytes, has_fuel, fuel,
                       has_engine, engine, engine_stats, has_jit, jit,
-                      has_skink, skink);
+                      has_skink, skink, decide_color(color_str));
 }

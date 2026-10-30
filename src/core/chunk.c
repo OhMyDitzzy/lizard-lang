@@ -254,6 +254,8 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_JUMP_IF_SUPPLIED";
     case LZ_OP_ARRAY_EXTEND:
         return "OP_ARRAY_EXTEND";
+    case LZ_OP_SWAP:
+        return "OP_SWAP";
     default:
         return "OP_UNKNOWN";
     }
@@ -310,6 +312,7 @@ size_t lz_opcode_length(uint8_t opcode) {
     case LZ_OP_CLOSE_UPVALUE:
     case LZ_OP_GET_SELF:
     case LZ_OP_ARRAY_EXTEND:
+    case LZ_OP_SWAP:
         return 1;
     default:
         return 0;

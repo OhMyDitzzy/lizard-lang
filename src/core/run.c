@@ -637,6 +637,15 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         }
         break;
     }
+    case LZ_OP_SWAP:
+        if (vm->stack_count < 2) {
+            status = malformed(vm, "stack underflow");
+        } else {
+            LzValue top = vm->stack[vm->stack_count - 1];
+            vm->stack[vm->stack_count - 1] = vm->stack[vm->stack_count - 2];
+            vm->stack[vm->stack_count - 2] = top;
+        }
+        break;
     case LZ_OP_ARRAY_EXTEND:
         status = array_extend(vm);
         break;
@@ -739,6 +748,8 @@ LzStatus lz_vm_eval_with(LzVM *vm, const LzChunk *chunk, LzValue *result, LzExec
     size_t failed_at = 0;
     vm->error[0] = '\0';
     vm->error_offset = LZ_NO_OFFSET;
+    vm->native_depth = 0;
+    vm->trace_fixed = false;
     vm->heap.limit_hit = false;
 
     /* Frame 0 is the script itself: no closure, locals from the bottom of the stack. */
@@ -749,10 +760,13 @@ LzStatus lz_vm_eval_with(LzVM *vm, const LzChunk *chunk, LzValue *result, LzExec
     if (status != LZ_OK) {
         /* The failing instruction belongs to the frame that was on top when it failed. */
         const LzChunk *failing = vm->frame_count > 0 ? vm->frames[vm->frame_count - 1].chunk : chunk;
-        if (failed_at < failing->count) {
+        /* A failure inside a callback has already recorded its own offset. */
+        if (failed_at < failing->count && vm->error_offset == LZ_NO_OFFSET) {
             vm->error_offset = failing->offsets[failed_at];
         }
-        lz_vm_capture_trace(vm);
+        if (!vm->trace_fixed) {
+            lz_vm_capture_trace(vm);
+        }
     }
     if (status == LZ_OK && result != NULL) {
         if (vm->stack_count > 0) {

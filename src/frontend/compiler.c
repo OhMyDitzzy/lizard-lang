@@ -9,6 +9,8 @@
 #include "lizard/function.h"
 #include "lizard/lexer.h"
 #include "lizard/native.h"
+#include "lizard/report.h"
+#include "lizard/suggest.h"
 #include "lizard/type.h"
 
 #define LZ_MAX_SYMBOLS 512
@@ -116,6 +118,7 @@ typedef struct Parser {
     FuncState *fs;      /* innermost function being compiled */
     FuncSig *sigs;      /* every signature made so far */
     bool terminated;    /* the statement just compiled never falls through (return, ...) */
+    bool method_name;   /* the identifier being compiled follows a '.' (receiver.name(...)) */
 } Parser;
 
 typedef enum Precedence {
@@ -161,7 +164,8 @@ static Expr parse_precedence(Parser *parser, Precedence precedence);
 
 /* Diagnostics */
 
-static void record(Parser *parser, uint32_t offset, uint32_t length, const char *message) {
+static void record_full(Parser *parser, uint32_t offset, uint32_t length, const char *message,
+                        const char *label, const LzSuggestions *suggestions) {
     LzDiagnostics *diagnostics = parser->diagnostics;
     if (diagnostics->count >= LZ_MAX_DIAGNOSTICS) {
         diagnostics->dropped++;
@@ -171,6 +175,16 @@ static void record(Parser *parser, uint32_t offset, uint32_t length, const char 
     item->offset = offset;
     item->length = length;
     (void)snprintf(item->message, sizeof item->message, "%s", message);
+    item->label = label;
+    if (suggestions != NULL) {
+        item->suggestions = *suggestions;
+    } else {
+        item->suggestions.count = 0;
+    }
+}
+
+static void record(Parser *parser, uint32_t offset, uint32_t length, const char *message) {
+    record_full(parser, offset, length, message, NULL, NULL);
 }
 
 static void error_at(Parser *parser, const LzToken *token, const char *message) {
@@ -202,6 +216,21 @@ static void error_with_name(Parser *parser, const LzToken *token, const char *be
     token_text(parser, token, name, sizeof name);
     (void)snprintf(message, sizeof message, "%s%s%s", before, name, after);
     error_at(parser, token, message);
+}
+
+/* Like error_with_name, with a label under the name and "did you mean" candidates. */
+static void error_with_name_suggest(Parser *parser, const LzToken *token, const char *before,
+                                    const char *after, const char *label,
+                                    const LzSuggestions *suggestions) {
+    if (parser->panic) {
+        return;
+    }
+    char name[48];
+    char message[128];
+    token_text(parser, token, name, sizeof name);
+    (void)snprintf(message, sizeof message, "%s%s%s", before, name, after);
+    parser->panic = true;
+    record_full(parser, token->offset, token->length, message, label, suggestions);
 }
 
 static void fail(Parser *parser, LzStatus status) {
@@ -745,6 +774,88 @@ static const Alias *find_alias(const Parser *parser, const LzString *name) {
     return NULL;
 }
 
+/* Suggestions: names close to one the program used and that does not exist. */
+
+static void offer_table(LzSuggester *suggester, const LzTable *table, bool functions_only) {
+    for (size_t i = 0; i < table->capacity; i++) {
+        const LzTableEntry *entry = &table->entries[i];
+        if (entry->key == NULL) {
+            continue;
+        }
+        if (functions_only && (lz_kind_of(&entry->value) & LZ_KIND_FUNCTION) == 0) {
+            continue;
+        }
+        lz_suggester_offer(suggester, entry->key->data);
+    }
+}
+
+/*
+ * Everything a name could have meant here: the locals and functions in scope, then
+ * the globals and builtins of the VM. When the name was used as a call, only
+ * things that can hold a function are offered. Names an `import` will bring in
+ * become symbols or globals too, so they join this list without any change here.
+ */
+static LzSuggestions suggest_names(Parser *parser, const LzToken *token, bool functions_only) {
+    LzSuggester suggester;
+    lz_suggester_init(&suggester, parser->source->text + token->offset, token->length);
+    for (size_t i = parser->symbol_count; i > 0; i--) { /* innermost scope first */
+        const Symbol *symbol = &parser->symbols[i - 1];
+        if (functions_only && (lz_type_possible_kinds(&symbol->type) & LZ_KIND_FUNCTION) == 0) {
+            continue;
+        }
+        lz_suggester_offer(&suggester, symbol->name->data);
+    }
+    offer_table(&suggester, &parser->vm->globals, functions_only);
+    offer_table(&suggester, &parser->vm->builtins, functions_only);
+    if (parser->method_name) {
+        offer_table(&suggester, &parser->vm->methods, functions_only);
+    }
+    return suggester.found;
+}
+
+static const char *const BUILTIN_TYPE_NAMES[] = {"int",    "float", "bool", "string",
+                                                 "number", "any",   "never", "function"};
+
+static LzSuggestions suggest_types(Parser *parser, const LzToken *token) {
+    LzSuggester suggester;
+    lz_suggester_init(&suggester, parser->source->text + token->offset, token->length);
+    for (size_t i = 0; i < sizeof BUILTIN_TYPE_NAMES / sizeof BUILTIN_TYPE_NAMES[0]; i++) {
+        lz_suggester_offer(&suggester, BUILTIN_TYPE_NAMES[i]);
+    }
+    for (size_t i = parser->alias_count; i > 0; i--) {
+        lz_suggester_offer(&suggester, parser->aliases[i - 1].name->data);
+    }
+    return suggester.found;
+}
+
+static LzSuggestions suggest_parameters(const Parser *parser, const LzToken *token,
+                                        const FuncSig *sig) {
+    LzSuggester suggester;
+    lz_suggester_init(&suggester, parser->source->text + token->offset, token->length);
+    for (size_t i = 0; i < sig->param_count; i++) {
+        if (sig->names[i] != NULL) {
+            lz_suggester_offer(&suggester, sig->names[i]->data);
+        }
+    }
+    return suggester.found;
+}
+
+/* Remembers the candidates of an undefined name for the run-time error that may follow. */
+static void record_name_hint(Parser *parser, const LzToken *token, bool is_call,
+                             bool is_assignment, bool is_method) {
+    LzDiagnostics *diagnostics = parser->diagnostics;
+    if (diagnostics->hint_count >= LZ_MAX_NAME_HINTS) {
+        return;
+    }
+    LzNameHint *hint = &diagnostics->hints[diagnostics->hint_count++];
+    hint->offset = token->offset;
+    hint->length = token->length;
+    hint->is_call = is_call;
+    hint->is_assignment = is_assignment;
+    hint->is_method = is_method;
+    hint->suggestions = suggest_names(parser, token, is_call);
+}
+
 static LzType literal_type(const LzLiteral *literal) {
     LzType type = lz_type_of_kinds(0);
     (void)lz_type_add_literal(&type, literal);
@@ -775,7 +886,9 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
         }
         const Alias *alias = find_alias(parser, id);
         if (alias == NULL) {
-            error_with_name(parser, &token, "unknown type '", "'");
+            LzSuggestions close = suggest_types(parser, &token);
+            error_with_name_suggest(parser, &token, "unknown type '", "'", "not a known type",
+                                    &close);
             return false;
         }
         *out = alias->type;
@@ -1040,6 +1153,8 @@ static Expr variable(Parser *parser) {
          * program runs statement by statement and fails, with the source position, at the
          * statement that really uses a name that does not exist when it runs.
          */
+        record_name_hint(parser, &token, check(parser, LZ_TOKEN_LEFT_PAREN), false,
+                        parser->method_name);
         emit_named(parser, LZ_OP_GET_GLOBAL, name, token.offset);
         return any_expr();
     }
@@ -1166,6 +1281,7 @@ static Expr subscript(Parser *parser, Expr left) {
 
 static Expr binary(Parser *parser, Expr left);
 static Expr call(Parser *parser, Expr callee);
+static Expr dot_call(Parser *parser, Expr receiver);
 static Expr and_(Parser *parser, Expr left);
 static Expr or_(Parser *parser, Expr left);
 
@@ -1186,6 +1302,8 @@ static ParseRule rule_for(LzTokenType type) {
         return (ParseRule){grouping, call, PREC_CALL};
     case LZ_TOKEN_LEFT_BRACKET:
         return (ParseRule){array_literal, subscript, PREC_CALL};
+    case LZ_TOKEN_DOT:
+        return (ParseRule){NULL, dot_call, PREC_CALL};
     case LZ_TOKEN_FN:
         return (ParseRule){function_expression, NULL, PREC_NONE};
     case LZ_TOKEN_BANG:
@@ -1234,7 +1352,14 @@ static Expr parse_precedence(Parser *parser, Precedence precedence) {
     parser->nesting++;
     advance(parser);
     Expr left = prefix(parser);
-    while (parser->fatal == LZ_OK && precedence <= rule_for(parser->current.type).precedence) {
+    for (;;) {
+        /* A chain may continue on the next line:  xs\n  .filter(...)\n  .map(...) */
+        if (check(parser, LZ_TOKEN_NEWLINE) && next_token_type(parser) == LZ_TOKEN_DOT) {
+            advance(parser);
+        }
+        if (parser->fatal != LZ_OK || precedence > rule_for(parser->current.type).precedence) {
+            break;
+        }
         InfixFn infix = rule_for(parser->current.type).infix;
         advance(parser);
         left = infix(parser, left);
@@ -1464,16 +1589,21 @@ static Expr call_result(Expr callee) {
  * values stay on the stack after it:
  *     [callee] [array of positional arguments] [named values...]  OP_CALL_EX
  */
-static Expr call_special(Parser *parser, Expr callee, const LzToken *paren) {
+static Expr call_special(Parser *parser, Expr callee, const LzToken *paren, bool receiver) {
     uint32_t offset = paren->offset;
     const FuncSig *sig = callee.sig;
     emit_op_at(parser, LZ_OP_ARRAY_NEW, offset);
+    if (receiver) {
+        /* [callee][receiver][array] -> [callee][array][receiver] -> [callee][array] */
+        emit_op_at(parser, LZ_OP_SWAP, offset);
+        emit_op_at(parser, LZ_OP_ARRAY_PUSH, offset);
+    }
 
     LzBuffer names = {0};
     LzWriter names_out = lz_writer_from_buffer(&names);
     LzString *seen[LZ_MAX_ARGUMENTS];
     size_t named = 0;
-    size_t positional = 0;
+    size_t positional = receiver ? 1 : 0;
     bool spread = false;
 
     if (!check(parser, LZ_TOKEN_RIGHT_PAREN)) {
@@ -1512,7 +1642,10 @@ static Expr call_special(Parser *parser, Expr callee, const LzToken *paren) {
                         index++;
                     }
                     if (index == sig->param_count) {
-                        error_with_name(parser, &name_token, "unexpected named argument '", "'");
+                        LzSuggestions close = suggest_parameters(parser, &name_token, sig);
+                        error_with_name_suggest(parser, &name_token, "unexpected named argument '",
+                                                "'", "the function has no parameter with this name",
+                                                &close);
                     } else if (index < positional && !spread) {
                         error_with_name(parser, &name_token, "argument '", "' is already given by position");
                     }
@@ -1585,16 +1718,20 @@ static Expr call_special(Parser *parser, Expr callee, const LzToken *paren) {
     return call_result(callee);
 }
 
-static Expr call(Parser *parser, Expr callee) {
+/*
+ * receiver: a method call, `receiver.name(args)`. The receiver is already on the stack
+ * with the callee on top of it (see dot_call), so it counts as the first argument.
+ */
+static Expr call_args(Parser *parser, Expr callee, bool receiver) {
     LzToken paren = parser->previous;
     uint32_t offset = paren.offset;
-    unsigned count = 0;
+    unsigned count = receiver ? 1 : 0;
 
     if ((lz_type_possible_kinds(&callee.type) & LZ_KIND_FUNCTION) == 0) {
         error_types(parser, &paren, "cannot call a value of type ", &callee.type, "", NULL);
     }
     if (call_has_special_args(parser)) {
-        return call_special(parser, callee, &paren);
+        return call_special(parser, callee, &paren, receiver);
     }
 
     if (!check(parser, LZ_TOKEN_RIGHT_PAREN)) {
@@ -1617,6 +1754,53 @@ static Expr call(Parser *parser, Expr callee) {
     emit_op_at(parser, LZ_OP_CALL, offset);
     emit_byte_at(parser, (uint8_t)count, offset);
     return call_result(callee);
+}
+
+static Expr call(Parser *parser, Expr callee) {
+    return call_args(parser, callee, false);
+}
+
+/*
+ * receiver.name(args) is name(receiver, args): the callee is looked up like any other
+ * name (locals, functions of the script, builtins), pushed above the receiver, and the
+ * two are swapped so the call finds [callee][receiver][args...].
+ */
+static Expr dot_call(Parser *parser, Expr receiver) {
+    (void)receiver; /* its type will pick the method table once types have their own methods */
+    if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+        error_at_current(parser, "expected a method name after '.'");
+        return any_expr();
+    }
+    advance(parser);
+    LzToken name = parser->previous;
+    if (!check(parser, LZ_TOKEN_LEFT_PAREN)) {
+        error_at(parser, &name, "expected '(' after the method name (fields are not supported yet)");
+        return any_expr();
+    }
+
+    /*
+     * Your own functions and variables of that name win; then the methods of the kinds of
+     * value (one dispatcher per name, see builtin/method); then the other builtins.
+     */
+    LzString *interned = intern_token(parser, &name);
+    const LzValue *method = NULL;
+    if (interned != NULL && find_symbol(parser, interned) == NULL &&
+        lz_table_get(&parser->vm->globals, interned) == NULL) {
+        method = lz_table_get(&parser->vm->methods, interned);
+    }
+    Expr callee;
+    if (method != NULL) {
+        (void)emit_constant(parser, *method);
+        callee = expr_of(lz_type_of_kinds(LZ_KIND_FUNCTION));
+        callee.native = (const LzNative *)method->as.object;
+    } else {
+        parser->method_name = true;
+        callee = variable(parser);
+        parser->method_name = false;
+    }
+    emit_op_at(parser, LZ_OP_SWAP, name.offset);
+    advance(parser); /* the '(' */
+    return call_args(parser, callee, true);
 }
 
 static Expr and_(Parser *parser, Expr left) {
@@ -1843,6 +2027,7 @@ static void assignment_statement(Parser *parser) {
             error_with_name(parser, &name_token, "cannot assign to builtin '", "'");
         } else {
             /* Sequential execution: checked when the assignment runs (SET_GLOBAL). */
+            record_name_hint(parser, &name_token, false, true, false);
             emit_named(parser, LZ_OP_SET_GLOBAL, name, name_token.offset);
         }
     } else if (symbol->is_const || symbol->kind == SYMBOL_CONSTANT) {
@@ -2227,7 +2412,28 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
 
     /* Body: same scope as the parameters, so `let` cannot silently shadow one. */
     bool returns = false;
-    if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+    bool block_after_arrow = false;
+    if (check(parser, LZ_TOKEN_FAT_ARROW)) {
+        /* fn(x) => expression: the same as fn(x) { return expression } */
+        advance(parser);
+        uint32_t arrow = parser->previous.offset;
+        skip_newlines(parser);
+        if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            /* `=>` takes one expression; a block is the plain form. */
+            error_at_current(parser, "a block body is written without '=>': fn(x) { ... }");
+            block_after_arrow = true; /* still read as the body, so one mistake is one error */
+        } else {
+            LzToken start = parser->current;
+            Expr value = expression(parser);
+            if (sig->result_declared) {
+                check_flow(parser, &value.type, &sig->result, &start, arrow, LZ_OP_CHECK_RETURN,
+                           "return type mismatch: expected ");
+            }
+            emit_op_at(parser, LZ_OP_RETURN, arrow);
+            returns = true;
+        }
+    }
+    if (block_after_arrow || (!returns && check(parser, LZ_TOKEN_LEFT_BRACE))) {
         advance(parser);
         while (!check(parser, LZ_TOKEN_RIGHT_BRACE) && !check(parser, LZ_TOKEN_EOF) &&
                parser->fatal == LZ_OK) {
@@ -2235,8 +2441,8 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
             returns = returns || parser->terminated;
         }
         consume(parser, LZ_TOKEN_RIGHT_BRACE, "expected '}' after function body");
-    } else {
-        error_at_current(parser, "expected '{' before function body");
+    } else if (!returns) {
+        error_at_current(parser, "expected '{' or '=>' before function body");
     }
 
     LzToken close = parser->previous;
@@ -2528,6 +2734,7 @@ static LzStatus compile_into(Parser *parser) {
 LzStatus lz_compile(LzVM *vm, const LzSource *source, LzChunk *chunk, LzDiagnostics *diagnostics) {
     diagnostics->count = 0;
     diagnostics->dropped = 0;
+    diagnostics->hint_count = 0;
 
     Parser *parser = calloc(1, sizeof *parser);
     if (parser == NULL) {
@@ -2567,4 +2774,30 @@ void lz_diagnostics_write(const LzDiagnostics *diagnostics, const LzSource *sour
         (void)snprintf(line, sizeof line, "... and %zu more error(s)\n", diagnostics->dropped);
         (void)lz_writer_write_cstr(out, line);
     }
+}
+
+const LzNameHint *lz_diagnostics_find_hint(const LzDiagnostics *diagnostics, uint32_t offset) {
+    for (size_t i = 0; i < diagnostics->hint_count; i++) {
+        if (diagnostics->hints[i].offset == offset) {
+            return &diagnostics->hints[i];
+        }
+    }
+    return NULL;
+}
+
+void lz_diagnostics_report(const LzDiagnostics *diagnostics, const LzSource *source, bool color,
+                           const LzWriter *out) {
+    for (size_t i = 0; i < diagnostics->count; i++) {
+        const LzDiagnostic *item = &diagnostics->items[i];
+        LzReport report = {0};
+        report.severity = "error";
+        report.message = item->message;
+        report.offset = item->offset;
+        report.length = item->length;
+        report.label = item->label;
+        report.suggestions = &item->suggestions;
+        lz_report_write(source, &report, color, out);
+    }
+    lz_report_write_summary(diagnostics->count + diagnostics->dropped, diagnostics->dropped, color,
+                            out);
 }

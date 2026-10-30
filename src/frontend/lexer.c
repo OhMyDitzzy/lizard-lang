@@ -483,6 +483,9 @@ LzToken lz_lexer_next(LzLexer *lexer) {
     case '!':
         return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_BANG_EQUAL : LZ_TOKEN_BANG, start);
     case '=':
+        if (match(lexer, '>')) {
+            return make_token(lexer, LZ_TOKEN_FAT_ARROW, start);
+        }
         return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_EQUAL_EQUAL : LZ_TOKEN_EQUAL, start);
     case '<':
         return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_LESS_EQUAL : LZ_TOKEN_LESS, start);
@@ -591,6 +594,8 @@ const char *lz_token_type_name(LzTokenType type) {
         return "RETURN";
     case LZ_TOKEN_ARROW:
         return "ARROW";
+    case LZ_TOKEN_FAT_ARROW:
+        return "FAT_ARROW";
     }
     return "UNKNOWN";
 }

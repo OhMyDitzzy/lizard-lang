@@ -773,6 +773,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
              * replaces the callee and its arguments. On failure nothing is popped. */
             LzValue result = GE_NIL_INIT;
             SYNC_OUT();
+            vm->native_call_offset = ins->offset;
             status = lz_native_call(vm, (const LzNative *)callee_object, (int)argc, &stack[sp - argc], &result);
             if (status != LZ_OK) {
                 goto fail;

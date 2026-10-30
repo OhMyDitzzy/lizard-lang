@@ -148,6 +148,7 @@ LzStatus lz_vm_call(LzVM *vm, size_t argc, size_t resume_ip, uint32_t call_offse
     size_t callee_index = vm->stack_count - argc - 1;
     const LzValue *callee = &vm->stack[callee_index];
     if (is_native(callee)) {
+        vm->native_call_offset = call_offset;
         return call_native(vm, (const LzNative *)callee->as.object, argc);
     }
     if (!lz_value_is_closure(callee)) {
@@ -162,6 +163,67 @@ LzStatus lz_vm_call(LzVM *vm, size_t argc, size_t resume_ip, uint32_t call_offse
     status = push_frame(vm, closure, callee_index + 1, supplied_mask(argc), resume_ip, call_offset);
     *entered = status == LZ_OK;
     return status;
+}
+
+LzStatus lz_vm_call_value(LzVM *vm, const LzValue *callee, size_t argc, const LzValue *argv,
+                          LzValue *result) {
+    if (vm->native_depth >= LZ_NATIVE_DEPTH_MAX) {
+        return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
+                               "stack overflow: callbacks nested too deeply (limit %d)",
+                               LZ_NATIVE_DEPTH_MAX);
+    }
+    if (vm->frame_count == 0 || vm->stack_count + argc + 1 > LZ_STACK_MAX) {
+        return stack_overflow(vm);
+    }
+
+    /* Another callback may run between two calls of this native: put the call site back after. */
+    uint32_t call_site = vm->native_call_offset;
+    size_t base = vm->stack_count;
+    lz_value_retain(callee);
+    vm->stack[vm->stack_count++] = *callee;
+    for (size_t i = 0; i < argc; i++) {
+        LzValue arg = argv[i];
+        lz_value_retain(&arg);
+        vm->stack[vm->stack_count++] = arg;
+    }
+
+    size_t depth = vm->frame_count;
+    size_t resume = vm->frames[depth - 1].ip; /* the caller's own place is not changed */
+    bool entered = false;
+    vm->native_depth++;
+    LzStatus status = lz_vm_call(vm, argc, resume, call_site, &entered);
+    if (status == LZ_OK && entered) {
+        size_t failed_at = 0;
+        status = lz_vm_run_until(vm, depth, &failed_at);
+        if (status != LZ_OK && vm->error_offset == LZ_NO_OFFSET) {
+            /* The innermost failure wins; the engine would otherwise read this offset from the wrong chunk. */
+            const LzChunk *failing = vm->frames[vm->frame_count - 1].chunk;
+            if (failed_at < failing->count) {
+                vm->error_offset = failing->offsets[failed_at];
+            }
+        }
+    }
+    vm->native_depth--;
+    vm->native_call_offset = call_site;
+    if (status != LZ_OK) {
+        if (!vm->trace_fixed) {
+            /* Record the stack while the callback's frames still exist, then take them away:
+             * the engine that called the native expects the frame it ran in on top. */
+            lz_vm_capture_trace(vm);
+            vm->trace_fixed = true;
+        }
+        vm->frame_count = depth;
+        lz_vm_close_upvalues(vm, base);
+        while (vm->stack_count > base) {
+            drop_top(vm);
+        }
+        return status;
+    }
+    if (vm->stack_count != base + 1) {
+        return malformed(vm, "a callback left the stack unbalanced");
+    }
+    *result = vm->stack[--vm->stack_count]; /* the stack's reference moves to the caller */
+    return LZ_OK;
 }
 
 static void drop_values(LzVM *vm, LzValue *values, size_t count) {

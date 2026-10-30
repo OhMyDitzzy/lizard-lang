@@ -1,0 +1,22 @@
+# Short functions, methods and callbacks.
+
+let nums = [1, 2, 3, 4, 5, 6]
+
+println(nums.filter(fn(n) => n > 2))                  # [3, 4, 5, 6]
+println(nums.map(fn(n) => n * n))                     # [1, 4, 9, 16, 25, 36]
+println(nums.reduce(fn(acc, n) => acc + n, 0))        # 21
+println(nums.find(fn(n) => n > 3))                    # 4
+println(nums.any(fn(n) => n > 5), nums.all(fn(n) => n > 1))
+
+# Chains, also over several lines.
+let result = nums
+  .filter(fn(n) => n > 2)
+  .map(fn(n) => n * 10)
+println(result)
+
+# Any function is a callback, and any function can be called like a method.
+fn double(n) { return n * 2 }
+println(nums.map(double), 21.double())
+println(nums.map(string))
+
+nums.each(fn(n) => println("item", n))
