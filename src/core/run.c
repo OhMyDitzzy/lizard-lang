@@ -309,6 +309,21 @@ static LzStatus negate(LzVM *vm) {
     return LZ_OK;
 }
 
+static LzStatus bit_not(LzVM *vm) {
+    if (vm->stack_count < 1) {
+        return malformed(vm, "stack underflow");
+    }
+
+    LzValue result = lz_value_nil();
+    LzStatus status = lz_arith_bit_not(vm, &vm->stack[vm->stack_count - 1], &result);
+    if (status != LZ_OK) {
+        return status;
+    }
+    pop(vm);
+    vm->stack[vm->stack_count++] = result;
+    return LZ_OK;
+}
+
 /*
  * Runs the one instruction at byte offset *ip_io and advances it past the
  * instruction. It does no accounting (fuel, vm->instructions): the loop that
@@ -439,6 +454,11 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
     case LZ_OP_GREATER:
     case LZ_OP_LESS_EQUAL:
     case LZ_OP_GREATER_EQUAL:
+    case LZ_OP_BIT_AND:
+    case LZ_OP_BIT_OR:
+    case LZ_OP_BIT_XOR:
+    case LZ_OP_SHL:
+    case LZ_OP_SHR:
         status = binary_op(vm, (LzOpCode)opcode);
         break;
     case LZ_OP_GET_LOCAL: {
@@ -521,6 +541,9 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         break;
     case LZ_OP_NEGATE:
         status = negate(vm);
+        break;
+    case LZ_OP_BIT_NOT:
+        status = bit_not(vm);
         break;
     case LZ_OP_CHECK_TYPE: {
         uint16_t index;

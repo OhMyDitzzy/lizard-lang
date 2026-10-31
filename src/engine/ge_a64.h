@@ -252,6 +252,18 @@ static inline void lsrv_x(A64 *x, int rd, int rn, int rm) { /* rd = rn >> (rm & 
     a_w(x, 0x9AC02400u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd);
 }
 
+static inline void lslv_x(A64 *x, int rd, int rn, int rm) { /* rd = rn << (rm & 63) */
+    a_w(x, 0x9AC02000u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd);
+}
+
+static inline void asrv_x(A64 *x, int rd, int rn, int rm) { /* rd = rn >> (rm & 63), sign-filling */
+    a_w(x, 0x9AC02800u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd);
+}
+
+static inline void mvn_x(A64 *x, int rd, int rm) { /* rd = ~rm (orn rd, xzr, rm) */
+    a_w(x, 0xAA2003E0u | ((uint32_t)rm << 16) | (uint32_t)rd);
+}
+
 static inline void lsl_i(A64 *x, int rd, int rn, int s) {
     a_w(x, 0xD3400000u | ((uint32_t)((64 - s) & 63) << 16) | ((uint32_t)(63 - s) << 10) |
                ((uint32_t)rn << 5) | (uint32_t)rd);

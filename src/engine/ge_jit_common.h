@@ -265,6 +265,11 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
         case LZ_OP_DIVIDE:
         case LZ_OP_FLOOR_DIVIDE:
         case LZ_OP_MODULO:
+        case LZ_OP_BIT_AND:
+        case LZ_OP_BIT_OR:
+        case LZ_OP_BIT_XOR:
+        case LZ_OP_SHL:
+        case LZ_OP_SHR:
         case LZ_OP_EQUAL:
         case LZ_OP_LESS:
         case LZ_OP_GREATER:
@@ -280,6 +285,7 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
             ok = d >= 2; /* the depth does not change */
             break;
         case LZ_OP_NEGATE:
+        case LZ_OP_BIT_NOT:
         case LZ_OP_NOT:
         case LZ_OP_CHECK_TYPE:
         case LZ_OP_CHECK_RETURN:

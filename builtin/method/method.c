@@ -150,6 +150,11 @@ static const LzMethod methods[] = {
     {"pow", K_NUMBER, lz_method_pow, 1, 1, LZ_KINDS_NUMBER},
     {"min", K_NUMBER, lz_method_min, 1, 1, LZ_KINDS_NUMBER},
     {"max", K_NUMBER, lz_method_max, 1, 1, LZ_KINDS_NUMBER},
+
+    /* int only */
+    {"bit_count", LZ_KIND_INT, lz_method_bit_count, 0, 0, LZ_KIND_INT},
+    {"bit_length", LZ_KIND_INT, lz_method_bit_length, 0, 0, LZ_KIND_INT},
+    {"bit", LZ_KIND_INT, lz_method_bit, 1, 1, LZ_KIND_BOOL},
 };
 
 #define METHOD_COUNT (sizeof methods / sizeof methods[0])

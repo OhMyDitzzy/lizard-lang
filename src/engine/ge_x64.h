@@ -340,6 +340,18 @@ static inline void neg_r(X64 *x, int r) {
     x_mrr(x, 3, r);
 }
 
+static inline void not_r(X64 *x, int r) {
+    x_rex(x, 1, 0, r);
+    x_b(x, 0xF7);
+    x_mrr(x, 2, r);
+}
+
+static inline void shift_cl(X64 *x, int ext, int r) { /* shift r by cl; ext: 4 shl, 5 shr, 7 sar */
+    x_rex(x, 1, 0, r);
+    x_b(x, 0xD3);
+    x_mrr(x, ext, r);
+}
+
 static inline void idiv_r(X64 *x, int r) {
     x_rex(x, 1, 0, r);
     x_b(x, 0xF7);

@@ -21,4 +21,30 @@ LzStatus lz_arith_binary(LzVM *vm, LzOpCode op, const LzValue *left, const LzVal
 
 LzStatus lz_arith_negate(LzVM *vm, const LzValue *operand, LzValue *result);
 
+/* ~operand, for an int only. */
+LzStatus lz_arith_bit_not(LzVM *vm, const LzValue *operand, LzValue *result);
+
+/*
+ * The shift semantics, shared with the Gecko Engine so every engine agrees. The
+ * count must already be checked with lz_shift_count_ok. Both avoid undefined
+ * behavior in C: '<<' works on uint64_t and '>>' never shifts a negative value.
+ */
+static inline bool lz_shift_count_ok(int64_t count) {
+    return count >= 0 && count <= 63;
+}
+
+static inline int64_t lz_shift_left(int64_t value, int64_t count) {
+    return (int64_t)((uint64_t)value << (unsigned)count);
+}
+
+static inline int64_t lz_shift_right(int64_t value, int64_t count) {
+    return value >= 0 ? value >> count : ~(~value >> count);
+}
+
+/* The error for a shift count outside 0..63; always returns LZ_ERR_RUNTIME. */
+LzStatus lz_arith_shift_count_error(LzVM *vm, int64_t count);
+
+/* The error for a bitwise operand that is not an int (right is NULL for '~'). */
+LzStatus lz_arith_bit_type_error(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right);
+
 #endif

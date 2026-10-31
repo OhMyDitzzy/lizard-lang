@@ -57,7 +57,15 @@ typedef enum LzOpCode {
     LZ_OP_CHECK_RETURN,  /* u16 type: fail with LZ_ERR_TYPE unless the value about to be returned matches */
     LZ_OP_JUMP_IF_SUPPLIED, /* u16 parameter, u16 distance: skip forward if the caller supplied that argument */
     LZ_OP_ARRAY_EXTEND,  /* pop an array and append all its items to the array below it (which stays) */
-    LZ_OP_SWAP           /* exchange the two values on top (a method call puts its callee under the receiver) */
+    LZ_OP_SWAP,          /* exchange the two values on top (a method call puts its callee under the receiver) */
+
+    /* Bitwise operators (ints only). Appended last so the earlier opcodes keep their numbers. */
+    LZ_OP_BIT_AND,       /* pop b, pop a, push a & b */
+    LZ_OP_BIT_OR,        /* pop b, pop a, push a | b */
+    LZ_OP_BIT_XOR,       /* pop b, pop a, push a ^ b */
+    LZ_OP_BIT_NOT,       /* pop a, push ~a */
+    LZ_OP_SHL,           /* pop n, pop a, push a << n (0..63; bits shifted out are dropped) */
+    LZ_OP_SHR            /* pop n, pop a, push a >> n (0..63; arithmetic shift) */
 } LzOpCode;
 
 #define LZ_CONSTANTS_MAX 65536

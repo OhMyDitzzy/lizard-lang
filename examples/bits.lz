@@ -1,0 +1,46 @@
+# Bitwise operators: & | ^ ~ << >>, and the int methods bit_count, bit_length, bit.
+
+# Flags: one bit each.
+const READ = 1 << 0
+const WRITE = 1 << 1
+const EXEC = 1 << 2
+
+let perms = READ | EXEC
+println(perms & WRITE == WRITE)      # false
+println(perms & EXEC == EXEC)        # true: & binds tighter than ==
+perms = perms | WRITE                # grant
+perms = perms & ~EXEC                # revoke
+println(perms)                       # 3
+
+# Masking and shifting.
+let color = 0xFF8040
+println((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF)   # 255 128 64
+println(0xF0 ^ 0xFF, ~0, -8 >> 1)                                   # 15 -1 -4
+
+# Odd or even, and powers of two.
+let n = 12
+println(n & 1 == 1, 13 & 1 == 1)                                     # false true
+println(n & (n - 1) == 0, 16 & 15 == 0)                              # false true
+
+# << drops bits that fall off the left end (no overflow error).
+println(1 << 63, 3 << 63)
+
+# Hex and binary output with the format specs.
+let x = 0b1010_0101
+println($"{x} {x:#b} {x:#x} {x:#010b}")
+println($"{x & 0xF0:#b} {x | 0x0F:#b} {x ^ 0xFF:#b} {x << 2:#b} {x >> 4:#b}")
+
+# Methods on int.
+println(x.bit_count(), x.bit_length(), x.bit(0), x.bit(1))   # 4 8 true false
+println((-1).bit_count(), (-256).bit_length(), 0.bit_length())  # 64 9 0
+
+# Collect the set bits.
+let bits = []
+let i = 0
+while i < 8 {
+    if x.bit(i) {
+        bits.push(i)
+    }
+    i = i + 1
+}
+println(bits)                        # [0, 2, 5, 7]

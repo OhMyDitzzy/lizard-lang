@@ -899,6 +899,51 @@ static void emit_plain_arith(Cx *c, uint8_t sub) {
     end_plain(c, 1);
 }
 
+/*
+ * A plain bitwise instruction on the two ints on top of the stack. Anything else (a value
+ * that is not an int, a shift count outside 0..63) goes back to the interpreter, which
+ * reports the error with the source position. Nothing is written before the last check.
+ */
+static void emit_plain_bitwise(Cx *c, uint8_t sub) {
+    int bail = bail_label(c);
+    int32_t at = 16 * (c->d - 2);
+    alu_mi(X, 0, ALU_CMP, R14, at, LZ_VAL_INT);
+    jcc_l(X, CC_NE, bail);
+    alu_mi(X, 0, ALU_CMP, R14, at + 16, LZ_VAL_INT);
+    jcc_l(X, CC_NE, bail);
+    mov_rm(X, RAX, R14, at + 8);
+    mov_rm(X, RCX, R14, at + 24);
+    switch (sub) {
+    case LZ_OP_BIT_AND:
+        alu_rr(X, ALU_AND, RAX, RCX);
+        break;
+    case LZ_OP_BIT_OR:
+        alu_rr(X, ALU_OR, RAX, RCX);
+        break;
+    case LZ_OP_BIT_XOR:
+        alu_rr(X, ALU_XOR, RAX, RCX);
+        break;
+    default: /* SHL, SHR: one unsigned compare rejects both a negative count and one above 63 */
+        alu_ri(X, 1, ALU_CMP, RCX, 63);
+        jcc_l(X, CC_A, bail);
+        shift_cl(X, sub == LZ_OP_SHL ? 4 : 7, RAX);
+        break;
+    }
+    mov_mr(X, R14, at + 8, RAX); /* the left slot is already an int */
+    end_plain(c, 1);
+}
+
+static void emit_bit_not(Cx *c) {
+    int bail = bail_label(c);
+    int32_t at = 16 * (c->d - 1);
+    alu_mi(X, 0, ALU_CMP, R14, at, LZ_VAL_INT);
+    jcc_l(X, CC_NE, bail);
+    mov_rm(X, RAX, R14, at + 8);
+    not_r(X, RAX);
+    mov_mr(X, R14, at + 8, RAX);
+    end_plain(c, 1);
+}
+
 /* A plain comparison: leaves a bool where the left operand was. */
 static void emit_plain_compare(Cx *c, uint8_t sub) {
     int bail = bail_label(c);
@@ -1512,6 +1557,16 @@ static void emit_instruction(Cx *c) {
         break;
     case LZ_OP_NEGATE:
         emit_negate(c);
+        break;
+    case LZ_OP_BIT_AND:
+    case LZ_OP_BIT_OR:
+    case LZ_OP_BIT_XOR:
+    case LZ_OP_SHL:
+    case LZ_OP_SHR:
+        emit_plain_bitwise(c, plain);
+        break;
+    case LZ_OP_BIT_NOT:
+        emit_bit_not(c);
         break;
     case LZ_OP_JUMP:
     case LZ_OP_LOOP:

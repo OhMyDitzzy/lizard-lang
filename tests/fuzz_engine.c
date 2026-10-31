@@ -111,7 +111,7 @@ static void gen_index(Gen *g, int array, int depth) {
 
 static void gen_expr(Gen *g, int depth) {
     static const char *const ops[] = {"+", "-", "*", "+", "-", "*", "/", "//", "%"};
-    unsigned r = below(depth <= 0 ? 4 : 12);
+    unsigned r = below(depth <= 0 ? 4 : 14);
     switch (r) {
     case 0:
     case 1:
@@ -157,6 +157,28 @@ static void gen_expr(Gen *g, int depth) {
             gen_index(g, (int)below((unsigned)g->arrays), depth);
         } else {
             gen_literal(g);
+        }
+        break;
+    case 12: { /* bitwise: int() keeps the operands ints, so the engines must agree on the values */
+        static const char *const bits[] = {"&", "|", "^"};
+        emit(g, "(int(");
+        gen_expr(g, depth - 1);
+        emit(g, ") %s int(", bits[below(3)]);
+        gen_expr(g, depth - 1);
+        emit(g, "))");
+        break;
+    }
+    case 13: /* shifts, with the count masked into 0..63, and ~ */
+        if (below(3) == 0) {
+            emit(g, "(~int(");
+            gen_expr(g, depth - 1);
+            emit(g, "))");
+        } else {
+            emit(g, "(int(");
+            gen_expr(g, depth - 1);
+            emit(g, ") %s (int(", below(2) == 0 ? "<<" : ">>");
+            gen_expr(g, depth - 1);
+            emit(g, ") & 63))");
         }
         break;
     default:

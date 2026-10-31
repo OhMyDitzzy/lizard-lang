@@ -101,6 +101,46 @@ if not (i equal 2) and i not equal 3 { ... }
 
 `not`, `equal` and `and`/`or` are keywords, so they cannot be used as names.
 
+Bitwise operators work on `int` only and always give an `int` (64-bit two's complement):
+`a & b`, `a | b`, `a ^ b`, `~a`, `a << n`, `a >> n`. They have no word forms.
+
+**Precedence**, from the strongest to the weakest. Binary operators are left-associative, and
+a newline after one is ignored.
+
+| Level | Operators |
+| --- | --- |
+| unary | `-` `!` `~` (and `not`) |
+| multiplicative | `*` `/` `//` `%` |
+| additive | `+` `-` |
+| shift | `<<` `>>` |
+| bitwise and | `&` |
+| bitwise xor | `^` |
+| bitwise or | `\|` |
+| comparison | `<` `<=` `>` `>=` |
+| equality | `==` `!=` |
+| logical and | `and` `&&` |
+| logical or | `or` `\|\|` |
+
+So `flags & 4 == 4` means `(flags & 4) == 4` (unlike C), and `1 + 2 << 3` is `24`.
+
+```
+let flags = 0b1010_0101
+println(flags & 0xF0, flags | 1, flags ^ 0xFF, ~flags)    # 160 165 90 -166
+println(1 << 4, -8 >> 1, n & 1 == 1)                      # 16 -4 true when n is odd
+```
+
+- Anything that is not an int is an error: `operator '&' needs two ints, got float and int`.
+  For `bool` it adds a hint (`use 'and' for logic`). The error is found at compile time when the
+  static types rule it out, and when the program runs when the type is `any`.
+- A shift count must be in `0..63`, otherwise `shift count must be 0..63, got 64` at run time.
+- `>>` is an arithmetic shift (the sign is kept), and there is no `>>>`.
+- **`<<` never reports overflow.** It drops the bits that fall off the left end, so
+  `1 << 63` is `-9223372036854775808` and `3 << 63` is the same. This is the one exception to
+  the rule that integer overflow is an error (`+`, `-`, `*` still fail on overflow).
+- **`^` is XOR, not a power.** `2 ^ 3` is `1`. For powers use `2.pow(3)`.
+- In a type, `|` is still a union (`let x: int | string = a | b` works: the first is a type, the
+  second an expression).
+
 ### Strings
 
 One literal form covers plain, raw, multi-line and template strings: `[$][r]` + quotes.
@@ -199,6 +239,7 @@ Strings, numbers and arrays have methods of their own. They are called like the 
 | string | `to_upper()`, `to_lower()`, `trim()`, `trim_start()`, `trim_end()`, `split(sep)`, `contains(s)`, `starts_with(s)`, `ends_with(s)`, `replace(old, new)`, `repeat(n)`, `index_of(s)`, `chars()`, `slice(from, to)`, `is_empty()` |
 | array | `first()`, `last()` (`nil` when empty), `is_empty()`, and the functions above (`xs.len()`, `xs.contains(v)`, `xs.join(sep)`, ...) |
 | int, float | `abs()`, `floor()`, `ceil()`, `round()`, `sqrt()`, `pow(n)`, `min(other)`, `max(other)` |
+| int | `bit_count()` (1 bits in the 64-bit form, so `(-1).bit_count()` is 64), `bit_length()` (bits the magnitude needs, `0` gives 0), `bit(n)` (is bit `n`, 0..63, set) |
 
 ```
 "  Hello, Lizard ".trim().to_lower()      # "hello, lizard"

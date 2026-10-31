@@ -28,6 +28,11 @@ typedef enum LzTokenType {
     LZ_TOKEN_SLASH_SLASH,
     LZ_TOKEN_PERCENT,
     LZ_TOKEN_PIPE,
+    LZ_TOKEN_AMPERSAND,       /* & */
+    LZ_TOKEN_CARET,           /* ^ */
+    LZ_TOKEN_TILDE,           /* ~ */
+    LZ_TOKEN_LESS_LESS,       /* << */
+    LZ_TOKEN_GREATER_GREATER, /* >> */
     LZ_TOKEN_QUESTION,
     LZ_TOKEN_BANG,
     LZ_TOKEN_BANG_EQUAL,

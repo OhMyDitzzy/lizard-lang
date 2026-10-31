@@ -212,8 +212,94 @@ static LzStatus float_arith(LzVM *vm, LzOpCode op, double a, double b, LzValue *
     }
 }
 
+static const char *bit_symbol(LzOpCode op) {
+    switch (op) {
+    case LZ_OP_BIT_AND:
+        return "&";
+    case LZ_OP_BIT_OR:
+        return "|";
+    case LZ_OP_BIT_XOR:
+        return "^";
+    case LZ_OP_BIT_NOT:
+        return "~";
+    case LZ_OP_SHL:
+        return "<<";
+    default:
+        return ">>";
+    }
+}
+
+LzStatus lz_arith_bit_type_error(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right) {
+    const char *symbol = bit_symbol(op);
+    if (right == NULL) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operator '%s' needs an int, got %s", symbol,
+                               lz_kind_name(lz_kind_of(left)));
+    }
+    const char *hint = "";
+    if (left->type == LZ_VAL_BOOL || right->type == LZ_VAL_BOOL) {
+        hint = op == LZ_OP_BIT_AND ? " (use 'and' for logic)"
+               : op == LZ_OP_BIT_OR ? " (use 'or' for logic)"
+                                    : "";
+    }
+    return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operator '%s' needs two ints, got %s and %s%s",
+                           symbol, lz_kind_name(lz_kind_of(left)), lz_kind_name(lz_kind_of(right)),
+                           hint);
+}
+
+LzStatus lz_arith_shift_count_error(LzVM *vm, int64_t count) {
+    return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "shift count must be 0..63, got %lld",
+                           (long long)count);
+}
+
+static LzStatus bitwise(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right,
+                        LzValue *result) {
+    if (left->type != LZ_VAL_INT || right->type != LZ_VAL_INT) {
+        return lz_arith_bit_type_error(vm, op, left, right);
+    }
+    int64_t a = left->as.integer;
+    int64_t b = right->as.integer;
+    switch (op) {
+    case LZ_OP_BIT_AND:
+        *result = lz_value_int(a & b);
+        return LZ_OK;
+    case LZ_OP_BIT_OR:
+        *result = lz_value_int(a | b);
+        return LZ_OK;
+    case LZ_OP_BIT_XOR:
+        *result = lz_value_int(a ^ b);
+        return LZ_OK;
+    case LZ_OP_SHL:
+    case LZ_OP_SHR:
+        if (!lz_shift_count_ok(b)) {
+            return lz_arith_shift_count_error(vm, b);
+        }
+        *result = lz_value_int(op == LZ_OP_SHL ? lz_shift_left(a, b) : lz_shift_right(a, b));
+        return LZ_OK;
+    default:
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "unknown arithmetic operator");
+    }
+}
+
+LzStatus lz_arith_bit_not(LzVM *vm, const LzValue *operand, LzValue *result) {
+    if (operand->type != LZ_VAL_INT) {
+        return lz_arith_bit_type_error(vm, LZ_OP_BIT_NOT, operand, NULL);
+    }
+    *result = lz_value_int(~operand->as.integer);
+    return LZ_OK;
+}
+
 LzStatus lz_arith_binary(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right,
                          LzValue *result) {
+    switch (op) {
+    case LZ_OP_BIT_AND:
+    case LZ_OP_BIT_OR:
+    case LZ_OP_BIT_XOR:
+    case LZ_OP_SHL:
+    case LZ_OP_SHR:
+        return bitwise(vm, op, left, right, result);
+    default:
+        break;
+    }
     if (op == LZ_OP_ADD && lz_value_is_array(left) && lz_value_is_array(right)) {
         return lz_array_concat(vm, lz_value_as_array(left), lz_value_as_array(right), result);
     }

@@ -98,6 +98,28 @@ static void test_operators_and_punctuation(void) {
     EXPECT("x: int? | nil", T(IDENTIFIER), T(COLON), T(IDENTIFIER), T(QUESTION), T(PIPE), T(NIL),
            T(NEWLINE));
     EXPECT("a && b || c", T(IDENTIFIER), T(AND), T(IDENTIFIER), T(OR), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a & b | c ^ ~d", T(IDENTIFIER), T(AMPERSAND), T(IDENTIFIER), T(PIPE), T(IDENTIFIER),
+           T(CARET), T(TILDE), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a << b >> c", T(IDENTIFIER), T(LESS_LESS), T(IDENTIFIER), T(GREATER_GREATER),
+           T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a<<1>>2", T(IDENTIFIER), T(LESS_LESS), T(INTEGER), T(GREATER_GREATER), T(INTEGER),
+           T(NEWLINE));
+    /* The two-character operators still win over the new ones, and the lexer is greedy. */
+    EXPECT("a && b & c", T(IDENTIFIER), T(AND), T(IDENTIFIER), T(AMPERSAND), T(IDENTIFIER),
+           T(NEWLINE));
+    EXPECT("a&&&b", T(IDENTIFIER), T(AND), T(AMPERSAND), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a ||| b", T(IDENTIFIER), T(OR), T(PIPE), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a <= b >= c < d > e", T(IDENTIFIER), T(LESS_EQUAL), T(IDENTIFIER), T(GREATER_EQUAL),
+           T(IDENTIFIER), T(LESS), T(IDENTIFIER), T(GREATER), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a <<= b", T(IDENTIFIER), T(LESS_LESS), T(EQUAL), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a >>> b", T(IDENTIFIER), T(GREATER_GREATER), T(GREATER), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("f(x) => ~x -> y", T(IDENTIFIER), T(LEFT_PAREN), T(IDENTIFIER), T(RIGHT_PAREN),
+           T(FAT_ARROW), T(TILDE), T(IDENTIFIER), T(ARROW), T(IDENTIFIER), T(NEWLINE));
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_AMPERSAND), "AMPERSAND") == 0);
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_CARET), "CARET") == 0);
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_TILDE), "TILDE") == 0);
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_LESS_LESS), "LESS_LESS") == 0);
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_GREATER_GREATER), "GREATER_GREATER") == 0);
     EXPECT("not a", T(BANG), T(IDENTIFIER), T(NEWLINE));
     EXPECT("a equal b", T(IDENTIFIER), T(EQUAL_EQUAL), T(IDENTIFIER), T(NEWLINE));
     EXPECT("a not equal b", T(IDENTIFIER), T(BANG_EQUAL), T(IDENTIFIER), T(NEWLINE));

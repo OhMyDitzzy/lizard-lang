@@ -19,7 +19,7 @@ static uint32_t below(uint32_t limit) {
     return (uint32_t)(next_random() % limit);
 }
 
-static const char alphabet[] = "abz_019 .eExXbBoO+-*/%()[]{}<>=!,:;#\"'\\\n\r\t@{}uU";
+static const char alphabet[] = "abz_019 .eExXbBoO+-*/%()[]{}<>=!,:;#&|^~\"'\\\n\r\t@{}uU";
 
 static void run_one(void) {
     char text[160];

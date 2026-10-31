@@ -256,6 +256,18 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_ARRAY_EXTEND";
     case LZ_OP_SWAP:
         return "OP_SWAP";
+    case LZ_OP_BIT_AND:
+        return "OP_BIT_AND";
+    case LZ_OP_BIT_OR:
+        return "OP_BIT_OR";
+    case LZ_OP_BIT_XOR:
+        return "OP_BIT_XOR";
+    case LZ_OP_BIT_NOT:
+        return "OP_BIT_NOT";
+    case LZ_OP_SHL:
+        return "OP_SHL";
+    case LZ_OP_SHR:
+        return "OP_SHR";
     default:
         return "OP_UNKNOWN";
     }
@@ -313,6 +325,12 @@ size_t lz_opcode_length(uint8_t opcode) {
     case LZ_OP_GET_SELF:
     case LZ_OP_ARRAY_EXTEND:
     case LZ_OP_SWAP:
+    case LZ_OP_BIT_AND:
+    case LZ_OP_BIT_OR:
+    case LZ_OP_BIT_XOR:
+    case LZ_OP_BIT_NOT:
+    case LZ_OP_SHL:
+    case LZ_OP_SHR:
         return 1;
     default:
         return 0;

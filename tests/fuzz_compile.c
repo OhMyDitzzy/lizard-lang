@@ -30,7 +30,7 @@ static bool discard(void *ctx, const char *data, size_t length) {
 static const char *const words[] = {
     "let", "const", "if", "else", "while", "and", "or", "true", "false", "nil", "x", "y", "z",
     "print", "println", "1", "2", "0", "3.5", "\"s\"", "\"a\\n\"", "+", "-", "*", "/", "//", "%",
-    "==", "!=", "<", "<=", ">", ">=", "!", "=", "(", ")", "{", "}", ",", ";", "\n", "\n",
+    "==", "!=", "&", "^", "~", "<<", ">>", "x & 3 | 4 ^ ~z << 1 >> 2", "<", "<=", ">", ">=", "!", "=", "(", ")", "{", "}", ",", ";", "\n", "\n",
     "#c\n", "@", "12abc", "\"open", "x = x + 1", "let x = 1", "const K = 2", "{ let y = x }",
     "if x { }", "while x < 3 { x = x + 1 }", ":", "|", "?", "int", "string", "any", "type",
     "type T = int | nil", "let x: int? = nil", "let y: \"a\" | 1 = 1", "let z: T = nil",

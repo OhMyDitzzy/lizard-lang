@@ -56,5 +56,8 @@ LzStatus lz_method_sqrt(LzVM *vm, int argc, const LzValue *argv, LzValue *result
 LzStatus lz_method_pow(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 LzStatus lz_method_min(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 LzStatus lz_method_max(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_bit_count(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_bit_length(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_bit(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 
 #endif

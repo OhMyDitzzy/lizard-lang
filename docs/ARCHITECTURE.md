@@ -316,7 +316,11 @@ folds is checked against its exact value at compile time.
 
 **Static rules.** `int op int` is `int`, anything with a `float` is `float`,
 `/` is always `float`, `"a" + "b"` is `string`, comparisons and `!` are `bool`.
-An operator whose operands can never work (`"a" - 1`, `1 + "a"`, `-"x"`,
+The bitwise operators (`& | ^ ~ << >>`) take only ints and give an `int`; their six opcodes
+(`BIT_AND` ... `SHR`) were added after `SWAP` so older opcode numbers did not move. `<<` drops
+the bits it shifts out (no overflow error), a shift count outside 0..63 is a run-time error, and
+the same helpers in `arith.h` serve the reference interpreter, the Gecko Engine and the JIT
+slow paths. An operator whose operands can never work (`"a" - 1`, `1 + "a"`, `-"x"`,
 `nil < 1`) is a compile error, and so is calling a value that can never be a
 function. When the compiler cannot tell (an `any` operand) it does not guess:
 the operation is still checked when it runs.

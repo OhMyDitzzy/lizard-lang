@@ -441,10 +441,11 @@ LzToken lz_lexer_next(LzLexer *lexer) {
     case '|':
         return make_token(lexer, match(lexer, '|') ? LZ_TOKEN_OR : LZ_TOKEN_PIPE, start);
     case '&':
-        if (match(lexer, '&')) {
-            return make_token(lexer, LZ_TOKEN_AND, start);
-        }
-        return make_error(lexer, start, "unexpected character '&' (write '&&' or 'and')");
+        return make_token(lexer, match(lexer, '&') ? LZ_TOKEN_AND : LZ_TOKEN_AMPERSAND, start);
+    case '^':
+        return make_token(lexer, LZ_TOKEN_CARET, start);
+    case '~':
+        return make_token(lexer, LZ_TOKEN_TILDE, start);
     case '?':
         return make_token(lexer, LZ_TOKEN_QUESTION, start);
     case '/':
@@ -457,8 +458,14 @@ LzToken lz_lexer_next(LzLexer *lexer) {
         }
         return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_EQUAL_EQUAL : LZ_TOKEN_EQUAL, start);
     case '<':
+        if (match(lexer, '<')) {
+            return make_token(lexer, LZ_TOKEN_LESS_LESS, start);
+        }
         return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_LESS_EQUAL : LZ_TOKEN_LESS, start);
     case '>':
+        if (match(lexer, '>')) {
+            return make_token(lexer, LZ_TOKEN_GREATER_GREATER, start);
+        }
         return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_GREATER_EQUAL : LZ_TOKEN_GREATER,
                           start);
     default:
@@ -519,6 +526,16 @@ const char *lz_token_type_name(LzTokenType type) {
         return "PERCENT";
     case LZ_TOKEN_PIPE:
         return "PIPE";
+    case LZ_TOKEN_AMPERSAND:
+        return "AMPERSAND";
+    case LZ_TOKEN_CARET:
+        return "CARET";
+    case LZ_TOKEN_TILDE:
+        return "TILDE";
+    case LZ_TOKEN_LESS_LESS:
+        return "LESS_LESS";
+    case LZ_TOKEN_GREATER_GREATER:
+        return "GREATER_GREATER";
     case LZ_TOKEN_QUESTION:
         return "QUESTION";
     case LZ_TOKEN_BANG:

@@ -129,6 +129,10 @@ typedef enum Precedence {
     PREC_AND,
     PREC_EQUALITY,
     PREC_COMPARISON,
+    PREC_BIT_OR,  /* | */
+    PREC_BIT_XOR, /* ^ */
+    PREC_BIT_AND, /* & */
+    PREC_SHIFT,   /* << >> */
     PREC_TERM,
     PREC_FACTOR,
     PREC_UNARY,
@@ -1389,6 +1393,42 @@ static Expr variable(Parser *parser) {
     return expr;
 }
 
+/* How a bitwise error names an operand: the same kind names the run-time error uses. */
+static void describe_bit_operand(const LzType *type, char *out, size_t size) {
+    LzType widened = lz_type_widen(type);
+    uint16_t kinds = lz_type_possible_kinds(&widened);
+    if (kinds != 0 && (kinds & (kinds - 1)) == 0) {
+        (void)snprintf(out, size, "%s", lz_kind_name(kinds));
+    } else {
+        describe_type(&widened, out, size);
+    }
+}
+
+/* "operator '&' needs two ints, got float and int", the message lz_arith_binary gives at run time. */
+static void error_bitwise(Parser *parser, const LzToken *op, const LzType *left,
+                          const LzType *right) {
+    char symbol[16];
+    char first[64];
+    char second[64];
+    char message[256];
+    token_text(parser, op, symbol, sizeof symbol);
+    describe_bit_operand(left, first, sizeof first);
+    if (right == NULL) {
+        (void)snprintf(message, sizeof message, "operator '%s' needs an int, got %s", symbol, first);
+    } else {
+        describe_bit_operand(right, second, sizeof second);
+        const char *hint = "";
+        if ((lz_type_widen(left).kinds == LZ_KIND_BOOL || lz_type_widen(right).kinds == LZ_KIND_BOOL)) {
+            hint = op->type == LZ_TOKEN_AMPERSAND ? " (use 'and' for logic)"
+                   : op->type == LZ_TOKEN_PIPE    ? " (use 'or' for logic)"
+                                                  : "";
+        }
+        (void)snprintf(message, sizeof message, "operator '%s' needs two ints, got %s and %s%s",
+                       symbol, first, second, hint);
+    }
+    error_at(parser, op, message);
+}
+
 static Expr unary(Parser *parser) {
     LzToken op = parser->previous;
     if (op.type == LZ_TOKEN_MINUS && check(parser, LZ_TOKEN_INTEGER) &&
@@ -1400,6 +1440,13 @@ static Expr unary(Parser *parser) {
     }
 
     Expr operand = parse_precedence(parser, PREC_UNARY);
+    if (op.type == LZ_TOKEN_TILDE) {
+        emit_op_at(parser, LZ_OP_BIT_NOT, op.offset);
+        if ((lz_type_possible_kinds(&operand.type) & LZ_KIND_INT) == 0) {
+            error_bitwise(parser, &op, &operand.type, NULL);
+        }
+        return expr_of(lz_type_of_kinds(LZ_KIND_INT));
+    }
     emit_op_at(parser, op.type == LZ_TOKEN_BANG ? LZ_OP_NOT : LZ_OP_NEGATE, op.offset);
     if (op.type == LZ_TOKEN_BANG) {
         return expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
@@ -1528,7 +1575,17 @@ static ParseRule rule_for(LzTokenType type) {
     case LZ_TOKEN_FN:
         return (ParseRule){function_expression, NULL, PREC_NONE};
     case LZ_TOKEN_BANG:
+    case LZ_TOKEN_TILDE:
         return (ParseRule){unary, NULL, PREC_NONE};
+    case LZ_TOKEN_PIPE:
+        return (ParseRule){NULL, binary, PREC_BIT_OR};
+    case LZ_TOKEN_CARET:
+        return (ParseRule){NULL, binary, PREC_BIT_XOR};
+    case LZ_TOKEN_AMPERSAND:
+        return (ParseRule){NULL, binary, PREC_BIT_AND};
+    case LZ_TOKEN_LESS_LESS:
+    case LZ_TOKEN_GREATER_GREATER:
+        return (ParseRule){NULL, binary, PREC_SHIFT};
     case LZ_TOKEN_MINUS:
         return (ParseRule){unary, binary, PREC_TERM};
     case LZ_TOKEN_PLUS:
@@ -1668,6 +1725,23 @@ static Expr binary(Parser *parser, Expr left) {
     case LZ_TOKEN_PERCENT:
         emit_op_at(parser, LZ_OP_MODULO, op.offset);
         return arithmetic_result(parser, &op, &left, &right);
+    case LZ_TOKEN_AMPERSAND:
+    case LZ_TOKEN_PIPE:
+    case LZ_TOKEN_CARET:
+    case LZ_TOKEN_LESS_LESS:
+    case LZ_TOKEN_GREATER_GREATER: {
+        LzOpCode code = op.type == LZ_TOKEN_AMPERSAND ? LZ_OP_BIT_AND
+                        : op.type == LZ_TOKEN_PIPE    ? LZ_OP_BIT_OR
+                        : op.type == LZ_TOKEN_CARET   ? LZ_OP_BIT_XOR
+                        : op.type == LZ_TOKEN_LESS_LESS ? LZ_OP_SHL
+                                                        : LZ_OP_SHR;
+        emit_op_at(parser, code, op.offset);
+        if ((lz_type_possible_kinds(&left.type) & LZ_KIND_INT) == 0 ||
+            (lz_type_possible_kinds(&right.type) & LZ_KIND_INT) == 0) {
+            error_bitwise(parser, &op, &left.type, &right.type);
+        }
+        return expr_of(lz_type_of_kinds(LZ_KIND_INT));
+    }
     case LZ_TOKEN_EQUAL_EQUAL:
         emit_op_at(parser, LZ_OP_EQUAL, op.offset);
         return expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
@@ -2069,6 +2143,12 @@ static bool fragment_is_pure(const LzChunk *chunk, size_t start) {
         case LZ_OP_GREATER:
         case LZ_OP_GREATER_EQUAL:
         case LZ_OP_NOT:
+        case LZ_OP_BIT_AND:
+        case LZ_OP_BIT_OR:
+        case LZ_OP_BIT_XOR:
+        case LZ_OP_BIT_NOT:
+        case LZ_OP_SHL:
+        case LZ_OP_SHR:
             break;
         default:
             return false;

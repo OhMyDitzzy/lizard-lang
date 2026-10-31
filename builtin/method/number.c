@@ -173,3 +173,67 @@ LzStatus lz_method_max(LzVM *vm, int argc, const LzValue *argv, LzValue *result)
     (void)argc;
     return extreme(vm, "max", argv, true, result);
 }
+
+/* ---- bit methods (ints only) ---- */
+
+static LzStatus want_int(LzVM *vm, const char *name, const LzValue *value) {
+    if (value->type != LZ_VAL_INT) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "%s(): expected an int, got %s", name,
+                               lz_kind_name(lz_kind_of(value)));
+    }
+    return LZ_OK;
+}
+
+/* The number of 1 bits in the 64-bit two's complement form: -1 has 64. */
+LzStatus lz_method_bit_count(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
+    (void)argc;
+    LzStatus status = want_int(vm, "bit_count", &argv[0]);
+    if (status != LZ_OK) {
+        return status;
+    }
+    uint64_t bits = (uint64_t)argv[0].as.integer;
+    int64_t count = 0;
+    while (bits != 0) {
+        bits &= bits - 1;
+        count++;
+    }
+    *result = lz_value_int(count);
+    return LZ_OK;
+}
+
+/* The bits the magnitude needs: 0 -> 0, 255 -> 8, -256 -> 9, INT64_MIN -> 64. */
+LzStatus lz_method_bit_length(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
+    (void)argc;
+    LzStatus status = want_int(vm, "bit_length", &argv[0]);
+    if (status != LZ_OK) {
+        return status;
+    }
+    int64_t value = argv[0].as.integer;
+    uint64_t magnitude = value < 0 ? UINT64_C(0) - (uint64_t)value : (uint64_t)value;
+    int64_t length = 0;
+    while (magnitude != 0) {
+        magnitude >>= 1;
+        length++;
+    }
+    *result = lz_value_int(length);
+    return LZ_OK;
+}
+
+/* Is bit n set (0 is the least significant)? */
+LzStatus lz_method_bit(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
+    (void)argc;
+    LzStatus status = want_int(vm, "bit", &argv[0]);
+    if (status == LZ_OK) {
+        status = want_int(vm, "bit", &argv[1]);
+    }
+    if (status != LZ_OK) {
+        return status;
+    }
+    int64_t index = argv[1].as.integer;
+    if (index < 0 || index > 63) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "bit(): bit index must be 0..63, got %lld",
+                               (long long)index);
+    }
+    *result = lz_value_bool((((uint64_t)argv[0].as.integer >> index) & 1u) != 0);
+    return LZ_OK;
+}

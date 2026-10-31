@@ -3,6 +3,7 @@
 
 #include "ge_internal.h"
 #include "ge_jit.h"
+#include "lizard/arith.h"
 #include "lizard/array.h"
 #include "lizard/native.h"
 
@@ -251,6 +252,47 @@ GE_INLINE bool arith(uint8_t op, const LzValue *a, const LzValue *b, LzValue *ou
     }
     out->type = LZ_VAL_FLOAT;
     out->as.number = r;
+    return true;
+}
+
+/*
+ * `a op b` for the bitwise operators when both are ints and nothing can go wrong (a shift
+ * count outside 0..63 is the reference's error), false otherwise. Mirrors lz_arith_binary.
+ */
+GE_INLINE bool bitwise(uint8_t op, const LzValue *a, const LzValue *b, LzValue *out) {
+    if (a->type != LZ_VAL_INT || b->type != LZ_VAL_INT) {
+        return false; /* the reference reports the type error */
+    }
+    int64_t x = a->as.integer;
+    int64_t y = b->as.integer;
+    int64_t r;
+    switch (op) {
+    case LZ_OP_BIT_AND:
+        r = x & y;
+        break;
+    case LZ_OP_BIT_OR:
+        r = x | y;
+        break;
+    case LZ_OP_BIT_XOR:
+        r = x ^ y;
+        break;
+    case LZ_OP_SHL:
+        if (!lz_shift_count_ok(y)) {
+            return false;
+        }
+        r = lz_shift_left(x, y);
+        break;
+    case LZ_OP_SHR:
+        if (!lz_shift_count_ok(y)) {
+            return false;
+        }
+        r = lz_shift_right(x, y);
+        break;
+    default:
+        return false;
+    }
+    out->type = LZ_VAL_INT;
+    out->as.integer = r;
     return true;
 }
 
@@ -624,6 +666,33 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             ARITH_CASE(LZ_OP_DIVIDE)
             ARITH_CASE(LZ_OP_FLOOR_DIVIDE)
             ARITH_CASE(LZ_OP_MODULO)
+
+#define BITWISE_CASE(OPC)                                                                          \
+    case OPC: {                                                                                    \
+        TICK(1);                                                                                   \
+        LzValue out = GE_NIL_INIT;                                                                 \
+        if (GE_UNLIKELY(sp < 2 || !bitwise(OPC, &stack[sp - 2], &stack[sp - 1], &out))) {          \
+            goto run_plain;                                                                        \
+        }                                                                                          \
+        stack[sp - 2] = out;                                                                       \
+        sp--;                                                                                      \
+        pc++;                                                                                      \
+        break;                                                                                     \
+    }
+            BITWISE_CASE(LZ_OP_BIT_AND)
+            BITWISE_CASE(LZ_OP_BIT_OR)
+            BITWISE_CASE(LZ_OP_BIT_XOR)
+            BITWISE_CASE(LZ_OP_SHL)
+            BITWISE_CASE(LZ_OP_SHR)
+
+        case LZ_OP_BIT_NOT:
+            TICK(1);
+            if (GE_UNLIKELY(sp < 1 || stack[sp - 1].type != LZ_VAL_INT)) {
+                goto run_plain; /* not an int: the reference's error */
+            }
+            stack[sp - 1].as.integer = ~stack[sp - 1].as.integer;
+            pc++;
+            break;
 
 #define COMPARE_CASE(OPC)                                                                          \
     case OPC: {                                                                                    \
