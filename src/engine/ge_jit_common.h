@@ -284,6 +284,29 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
         case LZ_OP_SWAP:
             ok = d >= 2; /* the depth does not change */
             break;
+        case LZ_OP_INDEX_KEEP:
+            ok = d >= 2;
+            nd = d + 1; /* the array and the index stay, the item goes on top */
+            break;
+        case LZ_OP_ITER_LENGTH:
+            ok = d >= 1; /* the iterable is replaced by its length */
+            break;
+        case LZ_OP_ITER_NEXT:
+            ok = d >= 2;
+            nd = d + 1; /* the iterable and the offset stay, the item and the next offset go on top */
+            break;
+        case LZ_OP_RANGE_TEST:
+        case LZ_OP_RANGE_LAST:
+            ok = d >= 3;
+            nd = d - 2; /* the three ints become one */
+            break;
+        case LZ_OP_RANGE_NEXT:
+            ok = d >= 2;
+            nd = d - 1; /* the counter and the step become one */
+            break;
+        case LZ_OP_CLOSE_UPVALUE_KEEP:
+            ok = d >= 1; /* the depth does not change */
+            break;
         case LZ_OP_NEGATE:
         case LZ_OP_BIT_NOT:
         case LZ_OP_NOT:

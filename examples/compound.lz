@@ -1,0 +1,92 @@
+# Compound assignment: x op= v means x = x op v, for every operator the language has.
+# The variable is evaluated once, so the index of a[i] += v is computed only once.
+
+let x = 10
+x += 5
+println(x)          # 15
+x -= 3
+println(x)          # 12
+x *= 2
+println(x)          # 24
+x /= 4
+println(x)          # 6.0, / is always a float
+x //= 2
+println(x)          # 3.0
+x %= 2
+println(x)          # 1.0
+
+# The bitwise ones keep the value an int.
+let mask = 0b1100
+mask &= 0b1010
+println(mask)       # 8
+mask |= 0b0011
+println(mask)       # 11
+mask ^= 0b1111
+println(mask)       # 4
+mask <<= 3
+println(mask)       # 32
+mask >>= 2
+println(mask)       # 8
+
+# Strings append.
+let greeting = "hello"
+greeting += ", world"
+println(greeting)
+
+# Array items, including through a nested array. Negative indexes work too.
+let counts = [0, 0, 0, 0]
+let words = ["a", "b", "c", "a"]
+let i = 0
+while i < len(words) {
+  counts[i % 3] += 1
+  i += 1
+}
+println(counts)     # [2, 1, 1, 0]
+
+let grid = [[0, 0], [0, 0]]
+grid[1][0] += 7
+grid[-1][-1] += 1
+println(grid)       # [[0, 0], [7, 1]]
+
+# Locals, and a variable a closure captured.
+fn running_total(values) {
+  let total = 0
+  let i = 0
+  while i < len(values) {
+    total += values[i]
+    i += 1
+  }
+  return total
+}
+println(running_total([1, 2, 3, 4]))   # 10
+
+fn counter() {
+  let n = 0
+  fn bump(by) { n += by }
+  bump(2)
+  bump(5)
+  return n
+}
+println(counter())                     # 7
+
+# Accumulating a histogram: a map from letter to count, built with +=.
+let text = "mississippi".chars()
+let letters = []
+let seen = []
+let a = 0
+while a < len(text) {
+  let c = text[a]
+  let at = index_of(seen, c)
+  if at < 0 {
+    seen.push(c)
+    letters.push(0)
+    at = len(letters) - 1
+  }
+  letters[at] += 1
+  a += 1
+}
+let b = 0
+while b < len(seen) {
+  println(seen[b], letters[b])
+  b += 1
+}

@@ -111,7 +111,7 @@ static void run_one(void) {
 
     uint32_t length = below(96);
     for (uint32_t i = 0; i < length; i++) {
-        uint8_t byte = below(2) == 0 ? (uint8_t)below(LZ_OP_RETURN + 1) : (uint8_t)below(256);
+        uint8_t byte = below(2) == 0 ? (uint8_t)below(LZ_OP_CLOSE_UPVALUE_KEEP + 1) : (uint8_t)below(256);
         (void)lz_chunk_write(&chunk, byte, i / 4 + 1);
     }
 

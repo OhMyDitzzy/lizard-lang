@@ -207,7 +207,16 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_BIT_NOT:
     case LZ_OP_SHL:
     case LZ_OP_SHR:
+    case LZ_OP_INDEX_KEEP:
+    case LZ_OP_ITER_LENGTH:
+    case LZ_OP_ITER_NEXT:
+    case LZ_OP_RANGE_NEXT:
         return simple_instruction(lz_opcode_name(opcode), offset, out);
+    case LZ_OP_CLOSE_UPVALUE_KEEP:
+        return slot_instruction(chunk, offset, out);
+    case LZ_OP_RANGE_TEST:
+    case LZ_OP_RANGE_LAST:
+        return byte_instruction(chunk, offset, out);
     default:
         put(out, "unknown opcode %u\n", (unsigned)opcode);
         return offset + 1;

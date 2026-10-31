@@ -416,6 +416,33 @@ operators are in `compare.c`. A future compiler must not turn `a <= b` into
 `!(a > b)`: with NaN that gives the wrong answer, so `<=` and `>=` need
 their own opcodes (or a NaN-aware sequence). `!=` is safe as `!(a == b)`.
 
+**Compound assignment** (`x += v`, `a[i] <<= v`) is compiled, not interpreted: the target is
+read, the operator runs, and the same store instruction `=` uses writes the result back. So
+there is no new opcode for `x op= v`, and an `a[i] op= v` needs one only because `OP_INDEX`
+drops the array and the index before the item is on top. `OP_INDEX_KEEP` leaves both under
+the item (`[a][i] -> [a][i][item]`), which is exactly the stack `OP_SET_INDEX` reads.
+
+**`for` loops** are plain jumps, with hidden state in unnamed local slots that no name can
+reach (`slot_reserve` in the compiler). `for let i = 0; cond; step` needs no new opcode at
+all: the body ends with a `LOOP` to the step, the step ends with a `LOOP` to the condition,
+and `continue` jumps forward to the step. The two `in` forms do need opcodes, because the
+work per round must not allocate and must keep the stack at one depth so the JIT can compile
+the back edge:
+
+* `OP_ITER_LENGTH` (`[x] -> [len]`) and `OP_ITER_NEXT` (`[x][off] -> [x][off][item][next]`).
+  Strings step by code point, so no array of characters is built; the only allocation per
+  round is the one-character string itself. The length is re-read each round, which is what
+  makes a loop over an array the body grows walk the new items.
+* `OP_RANGE_TEST` (empty?), `OP_RANGE_LAST` (the last value it will visit) and `OP_RANGE_NEXT`
+  (counter + step). `RANGE_LAST` settles the range once, before the first round, so the loop
+  stops on `counter == last` and neither the counter nor the step ever overflows:
+  `0..=INT64_MAX` visits one value, and a step of `INT64_MAX` from the bottom of the int
+  range cannot wrap.
+* `OP_CLOSE_UPVALUE_KEEP <slot>` closes a captured loop variable at the end of its round
+  without popping it, so a closure keeps that round's value and the next round starts fresh.
+
+Every back edge — the end of the body and every `continue` — passes through the fuel check.
+
 Arithmetic lives in `src/core/arith.c` so `run.c` only dispatches. `OP_ADD`
 accepts two numbers or two strings. Concatenation allocates a new string, so
 it returns a new reference like any native. Float `//` and `%` use `fmod`, so

@@ -268,6 +268,20 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_SHL";
     case LZ_OP_SHR:
         return "OP_SHR";
+    case LZ_OP_INDEX_KEEP:
+        return "OP_INDEX_KEEP";
+    case LZ_OP_ITER_LENGTH:
+        return "OP_ITER_LENGTH";
+    case LZ_OP_ITER_NEXT:
+        return "OP_ITER_NEXT";
+    case LZ_OP_RANGE_TEST:
+        return "OP_RANGE_TEST";
+    case LZ_OP_RANGE_LAST:
+        return "OP_RANGE_LAST";
+    case LZ_OP_RANGE_NEXT:
+        return "OP_RANGE_NEXT";
+    case LZ_OP_CLOSE_UPVALUE_KEEP:
+        return "OP_CLOSE_UPVALUE_KEEP";
     default:
         return "OP_UNKNOWN";
     }
@@ -331,7 +345,16 @@ size_t lz_opcode_length(uint8_t opcode) {
     case LZ_OP_BIT_NOT:
     case LZ_OP_SHL:
     case LZ_OP_SHR:
+    case LZ_OP_INDEX_KEEP:
+    case LZ_OP_ITER_LENGTH:
+    case LZ_OP_ITER_NEXT:
+    case LZ_OP_RANGE_NEXT:
         return 1;
+    case LZ_OP_CLOSE_UPVALUE_KEEP:
+        return 3; /* the slot whose upvalue is closed */
+    case LZ_OP_RANGE_TEST:
+    case LZ_OP_RANGE_LAST:
+        return 2; /* the inclusive flag */
     default:
         return 0;
     }

@@ -111,7 +111,22 @@ static void test_operators_and_punctuation(void) {
     EXPECT("a ||| b", T(IDENTIFIER), T(OR), T(PIPE), T(IDENTIFIER), T(NEWLINE));
     EXPECT("a <= b >= c < d > e", T(IDENTIFIER), T(LESS_EQUAL), T(IDENTIFIER), T(GREATER_EQUAL),
            T(IDENTIFIER), T(LESS), T(IDENTIFIER), T(GREATER), T(IDENTIFIER), T(NEWLINE));
-    EXPECT("a <<= b", T(IDENTIFIER), T(LESS_LESS), T(EQUAL), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a <<= b", T(IDENTIFIER), T(LESS_LESS_EQUAL), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a += b -= c *= d /= e //= f %= g", T(IDENTIFIER), T(PLUS_EQUAL), T(IDENTIFIER),
+           T(MINUS_EQUAL), T(IDENTIFIER), T(STAR_EQUAL), T(IDENTIFIER), T(SLASH_EQUAL),
+           T(IDENTIFIER), T(SLASH_SLASH_EQUAL), T(IDENTIFIER), T(PERCENT_EQUAL), T(IDENTIFIER),
+           T(NEWLINE));
+    EXPECT("a &= b |= c ^= d >>= e", T(IDENTIFIER), T(AMPERSAND_EQUAL), T(IDENTIFIER),
+           T(PIPE_EQUAL), T(IDENTIFIER), T(CARET_EQUAL), T(IDENTIFIER),
+           T(GREATER_GREATER_EQUAL), T(IDENTIFIER), T(NEWLINE));
+    /* A compound operator is one token, and `==` still beats `=`. */
+    EXPECT("a += b == c", T(IDENTIFIER), T(PLUS_EQUAL), T(IDENTIFIER), T(EQUAL_EQUAL),
+           T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a != b", T(IDENTIFIER), T(BANG_EQUAL), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a === b", T(IDENTIFIER), T(EQUAL_EQUAL), T(EQUAL), T(IDENTIFIER), T(NEWLINE));
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_PLUS_EQUAL), "PLUS_EQUAL") == 0);
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_GREATER_GREATER_EQUAL), "GREATER_GREATER_EQUAL") ==
+             0);
     EXPECT("a >>> b", T(IDENTIFIER), T(GREATER_GREATER), T(GREATER), T(IDENTIFIER), T(NEWLINE));
     EXPECT("f(x) => ~x -> y", T(IDENTIFIER), T(LEFT_PAREN), T(IDENTIFIER), T(RIGHT_PAREN),
            T(FAT_ARROW), T(TILDE), T(IDENTIFIER), T(ARROW), T(IDENTIFIER), T(NEWLINE));
@@ -180,7 +195,10 @@ static void test_floats(void) {
     check_float("1e-999", 0.0);
     check_error("1e999", "out of range");
     EXPECT("1.foo", T(INTEGER), T(DOT), T(IDENTIFIER), T(NEWLINE));
-    EXPECT("1..2", T(INTEGER), T(DOT), T(DOT), T(INTEGER), T(NEWLINE));
+    EXPECT("1..2", T(INTEGER), T(DOT_DOT), T(INTEGER), T(NEWLINE));
+    EXPECT("0..=5", T(INTEGER), T(DOT_DOT_EQUAL), T(INTEGER), T(NEWLINE));
+    EXPECT("3.to_string()", T(INTEGER), T(DOT), T(IDENTIFIER), T(LEFT_PAREN), T(RIGHT_PAREN),
+           T(NEWLINE));
     EXPECT("1.5.2", T(FLOAT), T(DOT), T(INTEGER), T(NEWLINE));
     EXPECT("1._5", T(INTEGER), T(DOT), T(IDENTIFIER), T(NEWLINE));
     EXPECT(".5", T(DOT), T(INTEGER), T(NEWLINE));

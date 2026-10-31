@@ -160,6 +160,54 @@ static void test_globals_and_assignment(void) {
     check_output("let print = 1\nprintln(print)\n", "1\n");
 }
 
+static void test_compound_assignment(void) {
+    /* Every operator, on a global: `x op= v` is `x = x op v`. */
+    check_output("let x = 10\n"
+                 "x += 5\nprintln(x)\n"
+                 "x -= 3\nprintln(x)\n"
+                 "x *= 2\nprintln(x)\n"
+                 "x /= 4\nprintln(x)\n"
+                 "x //= 2\nprintln(x)\n"
+                 "x %= 2\nprintln(x)\n",
+                 "15\n12\n24\n6.0\n3.0\n1.0\n");
+    check_output("let x = 0b1100\n"
+                 "x &= 0b1010\nprintln(x)\n"
+                 "x |= 1\nprintln(x)\n"
+                 "x ^= 0b1111\nprintln(x)\n"
+                 "x <<= 2\nprintln(x)\n"
+                 "x >>= 1\nprintln(x)\n",
+                 "8\n9\n6\n24\n12\n");
+
+    /* Locals, upvalues and strings. */
+    check_output("fn f() { let n = 1\n n += 41\n return n }\nprintln(f())\n", "42\n");
+    check_output("fn outer() {\n"
+                 "  let total = 0\n"
+                 "  fn add(v) { total += v }\n"
+                 "  add(5)\n"
+                 "  add(7)\n"
+                 "  return total\n"
+                 "}\nprintln(outer())\n",
+                 "12\n");
+    check_output("let s = \"a\"\ns += \"b\"\nprintln(s)\n", "ab\n");
+
+    /* An array element: the array and the index are evaluated once. */
+    check_output("let xs = [1, 2, 3]\n"
+                 "xs[1] += 10\nprintln(xs)\n"
+                 "xs[0] *= 5\nprintln(xs)\n"
+                 "xs[-1] -= 1\nprintln(xs)\n",
+                 "[1, 12, 3]\n[5, 12, 3]\n[5, 12, 2]\n");
+    check_output("let xs = [[1], [2]]\nxs[0][0] += 9\nprintln(xs)\n", "[[10], [2]]\n");
+    check_output("let xs = [\"a\"]\nxs[0] += \"b\"\nprintln(xs)\n", "[\"ab\"]\n");
+
+    /* The value assigned is checked like `=` checks it. */
+    check_output("let n: int = 1\nn += 2\nprintln(n)\n", "3\n");
+    check_compile_error("let n: int = 1\nn += 0.5\n", "type mismatch: expected int, got float");
+    check_compile_error("const k = 1\nk += 1\n", "cannot assign to constant 'k'");
+    check_compile_error("push += 1\n", "cannot assign to builtin 'push'");
+    check_compile_error("let b: bool = true\nb &= 1\n", "needs two ints");
+    check_compile_error("1 += 2\n", "invalid assignment target");
+}
+
 static void test_blocks_and_locals(void) {
     check_output("let x = 1\n"
                  "{\n"
@@ -920,6 +968,7 @@ int main(void) {
     test_expressions();
     test_short_circuit();
     test_globals_and_assignment();
+    test_compound_assignment();
     test_blocks_and_locals();
     test_control_flow();
     test_fizzbuzz();

@@ -39,6 +39,10 @@ static const char *const words[] = {
     "x = \"s\"", "true", "-1", "never", "number", "(int | string)?",
     "[", "]", "[1, 2]", "x[0]", "x[0] = 1", "x[1:]", "x[:2]", "let x: int[] = []", "push", "len",
     "pop", "sort", "range(3)", "insert", "remove", "x + y", "[[]]", "let y: int[][] = [[1]]",
+    "for", "in", "by", "..", "..=", "for x in [1, 2] { }", "for i in 0..3 { }",
+    "for i, x in x { }", "for x: int in x { }", "for i in 0..=2 by -1 { }",
+    "for let i = 0; i < 3; i += 1 { }", "for ;; { break }", "for let i = 0, j = 2; i < j; i += 1, j -= 1 { }",
+    "for x in x { x = 1 }", "0..3", "[1, 2]..3",
 };
 
 static void run_one(void) {

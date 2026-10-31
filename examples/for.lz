@@ -1,0 +1,70 @@
+# for loops: `for x in ...` walks values, `for let ...; ...; ...` is the free form.
+
+# An array, with and without the index.
+let names = ["ada", "grace", "alan"]
+for name in names {
+    println("hello,", name)
+}
+for i, name in names {
+    println(i, name)
+}
+
+# A multiplication table.
+for i in 1..=5 {
+    let row = []
+    for j in 1..=5 {
+        row.push(i * j)
+    }
+    println(row)
+}
+
+# A string: one round per code point, not per byte.
+for ch in "héllo ✓" {
+    print(ch, "|")
+}
+println()
+
+# A countdown, and a range that counts by 3.
+for i in 10..0 by -1 {
+    print(i, " ")
+}
+println()
+for i in 0..10 by 3 {
+    print(i, " ")
+}
+println()
+
+# The index and the item together.
+for i, x in ["a", "b", "c"] {
+    println(i, x)
+}
+
+# The C-style form: doubling, two pointers, a typed counter.
+for let i = 1; i < 1000; i *= 2 {
+    print(i, " ")
+}
+println()
+for let i = 0, j = 5; i < j; i += 1, j -= 1 {
+    println(i, j)
+}
+for let k: int = 0; k < 3; k += 1 {
+    print(k)
+}
+println()
+for ;; {
+    println("once")
+    break
+}
+
+# The loop variable is fresh each round, so a closure made in the body keeps that round's value.
+let fns = []
+for let i = 0; i < 3; i += 1 {
+    push(fns, fn() { return i })
+}
+println(fns[0](), fns[1](), fns[2]())
+
+let caps = []
+for x in [7, 8] {
+    push(caps, fn() { return x })
+}
+println(caps[0](), caps[1]())

@@ -178,6 +178,239 @@ static LzStatus index_op(LzVM *vm) {
     return LZ_OK;
 }
 
+static bool text_at(const LzValue *value, const LzString **out) {
+    if (value->type != LZ_VAL_OBJECT || value->as.object->type != LZ_OBJ_STRING) {
+        return false;
+    }
+    *out = (const LzString *)value->as.object;
+    return true;
+}
+
+/* The length in bytes of the code point at data[at], or 1 for a byte that is not valid UTF-8. */
+static size_t code_point_length(const char *data, size_t length, size_t at) {
+    unsigned char lead = (unsigned char)data[at];
+    size_t size = lead < 0x80           ? 1
+                  : (lead >> 5) == 0x6  ? 2
+                  : (lead >> 4) == 0xE  ? 3
+                  : (lead >> 3) == 0x1E ? 4
+                                        : 1;
+    if (at + size > length) {
+        return 1;
+    }
+    for (size_t k = 1; k < size; k++) {
+        if (((unsigned char)data[at + k] & 0xC0) != 0x80) {
+            return 1;
+        }
+    }
+    return size;
+}
+
+static LzStatus iter_length_op(LzVM *vm) {
+    if (vm->stack_count == 0) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *value = &vm->stack[vm->stack_count - 1];
+    const LzString *text = NULL;
+    int64_t length = 0;
+    if (text_at(value, &text)) {
+        length = (int64_t)text->length;
+    } else if (lz_value_is_array(value)) {
+        length = (int64_t)lz_value_as_array(value)->count;
+    } else {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
+                               lz_kind_name(lz_kind_of(value)));
+    }
+    pop(vm);
+    return push(vm, lz_value_int(length));
+}
+
+static LzStatus iter_next_op(LzVM *vm) {
+    if (vm->stack_count < 2) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *container = &vm->stack[vm->stack_count - 2];
+    const LzValue *offset = &vm->stack[vm->stack_count - 1];
+    if (offset->type != LZ_VAL_INT) {
+        return malformed(vm, "loop offset is not an int");
+    }
+    int64_t at = offset->as.integer;
+    const LzString *text = NULL;
+    LzValue item = lz_value_nil();
+    int64_t next = at + 1;
+    LzString *piece = NULL;
+
+    if (text_at(container, &text)) {
+        if (at < 0 || (size_t)at >= text->length) {
+            return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "loop offset out of range");
+        }
+        size_t size = code_point_length(text->data, text->length, (size_t)at);
+        piece = lz_string_new(&vm->heap, text->data + at, size);
+        if (piece == NULL) {
+            return lz_vm_out_of_memory(vm);
+        }
+        item = lz_value_object(&piece->base);
+        next = at + (int64_t)size;
+    } else if (lz_value_is_array(container)) {
+        const LzArray *array = lz_value_as_array(container);
+        if (at < 0 || (size_t)at >= array->count) {
+            return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "index out of range");
+        }
+        item = array->items[at];
+    } else {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
+                               lz_kind_name(lz_kind_of(container)));
+    }
+
+    /*
+     * The container slot stays, so the item is still held by the array; the retain only
+     * covers the pops below, which could free it.
+     */
+    lz_value_retain(&item);
+    pop(vm); /* the offset */
+    LzStatus status = push(vm, item);
+    if (status == LZ_OK) {
+        status = push(vm, lz_value_int(next));
+    }
+    lz_value_release(&vm->heap, &item);
+    if (piece != NULL) {
+        lz_object_release(&vm->heap, &piece->base);
+    }
+    return status;
+}
+
+/* "range bounds must be ints, got <kind>": names the first operand that is not an int. */
+static bool range_bounds_int(LzVM *vm, const LzValue *start, const LzValue *end,
+                             const LzValue *step) {
+    const LzValue *offending = start;
+    if (start->type != LZ_VAL_INT) {
+        offending = start;
+    } else if (end->type != LZ_VAL_INT) {
+        offending = end;
+    } else if (step->type != LZ_VAL_INT) {
+        offending = step;
+    } else {
+        return true;
+    }
+    (void)lz_vm_set_error(vm, LZ_ERR_TYPE, "range bounds must be ints, got %s",
+                          lz_kind_name(lz_kind_of(offending)));
+    return false;
+}
+
+static LzStatus range_test_op(LzVM *vm, bool inclusive) {
+    if (vm->stack_count < 3) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *counter = &vm->stack[vm->stack_count - 3];
+    const LzValue *limit = &vm->stack[vm->stack_count - 2];
+    const LzValue *step = &vm->stack[vm->stack_count - 1];
+    if (!range_bounds_int(vm, counter, limit, step)) {
+        return LZ_ERR_TYPE; /* already reported */
+    }
+    int64_t start = counter->as.integer;
+    int64_t end = limit->as.integer;
+    int64_t by = step->as.integer;
+    if (by == 0) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "range step cannot be 0");
+    }
+    bool inside = by > 0 ? (inclusive ? start <= end : start < end)
+                         : (inclusive ? start >= end : start > end);
+    pop(vm);
+    pop(vm);
+    pop(vm);
+    return push(vm, lz_value_bool(inside));
+}
+
+/*
+ * The last value the loop visits. It runs only when the range is not empty, so the
+ * distance fits in 64 bits and the last value is one the loop reaches exactly.
+ */
+static LzStatus range_last_op(LzVM *vm, bool inclusive) {
+    if (vm->stack_count < 3) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *counter = &vm->stack[vm->stack_count - 3];
+    const LzValue *limit = &vm->stack[vm->stack_count - 2];
+    const LzValue *step = &vm->stack[vm->stack_count - 1];
+    if (!range_bounds_int(vm, counter, limit, step)) {
+        return LZ_ERR_TYPE; /* already reported */
+    }
+    int64_t start = counter->as.integer;
+    int64_t end = limit->as.integer;
+    int64_t by = step->as.integer;
+    if (by == 0) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "range step cannot be 0");
+    }
+    /* The distance is taken modulo 2^64, which is exact while the range runs the right way. */
+    uint64_t magnitude = by > 0 ? (uint64_t)by : (uint64_t)0 - (uint64_t)by;
+    int64_t last;
+    if (by > 0) {
+        uint64_t distance = (uint64_t)end - (uint64_t)start;
+        last = inclusive ? end - (int64_t)(distance % magnitude)
+                         : end - 1 - (int64_t)((distance - 1) % magnitude);
+    } else {
+        uint64_t distance = (uint64_t)start - (uint64_t)end;
+        last = inclusive ? end + (int64_t)(distance % magnitude)
+                         : end + 1 + (int64_t)((distance - 1) % magnitude);
+    }
+    pop(vm);
+    pop(vm);
+    pop(vm);
+    return push(vm, lz_value_int(last));
+}
+
+static LzStatus range_next_op(LzVM *vm) {
+    if (vm->stack_count < 2) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *counter = &vm->stack[vm->stack_count - 2];
+    const LzValue *step = &vm->stack[vm->stack_count - 1];
+    if (counter->type != LZ_VAL_INT || step->type != LZ_VAL_INT) {
+        (void)lz_vm_set_error(vm, LZ_ERR_TYPE, "range bounds must be ints, got %s",
+                              lz_kind_name(lz_kind_of(counter->type != LZ_VAL_INT ? counter : step)));
+        return LZ_ERR_TYPE;
+    }
+    int64_t start = counter->as.integer;
+    int64_t by = step->as.integer;
+    /*
+     * Safe without a check: the loop steps only while the counter is before the last
+     * value, and the last value is one the sequence reaches, so the sum never leaves
+     * the range.
+     */
+    int64_t next = start + by;
+    pop(vm);
+    pop(vm);
+    return push(vm, lz_value_int(next));
+}
+
+/* The slot is validated by the caller: this only closes the upvalue open at it. */
+static LzStatus close_upvalue_keep_op(LzVM *vm, uint16_t slot) {
+    if (slot >= vm->stack_count) {
+        return malformed(vm, "local slot out of range");
+    }
+    lz_vm_close_upvalues(vm, slot);
+    lz_skink_run(vm);
+    return LZ_OK;
+}
+
+/* [array][index] -> [array][index][item]: the array and the index stay for OP_SET_INDEX. */
+static LzStatus index_keep_op(LzVM *vm) {
+    if (vm->stack_count < 2) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *container = &vm->stack[vm->stack_count - 2];
+    if (!lz_value_is_array(container)) {
+        return not_indexable(vm, container);
+    }
+    const LzArray *array = lz_value_as_array(container);
+    size_t position = 0;
+    LzStatus status = lz_array_resolve_index(vm, &vm->stack[vm->stack_count - 1], array->count,
+                                             &position);
+    if (status != LZ_OK) {
+        return status;
+    }
+    return push(vm, array->items[position]);
+}
+
 static LzStatus set_index_op(LzVM *vm) {
     if (vm->stack_count < 3) {
         return malformed(vm, "stack underflow");
@@ -684,6 +917,37 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
     case LZ_OP_SET_INDEX:
         status = set_index_op(vm);
         break;
+    case LZ_OP_INDEX_KEEP:
+        status = index_keep_op(vm);
+        break;
+    case LZ_OP_ITER_LENGTH:
+        status = iter_length_op(vm);
+        break;
+    case LZ_OP_ITER_NEXT:
+        status = iter_next_op(vm);
+        break;
+    case LZ_OP_RANGE_TEST: {
+        bool inclusive = ip < chunk->count && chunk->code[ip++] != 0;
+        status = range_test_op(vm, inclusive);
+        break;
+    }
+    case LZ_OP_RANGE_LAST: {
+        bool inclusive = ip < chunk->count && chunk->code[ip++] != 0;
+        status = range_last_op(vm, inclusive);
+        break;
+    }
+    case LZ_OP_RANGE_NEXT:
+        status = range_next_op(vm);
+        break;
+    case LZ_OP_CLOSE_UPVALUE_KEEP: {
+        uint16_t slot;
+        if (!read_u16(chunk, &ip, &slot)) {
+            status = malformed(vm, "truncated operand");
+        } else {
+            status = close_upvalue_keep_op(vm, slot);
+        }
+        break;
+    }
     case LZ_OP_SLICE:
         status = slice_op(vm);
         break;

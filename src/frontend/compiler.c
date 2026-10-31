@@ -56,6 +56,7 @@ typedef struct Symbol {
     struct FuncState *owner; /* the function whose frame holds a local */
     bool captured;           /* a closure captured this local: closing its scope must close upvalues */
     bool pending;            /* a top-level `fn` seen ahead of its declaration */
+    bool loop_var;           /* a `for ... in` variable: it cannot be assigned */
     const FuncSig *sig;      /* set for a declared function: calls of it are checked */
 } Symbol;
 
@@ -123,6 +124,8 @@ typedef struct Parser {
     FuncSig *sigs;      /* every signature made so far */
     bool terminated;    /* the statement just compiled never falls through (return, ...) */
     bool method_name;   /* the identifier being compiled follows a '.' (receiver.name(...)) */
+    bool for_range_ok;  /* a `..` here belongs to the header of the `for` being compiled */
+    bool comma_list;    /* a `,` may separate this statement from the next (a `for` header) */
     LoopFrame *loop; /* innermost while being compiled, NULL outside a loop */
 } Parser;
 
@@ -137,9 +140,14 @@ typedef struct LoopFrame {
     FuncState *func;
     size_t continue_target; /* the first byte of the condition */
     int scope_depth;        /* locals at or below it belong to the enclosing blocks */
+    int continue_depth;     /* ...and these to the loop itself: `continue` keeps them */
+    bool forward_continues; /* `continue` jumps forward to a step written after the body */
     size_t *breaks;        /* operand indexes of the JUMPs of every `break`, patched at the end */
     size_t break_count;
     size_t break_capacity;
+    size_t *continues;     /* forward jumps of every `continue`, patched at the step */
+    size_t continue_count;
+    size_t continue_capacity;
 } LoopFrame;
 
 typedef enum Precedence {
@@ -169,6 +177,10 @@ typedef struct Expr {
     const FuncSig *sig; /* the expression is a direct reference to a declared function */
     bool is_index;  /* the expression is `a[i]` and its last instruction is OP_INDEX... */
     size_t op_pos;  /* ...at this code offset, so a following '=' can turn it into OP_SET_INDEX */
+    bool is_range;  /* the expression is `a..b`, left on the stack as start, end and step */
+    bool inclusive; /* ...and `..=` counts the end */
+    bool is_call;   /* the expression ends in a call: nothing is left on the stack */
+    LzToken start;  /* the first token of the expression, for an error about the whole of it */
 } Expr;
 
 typedef Expr (*PrefixFn)(Parser *parser);
@@ -180,7 +192,27 @@ typedef struct ParseRule {
     Precedence precedence;
 } ParseRule;
 
+static void for_statement(Parser *parser);
+static void block(Parser *parser);
+static void end_statement(Parser *parser);
+static void assignment_statement(Parser *parser);
+static void store_variable(Parser *parser, LzString *name, const Symbol *symbol,
+                           const LzToken *at);
+static void step_statement(Parser *parser);
+static void declare_variable(Parser *parser, const LzToken *name_token, LzString *name,
+                             bool is_const, const LzType *type);
+static void patch_continues(Parser *parser, LoopFrame *loop);
+static LzTokenType compound_operator(LzTokenType assign);
+static LzOpCode compound_opcode(LzTokenType type);
+static Expr compound_value(Parser *parser, const LzToken *at, const Expr *target,
+                           const Expr *value);
+static void variable_declaration(Parser *parser, bool is_const);
+static void patch_jump(Parser *parser, size_t operand_index);
+static size_t emit_jump(Parser *parser, LzOpCode op, uint32_t offset);
+
 static Expr expression(Parser *parser);
+static Expr range_(Parser *parser, Expr left);
+static bool is_compound(LzTokenType type);
 static void declaration(Parser *parser);
 static LzTokenType next_token_type(const Parser *parser);
 static void end_statement(Parser *parser);
@@ -603,6 +635,7 @@ static Symbol *add_symbol(Parser *parser, const LzToken *token, LzString *name, 
     symbol->owner = parser->fs;
     symbol->captured = false;
     symbol->pending = false;
+    symbol->loop_var = false;
     symbol->sig = NULL;
     return symbol;
 }
@@ -617,10 +650,13 @@ static void begin_scope(Parser *parser) {
  * a captured local is closed, the rest are popped. The symbols stay in the table
  * because the code that follows is still compiled against them.
  */
-static void discard_loop_locals(Parser *parser, LoopFrame *loop, uint32_t offset) {
+static void discard_loop_locals(Parser *parser, LoopFrame *loop, uint32_t offset,
+                                bool for_continue) {
+    /* `continue` keeps what the loop keeps between rounds: its own variables and slots. */
+    int keep = for_continue ? loop->continue_depth : loop->scope_depth;
     for (size_t i = parser->symbol_count; i > 0; i--) {
         Symbol *symbol = &parser->symbols[i - 1];
-        if (symbol->depth <= loop->scope_depth) {
+        if (symbol->depth <= keep) {
             break;
         }
         if (symbol->kind == SYMBOL_LOCAL) {
@@ -644,6 +680,22 @@ static void add_loop_break(Parser *parser, LoopFrame *loop, size_t operand) {
     loop->breaks[loop->break_count++] = operand;
 }
 
+/* Remembers where a `continue`'s jump is, to be patched once the loop's step is known. */
+static void add_loop_continue(Parser *parser, LoopFrame *loop, size_t operand) {
+    if (loop->continue_count == loop->continue_capacity) {
+        size_t capacity = loop->continue_capacity != 0 ? loop->continue_capacity * 2 : 4;
+        size_t *grown = realloc(loop->continues, capacity * sizeof *grown);
+        if (grown == NULL) {
+            fail(parser, LZ_ERR_MEMORY);
+            return;
+        }
+        loop->continues = grown;
+        loop->continue_capacity = capacity;
+    }
+    loop->continues[loop->continue_count++] = operand;
+}
+
+/* Emits nothing: a `continue` of a `for` jumps forward to the step, patched later. */
 static void end_scope(Parser *parser) {
     uint32_t offset = parser->previous.offset;
     while (parser->symbol_count > 0 &&
@@ -672,6 +724,10 @@ static Expr expr_of(LzType type) {
     expr.sig = NULL;
     expr.is_index = false;
     expr.op_pos = 0;
+    expr.is_range = false;
+    expr.inclusive = false;
+    expr.is_call = false;
+    memset(&expr.start, 0, sizeof expr.start);
     return expr;
 }
 
@@ -1387,9 +1443,9 @@ static int resolve_upvalue(Parser *parser, FuncState *fs, Symbol *symbol) {
     return outer < 0 ? -1 : add_upvalue(parser, fs, (uint16_t)outer, false);
 }
 
-static Expr variable(Parser *parser) {
-    LzToken token = parser->previous;
-    LzString *name = intern_token(parser, &token);
+/* The expression that reads the variable named by `token`. */
+static Expr variable_at(Parser *parser, const LzToken *token) {
+    LzString *name = intern_token(parser, token);
     if (name == NULL) {
         return any_expr();
     }
@@ -1399,20 +1455,20 @@ static Expr variable(Parser *parser) {
         switch (symbol->kind) {
         case SYMBOL_LOCAL:
             if (symbol->owner == parser->fs) {
-                emit_op_at(parser, LZ_OP_GET_LOCAL, token.offset);
-                emit_u16_at(parser, symbol->slot, token.offset);
+                emit_op_at(parser, LZ_OP_GET_LOCAL, token->offset);
+                emit_u16_at(parser, symbol->slot, token->offset);
             } else if (parser->fs->self_symbol != SIZE_MAX &&
                        symbol == &parser->symbols[parser->fs->self_symbol]) {
                 /* A local function calling itself: no capture, so no reference cycle. */
-                emit_op_at(parser, LZ_OP_GET_SELF, token.offset);
+                emit_op_at(parser, LZ_OP_GET_SELF, token->offset);
             } else {
                 int index = resolve_upvalue(parser, parser->fs, symbol);
-                emit_op_at(parser, LZ_OP_GET_UPVALUE, token.offset);
-                emit_u16_at(parser, (uint16_t)(index < 0 ? 0 : index), token.offset);
+                emit_op_at(parser, LZ_OP_GET_UPVALUE, token->offset);
+                emit_u16_at(parser, (uint16_t)(index < 0 ? 0 : index), token->offset);
             }
             break;
         case SYMBOL_GLOBAL:
-            emit_named(parser, LZ_OP_GET_GLOBAL, name, token.offset);
+            emit_named(parser, LZ_OP_GET_GLOBAL, name, token->offset);
             break;
         case SYMBOL_CONSTANT:
             emit_constant(parser, symbol->value);
@@ -1430,19 +1486,24 @@ static Expr variable(Parser *parser) {
          * program runs statement by statement and fails, with the source position, at the
          * statement that really uses a name that does not exist when it runs.
          */
-        record_name_hint(parser, &token, check(parser, LZ_TOKEN_LEFT_PAREN), false,
+        record_name_hint(parser, token, check(parser, LZ_TOKEN_LEFT_PAREN), false,
                         parser->method_name);
-        emit_named(parser, LZ_OP_GET_GLOBAL, name, token.offset);
+        emit_named(parser, LZ_OP_GET_GLOBAL, name, token->offset);
         return any_expr();
     }
 
-    emit_named(parser, LZ_OP_GET_GLOBAL, name, token.offset);
+    emit_named(parser, LZ_OP_GET_GLOBAL, name, token->offset);
     Expr expr = any_expr();
     if (defined->type == LZ_VAL_OBJECT && defined->as.object->type == LZ_OBJ_NATIVE) {
         expr.type = lz_type_of_kinds(LZ_KIND_FUNCTION);
         expr.native = (const LzNative *)defined->as.object;
     }
     return expr;
+}
+
+/* A variable read from the token just consumed. */
+static Expr variable(Parser *parser) {
+    return variable_at(parser, &parser->previous);
 }
 
 /* How a bitwise error names an operand: the same kind names the run-time error uses. */
@@ -1595,7 +1656,16 @@ static Expr subscript(Parser *parser, Expr left) {
     Expr result = expr_of(item_type_of(&left.type));
     result.is_index = true;
     result.op_pos = parser->chunk->count;
-    emit_op_at(parser, LZ_OP_INDEX, offset);
+    /*
+     * `a[i] op= v` needs the array and the index under the item, so that OP_SET_INDEX
+     * can store over it. The token after the expression tells which form to emit.
+     */
+    if (is_compound(parser->current.type)) {
+        emit_op_at(parser, LZ_OP_INDEX_KEEP, offset);
+        result.op_pos = parser->chunk->count - 1;
+    } else {
+        emit_op_at(parser, LZ_OP_INDEX, offset);
+    }
     return result;
 }
 
@@ -1655,6 +1725,9 @@ static ParseRule rule_for(LzTokenType type) {
     case LZ_TOKEN_GREATER:
     case LZ_TOKEN_GREATER_EQUAL:
         return (ParseRule){NULL, binary, PREC_COMPARISON};
+    case LZ_TOKEN_DOT_DOT:
+    case LZ_TOKEN_DOT_DOT_EQUAL:
+        return (ParseRule){NULL, range_, PREC_OR};
     case LZ_TOKEN_AND:
         return (ParseRule){NULL, and_, PREC_AND};
     case LZ_TOKEN_OR:
@@ -1680,8 +1753,10 @@ static Expr parse_precedence(Parser *parser, Precedence precedence) {
     }
 
     parser->nesting++;
+    LzToken first = parser->current;
     advance(parser);
     Expr left = prefix(parser);
+    left.start = first;
     for (;;) {
         /* A chain may continue on the next line:  xs\n  .filter(...)\n  .map(...) */
         if (check(parser, LZ_TOKEN_NEWLINE) && next_token_type(parser) == LZ_TOKEN_DOT) {
@@ -2062,7 +2137,9 @@ static Expr call_special(Parser *parser, Expr callee, const LzToken *paren, bool
     emit_op_at(parser, LZ_OP_CALL_EX, offset);
     emit_byte_at(parser, (uint8_t)named, offset);
     emit_u16_at(parser, names_index, offset);
-    return call_result(callee);
+    Expr result = call_result(callee);
+    result.is_call = true;
+    return result;
 }
 
 /*
@@ -2100,7 +2177,9 @@ static Expr call_args(Parser *parser, Expr callee, bool receiver) {
 
     emit_op_at(parser, LZ_OP_CALL, offset);
     emit_byte_at(parser, (uint8_t)count, offset);
-    return call_result(callee);
+    Expr result = call_result(callee);
+    result.is_call = true;
+    return result;
 }
 
 static Expr call(Parser *parser, Expr callee) {
@@ -2171,117 +2250,415 @@ static Expr or_(Parser *parser, Expr left) {
     return union_expr(left, right);
 }
 
-/* Compile-time constants */
+/* `for` loops */
 
-static bool fragment_is_pure(const LzChunk *chunk, size_t start) {
-    size_t i = start;
-    while (i < chunk->count) {
-        uint8_t op = chunk->code[i];
-        switch (op) {
-        case LZ_OP_CONSTANT:
-        case LZ_OP_NIL:
-        case LZ_OP_TRUE:
-        case LZ_OP_FALSE:
-        case LZ_OP_ADD:
-        case LZ_OP_SUBTRACT:
-        case LZ_OP_MULTIPLY:
-        case LZ_OP_DIVIDE:
-        case LZ_OP_FLOOR_DIVIDE:
-        case LZ_OP_MODULO:
-        case LZ_OP_NEGATE:
-        case LZ_OP_EQUAL:
-        case LZ_OP_LESS:
-        case LZ_OP_LESS_EQUAL:
-        case LZ_OP_GREATER:
-        case LZ_OP_GREATER_EQUAL:
-        case LZ_OP_NOT:
-        case LZ_OP_BIT_AND:
-        case LZ_OP_BIT_OR:
-        case LZ_OP_BIT_XOR:
-        case LZ_OP_BIT_NOT:
-        case LZ_OP_SHL:
-        case LZ_OP_SHR:
+/*
+ * The slots a `for` owns. They are plain locals without a name, so `break` and
+ * `continue` cannot drop them by accident and the local count stays exact while the
+ * body is compiled.
+ */
+#define FOR_SLOTS 3
+
+static uint16_t slot_reserve(Parser *parser, uint32_t offset) {
+    if (parser->local_count + FOR_SLOTS > LZ_MAX_LOCALS) {
+        error_at_previous(parser, "too many local variables");
+        return 0;
+    }
+    uint16_t base = (uint16_t)parser->local_count;
+    for (int i = 0; i < FOR_SLOTS; i++) {
+        emit_op_at(parser, LZ_OP_NIL, offset);
+    }
+    parser->local_count += FOR_SLOTS;
+    return base;
+}
+
+static void slot_get(Parser *parser, uint16_t slot, uint32_t offset) {
+    emit_op_at(parser, LZ_OP_GET_LOCAL, offset);
+    emit_u16_at(parser, slot, offset);
+}
+
+static void slot_set(Parser *parser, uint16_t slot, uint32_t offset) {
+    emit_op_at(parser, LZ_OP_SET_LOCAL, offset);
+    emit_u16_at(parser, slot, offset);
+}
+
+static void slot_drop(Parser *parser, uint16_t base, uint32_t offset) {
+    for (int i = 0; i < FOR_SLOTS; i++) {
+        emit_op_at(parser, LZ_OP_POP, offset);
+    }
+    parser->local_count = base;
+}
+
+/* Is this type one a `for ... in` can walk, or can it not be told at compile time? */
+static bool iterable_type(const LzType *type) {
+    uint16_t kinds = lz_type_possible_kinds(type);
+    return (kinds & (LZ_KIND_ARRAY | LZ_KIND_STRING)) != 0 || kinds == LZ_KINDS_ANY;
+}
+
+/* "cannot iterate over int": the kind, naming what the loop was given. */
+static void error_iterate(Parser *parser, const LzToken *at, const LzType *type) {
+    char text[64];
+    char message[160];
+    describe_bit_operand(type, text, sizeof text);
+    (void)snprintf(message, sizeof message, "cannot iterate over %s", text);
+    error_at(parser, at, message);
+}
+
+/* "range bounds must be ints, got string": the kind of the operand that was wrong. */
+static void error_range_bound(Parser *parser, const LzToken *at, const LzType *type) {
+    char text[64];
+    char message[160];
+    describe_bit_operand(type, text, sizeof text);
+    (void)snprintf(message, sizeof message, "range bounds must be ints, got %s", text);
+    error_at(parser, at, message);
+}
+
+/* The type of the values `for x in <iterable>` binds. */
+static LzType loop_item_type(const LzType *iterable) {
+    uint16_t kinds = lz_type_possible_kinds(iterable);
+    if (kinds == LZ_KINDS_ANY) {
+        return lz_type_of_kinds(LZ_KINDS_ANY);
+    }
+    if ((kinds & LZ_KIND_ARRAY) != 0) {
+        return item_type_of(iterable);
+    }
+    return lz_type_of_kinds(LZ_KIND_STRING); /* one code point */
+}
+
+/*
+ * A loop variable: a local that can be read but not assigned. Its slot is the value
+ * about to be stored into it, as a `let` declaration's would be.
+ */
+static void loop_variable(Parser *parser, const LzToken *name_token, LzString *name,
+                          const LzType *type) {
+    Symbol *symbol = add_symbol(parser, name_token, name, SYMBOL_LOCAL, false, lz_value_nil(), type);
+    if (symbol == NULL) {
+        return;
+    }
+    symbol->loop_var = true;
+    emit_op_at(parser, LZ_OP_NIL, name_token->offset); /* the slot; the store below fills it */
+}
+
+/*
+ * `for x in xs`, `for i, x in xs`, `for ch: string in s`, and the ranges
+ * `for i in a..b` / `a..=b` / `... by step`. The value after `in` is evaluated once;
+ * a range becomes three hidden ints, anything else one hidden value plus a cursor.
+ */
+/*
+ * Closes the upvalue of every captured loop variable of the round that just ended, so
+ * a closure made in the body holds this round's value and the next round starts fresh.
+ */
+static void close_round_variables(Parser *parser, const LoopFrame *loop, uint32_t offset) {
+    /*
+     * Every variable of the loop's own scope is closed, because this runs before the body
+     * is compiled for a C-style loop and so cannot know which ones a closure will capture.
+     * Closing a variable nothing captured has no effect.
+     */
+    for (size_t i = parser->symbol_count; i > 0; i--) {
+        const Symbol *symbol = &parser->symbols[i - 1];
+        if (symbol->depth < loop->continue_depth) {
             break;
-        default:
-            return false;
         }
-        i += lz_opcode_length(op);
-    }
-    return true;
-}
-
-/* Runs the code emitted since start on the real VM and returns its result. */
-static LzStatus evaluate_fragment(Parser *parser, size_t start, LzValue *value) {
-    const LzChunk *chunk = parser->chunk;
-    size_t size = chunk->count - start;
-
-    uint8_t *code = malloc(size + 1);
-    uint32_t *offsets = malloc((size + 1) * sizeof *offsets);
-    if (code == NULL || offsets == NULL) {
-        free(code);
-        free(offsets);
-        return LZ_ERR_MEMORY;
-    }
-    memcpy(code, chunk->code + start, size);
-    memcpy(offsets, chunk->offsets + start, size * sizeof *offsets);
-    code[size] = (uint8_t)LZ_OP_RETURN;
-    offsets[size] = offsets[size - 1];
-
-    /* The constant table is shared, not copied, so temp must never be freed as a chunk. */
-    LzChunk temp = {.code = code,
-                    .offsets = offsets,
-                    .count = size + 1,
-                    .capacity = size + 1,
-                    .constants = chunk->constants,
-                    .constant_count = chunk->constant_count,
-                    .constant_capacity = chunk->constant_count};
-
-    LzVM *vm = parser->vm;
-    uint64_t fuel = vm->fuel;
-    uint64_t instructions = vm->instructions;
-    vm->fuel = LZ_FUEL_UNLIMITED;
-    LzStatus status = lz_vm_eval(vm, &temp, value);
-    vm->fuel = fuel;
-    vm->instructions = instructions;
-
-    free(code);
-    free(offsets);
-    return status;
-}
-
-/* Statements */
-
-static void end_statement(Parser *parser) {
-    if (match(parser, LZ_TOKEN_NEWLINE) || match(parser, LZ_TOKEN_SEMICOLON)) {
-        return;
-    }
-    if (check(parser, LZ_TOKEN_EOF) || check(parser, LZ_TOKEN_RIGHT_BRACE)) {
-        return;
-    }
-    if (check(parser, LZ_TOKEN_EQUAL)) {
-        error_at_current(parser, "invalid assignment target");
-    } else {
-        error_at_current(parser, "expected end of statement");
+        if (symbol->depth == loop->continue_depth && symbol->kind == SYMBOL_LOCAL) {
+            emit_op_at(parser, LZ_OP_CLOSE_UPVALUE_KEEP, offset);
+            emit_u16_at(parser, symbol->slot, offset);
+        }
     }
 }
 
-static void declare_variable(Parser *parser, const LzToken *name_token, LzString *name,
-                             bool is_const, const LzType *type) {
-    if (parser->scope_depth == 0) {
-        Symbol *symbol = add_symbol(parser, name_token, name, SYMBOL_GLOBAL, is_const,
-                                    lz_value_nil(), type);
-        if (symbol != NULL) {
-            emit_named(parser, LZ_OP_DEFINE_GLOBAL, name, name_token->offset);
+/* "a range can only be used in a 'for' loop", with the caret on the operator. */
+static void error_range_here(Parser *parser, const LzToken *at) {
+    error_at(parser, at, "a range can only be used in a 'for' loop");
+}
+
+/*
+ * `a..b` and `a..=b`, optionally `by step`. A range is not a value: it is only allowed
+ * in the header of a `for`, where the three numbers become the loop's state. Anywhere
+ * else it is an error at the operator.
+ */
+static Expr range_(Parser *parser, Expr left) {
+    LzToken op = parser->previous;
+    bool inclusive = op.type == LZ_TOKEN_DOT_DOT_EQUAL;
+    if (!parser->for_range_ok) {
+        /* Parse the rest so the statement ends cleanly, then report it. */
+        error_range_here(parser, &op);
+    }
+    skip_newlines(parser);
+    if ((lz_type_possible_kinds(&left.type) & LZ_KIND_INT) == 0) {
+        error_range_bound(parser, &left.start, &left.type);
+    }
+    LzToken end_at = parser->current;
+    Expr end = parse_precedence(parser, PREC_COMPARISON);
+    if (end.start.length != 0) {
+        end_at = end.start;
+    }
+    if ((lz_type_possible_kinds(&end.type) & LZ_KIND_INT) == 0) {
+        error_range_bound(parser, &end_at, &end.type);
+    }
+    if (match(parser, LZ_TOKEN_BY)) {
+        skip_newlines(parser);
+        LzToken step_at = parser->current;
+        Expr step = parse_precedence(parser, PREC_COMPARISON);
+        if (step.start.length != 0) {
+            step_at = step.start; /* the whole step, not just its first token */
+        }
+        if ((lz_type_possible_kinds(&step.type) & LZ_KIND_INT) == 0) {
+            /* The step is not a bound, but the message names what was written. */
+            error_range_bound(parser, &step_at, &step.type);
+        }
+        /* A written zero is caught here; any other step fails when the loop runs. */
+        if (step_at.type == LZ_TOKEN_INTEGER && step_at.value.integer == 0) {
+            error_at(parser, &step_at, "range step cannot be 0"); /* the caret goes on the step */
         }
     } else {
-        add_symbol(parser, name_token, name, SYMBOL_LOCAL, is_const, lz_value_nil(), type);
+        emit_constant(parser, lz_value_int(1));
+    }
+    Expr range = expr_of(lz_type_of_kinds(LZ_KIND_INT));
+    range.is_range = true;
+    range.inclusive = inclusive;
+    return range;
+}
+
+/* Patches every `continue` of the loop to the code that follows its body. */
+static void patch_continues(Parser *parser, LoopFrame *loop) {
+    for (size_t i = 0; i < loop->continue_count; i++) {
+        patch_jump(parser, loop->continues[i]);
     }
 }
 
-static void variable_declaration(Parser *parser, bool is_const) {
+static void for_in_statement(Parser *parser, uint32_t offset) {
     if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
-        error_at_current(parser, is_const ? "expected constant name after 'const'"
-                                          : "expected variable name after 'let'");
+        error_at_current(parser, "expected a name for the loop variable");
+        return;
+    }
+    advance(parser);
+    LzToken first_token = parser->previous;
+    LzString *first_name = intern_token(parser, &first_token);
+    if (first_name == NULL) {
+        return;
+    }
+    bool two = false;
+    LzToken second_token = first_token;
+    LzString *second_name = first_name;
+    if (match(parser, LZ_TOKEN_COMMA)) {
+        if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+            error_at_current(parser, "expected a name for the loop variable");
+            return;
+        }
+        advance(parser);
+        second_token = parser->previous;
+        second_name = intern_token(parser, &second_token);
+        if (second_name == NULL) {
+            return;
+        }
+        two = true;
+    }
+
+    LzType annotated = lz_type_of_kinds(LZ_KINDS_ANY);
+    bool has_annotation = false;
+    LzToken annotation_at = first_token;
+    if (match(parser, LZ_TOKEN_COLON)) {
+        has_annotation = true;
+        annotation_at = parser->previous;
+        (void)parse_type_union(parser, &annotated);
+    }
+
+    if (!match(parser, LZ_TOKEN_IN)) {
+        error_at_current(parser,
+                         "expected 'in' after the loop variable (a C-style loop starts with "
+                         "'let': for let i = 0; ...)");
+        return;
+    }
+    skip_newlines(parser);
+    if (check(parser, LZ_TOKEN_LEFT_BRACE) || check(parser, LZ_TOKEN_EOF)) {
+        error_at_current(parser, "expected an expression after 'in'");
+        return;
+    }
+
+    uint16_t slots = slot_reserve(parser, offset);
+    LzToken value_at = parser->current;
+    parser->for_range_ok = true;
+    Expr start = expression(parser);
+    parser->for_range_ok = false;
+
+    if (start.is_range) {
+        /* The header left [start][end][step]: they become the loop's own slots. */
+        bool inclusive = start.inclusive;
+        slot_set(parser, (uint16_t)(slots + 2), offset); /* the step */
+        slot_set(parser, (uint16_t)(slots + 1), offset); /* the limit, then the last value */
+        slot_set(parser, (uint16_t)(slots + 0), offset); /* the counter */
+        if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            error_at_current(parser, "expected '{' after the 'for' header");
+            return;
+        }
+
+        /*
+         * The range is settled before the first round: an empty one (or one that runs
+         * the wrong way) jumps past the loop, and the others get the last value they
+         * visit, which is where stepping stops. The counter never leaves the int range.
+         */
+        slot_get(parser, (uint16_t)(slots + 0), offset);
+        slot_get(parser, (uint16_t)(slots + 1), offset);
+        slot_get(parser, (uint16_t)(slots + 2), offset);
+        emit_op_at(parser, LZ_OP_RANGE_TEST, offset);
+        emit_byte_at(parser, inclusive ? 1 : 0, offset);
+        size_t empty_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
+        emit_op_at(parser, LZ_OP_POP, offset);
+        slot_get(parser, (uint16_t)(slots + 0), offset);
+        slot_get(parser, (uint16_t)(slots + 1), offset);
+        slot_get(parser, (uint16_t)(slots + 2), offset);
+        emit_op_at(parser, LZ_OP_RANGE_LAST, offset);
+        emit_byte_at(parser, inclusive ? 1 : 0, offset);
+        slot_set(parser, (uint16_t)(slots + 1), offset);
+
+        LoopFrame loop;
+        memset(&loop, 0, sizeof loop);
+        loop.enclosing = parser->loop;
+        loop.func = parser->fs;
+        loop.scope_depth = parser->scope_depth;
+        loop.continue_depth = parser->scope_depth + 1;
+        loop.forward_continues = true;
+        parser->loop = &loop;
+
+        size_t loop_start = parser->chunk->count;
+        begin_scope(parser);
+        loop_variable(parser, &first_token, first_name, &annotated);
+        if (has_annotation) {
+            LzType counter_type = lz_type_of_kinds(LZ_KIND_INT);
+            check_assignment(parser, &counter_type, &annotated, &annotation_at, offset);
+        }
+        slot_get(parser, (uint16_t)(slots + 0), offset);
+        store_variable(parser, first_name, find_symbol(parser, first_name), &first_token);
+        if (two) {
+            /* `for i, x in ...` counts rounds; a range visits one value per round. */
+            error_at(parser, &second_token, "a range binds one loop variable");
+            loop_variable(parser, &second_token, second_name, &annotated);
+        }
+
+        block(parser);
+        patch_continues(parser, &loop);
+        close_round_variables(parser, &loop, offset);
+        end_scope(parser);
+        parser->loop = loop.enclosing;
+
+        /* The last value ends the loop; anything before it steps and goes round again. */
+        slot_get(parser, (uint16_t)(slots + 0), offset);
+        slot_get(parser, (uint16_t)(slots + 1), offset);
+        emit_op_at(parser, LZ_OP_EQUAL, offset);
+        size_t done_jump = emit_jump(parser, LZ_OP_JUMP_IF_TRUE, offset);
+        emit_op_at(parser, LZ_OP_POP, offset);
+        slot_get(parser, (uint16_t)(slots + 0), offset);
+        slot_get(parser, (uint16_t)(slots + 2), offset);
+        emit_op_at(parser, LZ_OP_RANGE_NEXT, offset);
+        slot_set(parser, (uint16_t)(slots + 0), offset);
+        emit_loop(parser, loop_start, offset);
+
+        /* Both ways out of the loop leave one test result on the stack: one pop serves both. */
+        patch_jump(parser, done_jump);
+        patch_jump(parser, empty_jump);
+        emit_op_at(parser, LZ_OP_POP, offset);
+        for (size_t i = 0; i < loop.break_count; i++) {
+            patch_jump(parser, loop.breaks[i]);
+        }
+        free(loop.breaks);
+        free(loop.continues);
+        slot_drop(parser, slots, offset);
+        return;
+    }
+
+    if (check(parser, LZ_TOKEN_BY)) {
+        error_at_current(parser, "'by' only follows a range");
+    }
+    if (!iterable_type(&start.type)) {
+        error_iterate(parser, &value_at, &start.type);
+    }
+    if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
+        error_at_current(parser, "expected '{' after the 'for' header");
+        return;
+    }
+    slot_set(parser, (uint16_t)(slots + 0), offset); /* the iterable */
+
+    LzType item = loop_item_type(&start.type);
+    if (has_annotation) {
+        check_assignment(parser, &item, &annotated, &annotation_at, offset);
+        item = annotated;
+    }
+
+    /* An iterable that is not one is reported here, once, even if the loop never runs. */
+    slot_get(parser, (uint16_t)(slots + 0), offset);
+    emit_op_at(parser, LZ_OP_ITER_LENGTH, offset);
+    emit_op_at(parser, LZ_OP_POP, offset);
+    emit_constant(parser, lz_value_int(0));
+    slot_set(parser, (uint16_t)(slots + 1), offset); /* the cursor: an item index or a byte offset */
+    emit_constant(parser, lz_value_int(0));
+    slot_set(parser, (uint16_t)(slots + 2), offset); /* the code point index */
+
+    LoopFrame loop;
+    memset(&loop, 0, sizeof loop);
+    loop.enclosing = parser->loop;
+    loop.func = parser->fs;
+    loop.scope_depth = parser->scope_depth;
+    loop.continue_depth = parser->scope_depth + 1;
+    loop.forward_continues = true;
+    parser->loop = &loop;
+
+    size_t loop_start = parser->chunk->count;
+    /* The item count is read again every round, so an array that grows is walked further. */
+    slot_get(parser, (uint16_t)(slots + 1), offset); /* the cursor */
+    slot_get(parser, (uint16_t)(slots + 0), offset);
+    emit_op_at(parser, LZ_OP_ITER_LENGTH, offset);
+    emit_op_at(parser, LZ_OP_LESS, offset);
+    size_t exit_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
+    emit_op_at(parser, LZ_OP_POP, offset);
+
+    begin_scope(parser);
+    if (two) {
+        LzType counter_kind = lz_type_of_kinds(LZ_KIND_INT);
+        loop_variable(parser, &first_token, first_name, &counter_kind);
+    }
+    loop_variable(parser, &second_token, second_name, &item);
+
+    /* The item and the next cursor, with both hidden values still in their slots. */
+    slot_get(parser, (uint16_t)(slots + 0), offset);
+    slot_get(parser, (uint16_t)(slots + 1), offset);
+    emit_op_at(parser, LZ_OP_ITER_NEXT, offset);
+    slot_set(parser, (uint16_t)(slots + 1), offset); /* the cursor moves past the item */
+    store_variable(parser, second_name, find_symbol(parser, second_name), &second_token);
+    /* The item is stored and the cursor is already in its slot: only the iterable copy is left. */
+    emit_op_at(parser, LZ_OP_POP, offset);
+    if (two) {
+        slot_get(parser, (uint16_t)(slots + 2), offset);
+        store_variable(parser, first_name, find_symbol(parser, first_name), &first_token);
+    }
+
+    block(parser);
+    patch_continues(parser, &loop);
+    close_round_variables(parser, &loop, offset); /* the item is fresh each round */
+    end_scope(parser);
+    parser->loop = loop.enclosing;
+
+    if (two) {
+        slot_get(parser, (uint16_t)(slots + 2), offset);
+        emit_constant(parser, lz_value_int(1));
+        emit_op_at(parser, LZ_OP_ADD, offset);
+        slot_set(parser, (uint16_t)(slots + 2), offset);
+    }
+    emit_loop(parser, loop_start, offset);
+
+    patch_jump(parser, exit_jump);
+    emit_op_at(parser, LZ_OP_POP, offset);
+    for (size_t i = 0; i < loop.break_count; i++) {
+        patch_jump(parser, loop.breaks[i]);
+    }
+    free(loop.breaks);
+    free(loop.continues);
+    slot_drop(parser, slots, offset);
+}
+
+/* `let name [: type] [= value]` in a `for` header: no statement end, the `,` ends it. */
+static void for_initializer(Parser *parser) {
+    if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+        error_at_current(parser, "expected variable name after 'let'");
         return;
     }
     advance(parser);
@@ -2290,163 +2667,137 @@ static void variable_declaration(Parser *parser, bool is_const) {
     if (name == NULL) {
         return;
     }
-
     LzType declared = lz_type_of_kinds(LZ_KINDS_ANY);
     bool annotated = false;
     if (match(parser, LZ_TOKEN_COLON)) {
         annotated = true;
         (void)parse_type_union(parser, &declared);
     }
-
-    size_t code_mark = parser->chunk->count;
-    size_t constant_mark = parser->chunk->constant_count;
-    LzToken initializer_start = parser->current;
-    bool has_initializer = false;
-    Expr initializer = expr_of(lz_type_of_kinds(LZ_KIND_NIL));
-
+    LzToken value_start = parser->current;
+    Expr initializer;
     if (match(parser, LZ_TOKEN_EQUAL)) {
-        skip_newlines(parser);
-        initializer_start = parser->current;
+        value_start = parser->current;
         initializer = expression(parser);
-        has_initializer = true;
-    } else if (is_const) {
-        error_at_current(parser, "expected '=' after constant name");
-        return;
     } else {
         emit_op_at(parser, LZ_OP_NIL, name_token.offset);
+        initializer = expr_of(lz_type_of_kinds(LZ_KIND_NIL));
         if (annotated && lz_type_assignable(&initializer.type, &declared) == LZ_ASSIGN_NEVER) {
             error_types(parser, &name_token, "variable of type ", &declared,
                         " needs an initial value", NULL);
         }
     }
-    end_statement(parser);
-
-    if (is_const && has_initializer && !parser->panic && parser->fatal == LZ_OK &&
-        parser->chunk->count > code_mark && fragment_is_pure(parser->chunk, code_mark)) {
-        LzValue value = lz_value_nil();
-        LzStatus status = evaluate_fragment(parser, code_mark, &value);
-        if (status == LZ_OK) {
-            forget_constants_from(parser, constant_mark);
-            lz_chunk_truncate(&parser->vm->heap, parser->chunk, code_mark, constant_mark);
-
-            LzType value_type = lz_type_of_value(&value);
-            if (annotated && lz_type_assignable(&value_type, &declared) == LZ_ASSIGN_NEVER) {
-                LzToken span = span_from(parser, &initializer_start);
-                error_types(parser, &span, "type mismatch: expected ", &declared, ", got ",
-                            &value_type);
-            }
-            if (add_symbol(parser, &name_token, name, SYMBOL_CONSTANT, true, value,
-                           &value_type) == NULL) {
-                lz_value_release(&parser->vm->heap, &value);
-            }
-            return;
-        }
-        if (status == LZ_ERR_MEMORY || status == LZ_ERR_HEAP_LIMIT) {
-            fail(parser, status);
-            return;
-        }
-
-        LzToken span = initializer_start;
-        span.length = parser->previous.offset + parser->previous.length - span.offset;
-        error_at(parser, &span, parser->vm->error);
+    if (annotated) {
+        check_assignment(parser, &initializer.type, &declared, &value_start, name_token.offset);
     }
-
-    if (annotated && has_initializer) {
-        check_assignment(parser, &initializer.type, &declared, &initializer_start,
-                         name_token.offset);
-    }
-    LzType stored = declared;
-    if (!annotated && is_const) {
-        stored = lz_type_widen(&initializer.type);
-    }
-    declare_variable(parser, &name_token, name, is_const, &stored);
+    LzType stored = annotated ? declared : lz_type_widen(&initializer.type);
+    declare_variable(parser, &name_token, name, false, &stored);
 }
 
-static void assignment_statement(Parser *parser) {
-    advance(parser);
-    LzToken name_token = parser->previous;
-    LzString *name = intern_token(parser, &name_token);
-    advance(parser);
-    skip_newlines(parser);
-    LzToken value_start = parser->current;
-    Expr value = expression(parser);
-    if (name == NULL) {
+/*
+ * `for let i = 0; i < n; i += 1 { ... }`: the init runs once, then the condition,
+ * the body and the step. The loop's variables are fresh for a closure made in the
+ * body: their upvalues are closed before the step rewrites the slots.
+ */
+static void for_c_statement(Parser *parser, uint32_t offset) {
+    begin_scope(parser);
+
+    if (!check(parser, LZ_TOKEN_SEMICOLON)) {
+        if (!match(parser, LZ_TOKEN_LET)) {
+            error_at_current(parser, "the loop variable must be declared with 'let'");
+            return;
+        }
+        for (;;) {
+            parser->comma_list = true;
+            for_initializer(parser);
+            if (!match(parser, LZ_TOKEN_COMMA)) {
+                break;
+            }
+            /* `let i = 0, j = n - 1`: the later declarations leave out the `let`. */
+            (void)match(parser, LZ_TOKEN_LET);
+            skip_newlines(parser);
+        }
+        parser->comma_list = false;
+    }
+    if (!match(parser, LZ_TOKEN_SEMICOLON)) {
+        error_at_current(parser, "expected ';' after the loop initializer");
         return;
     }
+    skip_newlines(parser);
 
-    Symbol *symbol = find_symbol(parser, name);
-    if (symbol == NULL) {
-        if (lz_vm_lookup(parser->vm, name) != NULL) {
-            error_with_name(parser, &name_token, "cannot assign to builtin '", "'");
-        } else {
-            /* Sequential execution: checked when the assignment runs (SET_GLOBAL). */
-            record_name_hint(parser, &name_token, false, true, false);
-            emit_named(parser, LZ_OP_SET_GLOBAL, name, name_token.offset);
-        }
-    } else if (symbol->is_const || symbol->kind == SYMBOL_CONSTANT) {
-        error_with_name(parser, &name_token, "cannot assign to constant '", "'");
+    LoopFrame loop;
+    memset(&loop, 0, sizeof loop);
+    loop.enclosing = parser->loop;
+    loop.func = parser->fs;
+    /* `break` drops the loop's own variables; `continue` keeps them for the step. */
+    loop.scope_depth = parser->scope_depth - 1;
+    loop.continue_depth = parser->scope_depth;
+    parser->loop = &loop;
+
+    size_t loop_start = parser->chunk->count;
+    size_t exit_jump;
+    if (check(parser, LZ_TOKEN_SEMICOLON)) {
+        emit_op_at(parser, LZ_OP_TRUE, offset);
+        exit_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
+        emit_op_at(parser, LZ_OP_POP, offset);
     } else {
-        check_assignment(parser, &value.type, &symbol->type, &value_start, name_token.offset);
-        if (symbol->kind == SYMBOL_LOCAL && symbol->owner != parser->fs) {
-            int index = resolve_upvalue(parser, parser->fs, symbol);
-            emit_op_at(parser, LZ_OP_SET_UPVALUE, name_token.offset);
-            emit_u16_at(parser, (uint16_t)(index < 0 ? 0 : index), name_token.offset);
-        } else if (symbol->kind == SYMBOL_LOCAL) {
-            emit_op_at(parser, LZ_OP_SET_LOCAL, name_token.offset);
-            emit_u16_at(parser, symbol->slot, name_token.offset);
-        } else {
-            emit_named(parser, LZ_OP_SET_GLOBAL, name, name_token.offset);
-        }
+        (void)expression(parser);
+        exit_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
+        emit_op_at(parser, LZ_OP_POP, offset);
     }
-    end_statement(parser);
-}
-
-static bool is_type_keyword(const Parser *parser) {
-    return parser->current.length == 4 &&
-           memcmp(parser->source->text + parser->current.offset, "type", 4) == 0;
-}
-
-/* type Name = <type>; "type" is only a keyword when a name follows it. */
-static void type_declaration(Parser *parser) {
-    advance(parser);
-    LzToken name_token = parser->previous;
-    LzString *name = intern_token(parser, &name_token);
-    if (name == NULL) {
+    if (!match(parser, LZ_TOKEN_SEMICOLON)) {
+        error_at_current(parser, "expected ';' after the loop condition");
         return;
     }
-
-    char text[48];
-    LzType ignored;
-    token_text(parser, &name_token, text, sizeof text);
-    if (builtin_type(text, &ignored)) {
-        error_with_name(parser, &name_token, "cannot redefine builtin type '", "'");
-        return;
-    }
-
-    consume(parser, LZ_TOKEN_EQUAL, "expected '=' after type name");
     skip_newlines(parser);
-    LzType type;
-    (void)parse_type_union(parser, &type);
-    end_statement(parser);
 
-    for (size_t i = parser->alias_count; i > 0; i--) {
-        const Alias *existing = &parser->aliases[i - 1];
-        if (existing->depth < parser->scope_depth) {
+    /*
+     * The step runs after the body but is written before it in the source, so the first
+     * round jumps over it; the end of the body and every `continue` enter it.
+     */
+    size_t over_step = emit_jump(parser, LZ_OP_JUMP, offset);
+    size_t step_start = parser->chunk->count;
+    loop.continue_target = step_start;
+    /* A captured loop variable is closed here, so a closure holds this round's value. */
+    close_round_variables(parser, &loop, offset);
+
+    size_t steps = 0;
+    while (!check(parser, LZ_TOKEN_LEFT_BRACE) && !check(parser, LZ_TOKEN_EOF)) {
+        parser->comma_list = true;
+        step_statement(parser);
+        steps++;
+        if (!match(parser, LZ_TOKEN_COMMA)) {
             break;
         }
-        if (existing->name == name) {
-            error_with_name(parser, &name_token, "type '", "' is already declared in this scope");
-            return;
-        }
+        skip_newlines(parser);
     }
-    if (parser->alias_count >= LZ_MAX_ALIASES) {
-        error_at(parser, &name_token, "too many type aliases");
-        return;
+    parser->comma_list = false;
+    (void)steps; /* `for (;;)` has no step */
+    /* The step ends where the next round starts: back to the condition. */
+    emit_loop(parser, loop_start, offset);
+
+    patch_jump(parser, over_step);
+    block(parser);
+    /* The end of the body runs the step. */
+    emit_loop(parser, step_start, offset);
+
+    patch_jump(parser, exit_jump);
+    emit_op_at(parser, LZ_OP_POP, offset);
+    end_scope(parser);
+    parser->loop = loop.enclosing;
+    for (size_t i = 0; i < loop.break_count; i++) {
+        patch_jump(parser, loop.breaks[i]);
     }
-    Alias *alias = &parser->aliases[parser->alias_count++];
-    alias->name = name;
-    alias->depth = parser->scope_depth;
-    alias->type = type;
+    free(loop.breaks);
+    free(loop.continues);
+}
+
+static void for_statement(Parser *parser) {
+    uint32_t offset = parser->previous.offset;
+    if (check(parser, LZ_TOKEN_LET) || check(parser, LZ_TOKEN_SEMICOLON)) {
+        for_c_statement(parser, offset);
+    } else {
+        for_in_statement(parser, offset);
+    }
 }
 
 static void block(Parser *parser) {
@@ -2553,6 +2904,7 @@ static void while_statement(Parser *parser) {
     loop.func = parser->fs;
     loop.continue_target = loop_start;
     loop.scope_depth = parser->scope_depth;
+    loop.continue_depth = parser->scope_depth;
     parser->loop = &loop;
 
     block(parser);
@@ -2586,9 +2938,12 @@ static void loop_jump_statement(Parser *parser, bool is_break) {
         return;
     }
 
-    discard_loop_locals(parser, loop, offset);
+    discard_loop_locals(parser, loop, offset, !is_break);
     if (is_break) {
         add_loop_break(parser, loop, emit_jump(parser, LZ_OP_JUMP, offset));
+    } else if (loop->forward_continues) {
+        /* The step of a `for` comes after the body, so the jump is patched once it is written. */
+        add_loop_continue(parser, loop, emit_jump(parser, LZ_OP_JUMP, offset));
     } else {
         /* The same back-edge as the end of the loop: fuel and hot code behave alike. */
         emit_loop(parser, loop->continue_target, offset);
@@ -2597,9 +2952,455 @@ static void loop_jump_statement(Parser *parser, bool is_break) {
     parser->terminated = true;
 }
 
+/* Compile-time constants */
+
+static bool fragment_is_pure(const LzChunk *chunk, size_t start) {
+    size_t i = start;
+    while (i < chunk->count) {
+        uint8_t op = chunk->code[i];
+        switch (op) {
+        case LZ_OP_CONSTANT:
+        case LZ_OP_NIL:
+        case LZ_OP_TRUE:
+        case LZ_OP_FALSE:
+        case LZ_OP_ADD:
+        case LZ_OP_SUBTRACT:
+        case LZ_OP_MULTIPLY:
+        case LZ_OP_DIVIDE:
+        case LZ_OP_FLOOR_DIVIDE:
+        case LZ_OP_MODULO:
+        case LZ_OP_NEGATE:
+        case LZ_OP_EQUAL:
+        case LZ_OP_LESS:
+        case LZ_OP_LESS_EQUAL:
+        case LZ_OP_GREATER:
+        case LZ_OP_GREATER_EQUAL:
+        case LZ_OP_NOT:
+        case LZ_OP_BIT_AND:
+        case LZ_OP_BIT_OR:
+        case LZ_OP_BIT_XOR:
+        case LZ_OP_BIT_NOT:
+        case LZ_OP_SHL:
+        case LZ_OP_SHR:
+            break;
+        default:
+            return false;
+        }
+        i += lz_opcode_length(op);
+    }
+    return true;
+}
+
+/* Runs the code emitted since start on the real VM and returns its result. */
+static LzStatus evaluate_fragment(Parser *parser, size_t start, LzValue *value) {
+    const LzChunk *chunk = parser->chunk;
+    size_t size = chunk->count - start;
+
+    uint8_t *code = malloc(size + 1);
+    uint32_t *offsets = malloc((size + 1) * sizeof *offsets);
+    if (code == NULL || offsets == NULL) {
+        free(code);
+        free(offsets);
+        return LZ_ERR_MEMORY;
+    }
+    memcpy(code, chunk->code + start, size);
+    memcpy(offsets, chunk->offsets + start, size * sizeof *offsets);
+    code[size] = (uint8_t)LZ_OP_RETURN;
+    offsets[size] = offsets[size - 1];
+
+    /* The constant table is shared, not copied, so temp must never be freed as a chunk. */
+    LzChunk temp = {.code = code,
+                    .offsets = offsets,
+                    .count = size + 1,
+                    .capacity = size + 1,
+                    .constants = chunk->constants,
+                    .constant_count = chunk->constant_count,
+                    .constant_capacity = chunk->constant_count};
+
+    LzVM *vm = parser->vm;
+    uint64_t fuel = vm->fuel;
+    uint64_t instructions = vm->instructions;
+    vm->fuel = LZ_FUEL_UNLIMITED;
+    LzStatus status = lz_vm_eval(vm, &temp, value);
+    vm->fuel = fuel;
+    vm->instructions = instructions;
+
+    free(code);
+    free(offsets);
+    return status;
+}
+
+/* Statements */
+
+static void end_statement(Parser *parser) {
+    bool list = parser->comma_list;
+    parser->comma_list = false;
+    if (list) {
+        /* Inside a `for` header: the list, the ';' or the '{' is the header's business. */
+        (void)match(parser, LZ_TOKEN_NEWLINE);
+        return;
+    }
+    if (match(parser, LZ_TOKEN_NEWLINE) || match(parser, LZ_TOKEN_SEMICOLON)) {
+        return;
+    }
+    if (check(parser, LZ_TOKEN_EOF) || check(parser, LZ_TOKEN_RIGHT_BRACE)) {
+        return;
+    }
+    if (check(parser, LZ_TOKEN_EQUAL) || is_compound(parser->current.type)) {
+        error_at_current(parser, "invalid assignment target");
+    } else {
+        error_at_current(parser, "expected end of statement");
+    }
+}
+
+static void declare_variable(Parser *parser, const LzToken *name_token, LzString *name,
+                             bool is_const, const LzType *type) {
+    if (parser->scope_depth == 0) {
+        Symbol *symbol = add_symbol(parser, name_token, name, SYMBOL_GLOBAL, is_const,
+                                    lz_value_nil(), type);
+        if (symbol != NULL) {
+            emit_named(parser, LZ_OP_DEFINE_GLOBAL, name, name_token->offset);
+        }
+    } else {
+        add_symbol(parser, name_token, name, SYMBOL_LOCAL, is_const, lz_value_nil(), type);
+    }
+}
+
+static void variable_declaration(Parser *parser, bool is_const) {
+    if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+        error_at_current(parser, is_const ? "expected constant name after 'const'"
+                                          : "expected variable name after 'let'");
+        return;
+    }
+    advance(parser);
+    LzToken name_token = parser->previous;
+    LzString *name = intern_token(parser, &name_token);
+    if (name == NULL) {
+        return;
+    }
+
+    LzType declared = lz_type_of_kinds(LZ_KINDS_ANY);
+    bool annotated = false;
+    if (match(parser, LZ_TOKEN_COLON)) {
+        annotated = true;
+        (void)parse_type_union(parser, &declared);
+    }
+
+    size_t code_mark = parser->chunk->count;
+    size_t constant_mark = parser->chunk->constant_count;
+    LzToken initializer_start = parser->current;
+    bool has_initializer = false;
+    Expr initializer = expr_of(lz_type_of_kinds(LZ_KIND_NIL));
+
+    if (match(parser, LZ_TOKEN_EQUAL)) {
+        skip_newlines(parser);
+        initializer_start = parser->current;
+        initializer = expression(parser);
+        has_initializer = true;
+    } else if (is_const) {
+        error_at_current(parser, "expected '=' after constant name");
+        return;
+    } else {
+        emit_op_at(parser, LZ_OP_NIL, name_token.offset);
+        if (annotated && lz_type_assignable(&initializer.type, &declared) == LZ_ASSIGN_NEVER) {
+            error_types(parser, &name_token, "variable of type ", &declared,
+                        " needs an initial value", NULL);
+        }
+    }
+    end_statement(parser);
+
+    if (is_const && has_initializer && !parser->panic && parser->fatal == LZ_OK &&
+        parser->chunk->count > code_mark && fragment_is_pure(parser->chunk, code_mark)) {
+        LzValue value = lz_value_nil();
+        LzStatus status = evaluate_fragment(parser, code_mark, &value);
+        if (status == LZ_OK) {
+            forget_constants_from(parser, constant_mark);
+            lz_chunk_truncate(&parser->vm->heap, parser->chunk, code_mark, constant_mark);
+
+            LzType value_type = lz_type_of_value(&value);
+            if (annotated && lz_type_assignable(&value_type, &declared) == LZ_ASSIGN_NEVER) {
+                LzToken span = span_from(parser, &initializer_start);
+                error_types(parser, &span, "type mismatch: expected ", &declared, ", got ",
+                            &value_type);
+            }
+            if (add_symbol(parser, &name_token, name, SYMBOL_CONSTANT, true, value,
+                           &value_type) == NULL) {
+                lz_value_release(&parser->vm->heap, &value);
+            }
+            return;
+        }
+        if (status == LZ_ERR_MEMORY || status == LZ_ERR_HEAP_LIMIT) {
+            fail(parser, status);
+            return;
+        }
+
+        LzToken span = initializer_start;
+        span.length = parser->previous.offset + parser->previous.length - span.offset;
+        error_at(parser, &span, parser->vm->error);
+    }
+
+    if (annotated && has_initializer) {
+        check_assignment(parser, &initializer.type, &declared, &initializer_start,
+                         name_token.offset);
+    }
+    LzType stored = declared;
+    if (!annotated && is_const) {
+        stored = lz_type_widen(&initializer.type);
+    }
+    declare_variable(parser, &name_token, name, is_const, &stored);
+}
+
+/* The instruction that stores the top of the stack into a variable. */
+static void store_variable(Parser *parser, LzString *name, const Symbol *symbol,
+                           const LzToken *at) {
+    if (symbol != NULL && symbol->kind == SYMBOL_LOCAL && symbol->owner != parser->fs) {
+        int index = resolve_upvalue(parser, parser->fs, (Symbol *)symbol);
+        emit_op_at(parser, LZ_OP_SET_UPVALUE, at->offset);
+        emit_u16_at(parser, (uint16_t)(index < 0 ? 0 : index), at->offset);
+    } else if (symbol != NULL && symbol->kind == SYMBOL_LOCAL) {
+        emit_op_at(parser, LZ_OP_SET_LOCAL, at->offset);
+        emit_u16_at(parser, symbol->slot, at->offset);
+    } else {
+        emit_named(parser, LZ_OP_SET_GLOBAL, name, at->offset);
+    }
+}
+
+/* `name = value`, and the compound forms `name += value` and so on. */
+static void assignment_statement(Parser *parser) {
+    advance(parser);
+    LzToken name_token = parser->previous;
+    LzString *name = intern_token(parser, &name_token);
+    LzToken op_token = parser->current;
+    LzTokenType assign = op_token.type;
+    bool compound = is_compound(assign);
+    advance(parser);
+    skip_newlines(parser);
+
+    Symbol *symbol = name != NULL ? find_symbol(parser, name) : NULL;
+    if (symbol != NULL && symbol->loop_var) {
+        error_with_name(parser, &name_token, "cannot assign to the loop variable '", "'");
+        return;
+    }
+    bool is_constant = symbol != NULL && (symbol->is_const || symbol->kind == SYMBOL_CONSTANT);
+    if (compound && name != NULL) {
+        if (symbol == NULL && lz_vm_lookup(parser->vm, name) != NULL) {
+            error_with_name(parser, &name_token, "cannot assign to builtin '", "'");
+        } else if (is_constant) {
+            error_with_name(parser, &name_token, "cannot assign to constant '", "'");
+        } else {
+            /*
+             * The variable is read and computed on the stack, so it is evaluated once.
+             * ponytail: `x += 1` on a global that is not defined yet reads it before
+             * writing, so it fails like `x = x + 1` does. Nothing else does.
+             */
+            Expr target = variable_at(parser, &name_token);
+            skip_newlines(parser);
+            LzToken value_start = parser->current;
+            Expr value = expression(parser);
+            Expr result = compound_value(parser, &op_token, &target, &value);
+            emit_op_at(parser, compound_opcode(compound_operator(assign)), name_token.offset);
+            /* An undefined global is checked when the store runs, like `=` does. */
+            check_assignment(parser, &result.type, symbol != NULL ? &symbol->type : &target.type,
+                             &value_start, name_token.offset);
+            store_variable(parser, name, symbol, &name_token);
+        }
+        end_statement(parser);
+        return;
+    }
+
+    LzToken value_start = parser->current;
+    Expr value = expression(parser);
+    if (name == NULL) {
+        return;
+    }
+
+    if (symbol == NULL) {
+        if (lz_vm_lookup(parser->vm, name) != NULL) {
+            error_with_name(parser, &name_token, "cannot assign to builtin '", "'");
+        } else {
+            /* Sequential execution: checked when the assignment runs (SET_GLOBAL). */
+            record_name_hint(parser, &name_token, false, true, false);
+            emit_named(parser, LZ_OP_SET_GLOBAL, name, name_token.offset);
+        }
+    } else if (is_constant) {
+        error_with_name(parser, &name_token, "cannot assign to constant '", "'");
+    } else {
+        check_assignment(parser, &value.type, &symbol->type, &value_start, name_token.offset);
+        store_variable(parser, name, symbol, &name_token);
+    }
+    end_statement(parser);
+}
+
+static bool is_type_keyword(const Parser *parser) {
+    return parser->current.length == 4 &&
+           memcmp(parser->source->text + parser->current.offset, "type", 4) == 0;
+}
+
+/* type Name = <type>; "type" is only a keyword when a name follows it. */
+static void type_declaration(Parser *parser) {
+    advance(parser);
+    LzToken name_token = parser->previous;
+    LzString *name = intern_token(parser, &name_token);
+    if (name == NULL) {
+        return;
+    }
+
+    char text[48];
+    LzType ignored;
+    token_text(parser, &name_token, text, sizeof text);
+    if (builtin_type(text, &ignored)) {
+        error_with_name(parser, &name_token, "cannot redefine builtin type '", "'");
+        return;
+    }
+
+    consume(parser, LZ_TOKEN_EQUAL, "expected '=' after type name");
+    skip_newlines(parser);
+    LzType type;
+    (void)parse_type_union(parser, &type);
+    end_statement(parser);
+
+    for (size_t i = parser->alias_count; i > 0; i--) {
+        const Alias *existing = &parser->aliases[i - 1];
+        if (existing->depth < parser->scope_depth) {
+            break;
+        }
+        if (existing->name == name) {
+            error_with_name(parser, &name_token, "type '", "' is already declared in this scope");
+            return;
+        }
+    }
+    if (parser->alias_count >= LZ_MAX_ALIASES) {
+        error_at(parser, &name_token, "too many type aliases");
+        return;
+    }
+    Alias *alias = &parser->aliases[parser->alias_count++];
+    alias->name = name;
+    alias->depth = parser->scope_depth;
+    alias->type = type;
+}
+
+
+/* Is this token a compound assignment operator (`+=`, `<<=`, ...)? */
+static bool is_compound(LzTokenType type) {
+    return type >= LZ_TOKEN_PLUS_EQUAL && type <= LZ_TOKEN_GREATER_GREATER_EQUAL;
+}
+
+/* The binary operator behind a compound assignment: `+=` is `+` on the old value. */
+static LzTokenType compound_operator(LzTokenType assign) {
+    switch (assign) {
+    case LZ_TOKEN_PLUS_EQUAL:
+        return LZ_TOKEN_PLUS;
+    case LZ_TOKEN_MINUS_EQUAL:
+        return LZ_TOKEN_MINUS;
+    case LZ_TOKEN_STAR_EQUAL:
+        return LZ_TOKEN_STAR;
+    case LZ_TOKEN_SLASH_EQUAL:
+        return LZ_TOKEN_SLASH;
+    case LZ_TOKEN_SLASH_SLASH_EQUAL:
+        return LZ_TOKEN_SLASH_SLASH;
+    case LZ_TOKEN_PERCENT_EQUAL:
+        return LZ_TOKEN_PERCENT;
+    case LZ_TOKEN_AMPERSAND_EQUAL:
+        return LZ_TOKEN_AMPERSAND;
+    case LZ_TOKEN_PIPE_EQUAL:
+        return LZ_TOKEN_PIPE;
+    case LZ_TOKEN_CARET_EQUAL:
+        return LZ_TOKEN_CARET;
+    case LZ_TOKEN_LESS_LESS_EQUAL:
+        return LZ_TOKEN_LESS_LESS;
+    default:
+        return LZ_TOKEN_GREATER_GREATER;
+    }
+}
+
+/* The instruction that computes that operator on the two values on the stack. */
+static LzOpCode compound_opcode(LzTokenType type) {
+    switch (type) {
+    case LZ_TOKEN_PLUS:
+        return LZ_OP_ADD;
+    case LZ_TOKEN_MINUS:
+        return LZ_OP_SUBTRACT;
+    case LZ_TOKEN_STAR:
+        return LZ_OP_MULTIPLY;
+    case LZ_TOKEN_SLASH:
+        return LZ_OP_DIVIDE;
+    case LZ_TOKEN_SLASH_SLASH:
+        return LZ_OP_FLOOR_DIVIDE;
+    case LZ_TOKEN_PERCENT:
+        return LZ_OP_MODULO;
+    case LZ_TOKEN_AMPERSAND:
+        return LZ_OP_BIT_AND;
+    case LZ_TOKEN_PIPE:
+        return LZ_OP_BIT_OR;
+    case LZ_TOKEN_CARET:
+        return LZ_OP_BIT_XOR;
+    case LZ_TOKEN_LESS_LESS:
+        return LZ_OP_SHL;
+    default:
+        return LZ_OP_SHR;
+    }
+}
+
+/*
+ * The type of `target op value`, checked the way the binary expression would check
+ * it. Nothing is emitted: both operands are already on the stack. `at` is the `+=`
+ * token; it keeps its position and text for the message.
+ */
+static Expr compound_value(Parser *parser, const LzToken *at, const Expr *target,
+                           const Expr *value) {
+    LzToken op = *at;
+    LzTokenType type = compound_operator(at->type);
+    op.type = type;
+    switch (type) {
+    case LZ_TOKEN_AMPERSAND:
+    case LZ_TOKEN_PIPE:
+    case LZ_TOKEN_CARET:
+    case LZ_TOKEN_LESS_LESS:
+    case LZ_TOKEN_GREATER_GREATER:
+        if ((lz_type_possible_kinds(&target->type) & LZ_KIND_INT) == 0 ||
+            (lz_type_possible_kinds(&value->type) & LZ_KIND_INT) == 0) {
+            error_bitwise(parser, &op, &target->type, &value->type);
+        }
+        return expr_of(lz_type_of_kinds(LZ_KIND_INT));
+    default:
+        return arithmetic_result(parser, &op, target, value);
+    }
+}
+
 static LzTokenType next_token_type(const Parser *parser) {
     LzLexer ahead = parser->lexer;
     return lz_lexer_next(&ahead).type;
+}
+
+/*
+ * One statement of a `for` step: a call, `i = ...` or `i += ...`. Anything else is
+ * not an assignment or a call. A step never ends the statement: the `,` or the `{`
+ * after it does.
+ */
+static void step_statement(Parser *parser) {
+    LzTokenType type = parser->current.type;
+    if (type == LZ_TOKEN_IDENTIFIER) {
+        LzTokenType after = next_token_type(parser);
+        if (after == LZ_TOKEN_EQUAL || is_compound(after)) {
+            assignment_statement(parser);
+            return;
+        }
+    } else if (type == LZ_TOKEN_FN || type == LZ_TOKEN_LET || type == LZ_TOKEN_CONST ||
+               type == LZ_TOKEN_IF || type == LZ_TOKEN_WHILE || type == LZ_TOKEN_FOR ||
+               type == LZ_TOKEN_RETURN || type == LZ_TOKEN_BREAK ||
+               type == LZ_TOKEN_CONTINUE || type == LZ_TOKEN_LEFT_BRACE ||
+               type == LZ_TOKEN_RIGHT_BRACE || type == LZ_TOKEN_EOF ||
+               type == LZ_TOKEN_SEMICOLON) {
+        error_at_current(parser, "expected an assignment or a call in the loop step");
+        return;
+    }
+    LzToken start = parser->current;
+    Expr expr = expression(parser);
+    if (!expr.is_call) {
+        error_at(parser, &start, "expected an assignment or a call in the loop step");
+        return;
+    }
+    emit_op_at(parser, LZ_OP_POP, start.offset);
 }
 
 static void expression_statement(Parser *parser) {
@@ -2607,14 +3408,33 @@ static void expression_statement(Parser *parser) {
     Expr target = expression(parser);
 
     /* a[i] = v: the expression just compiled ends in OP_INDEX, which becomes OP_SET_INDEX. */
-    if (check(parser, LZ_TOKEN_EQUAL) && target.is_index && parser->fatal == LZ_OK &&
+    bool plain = check(parser, LZ_TOKEN_EQUAL);
+    bool compound = is_compound(parser->current.type);
+    if ((plain || compound) && target.is_index && parser->fatal == LZ_OK &&
         parser->chunk->count == target.op_pos + 1) {
         uint32_t index_offset = parser->chunk->offsets[target.op_pos];
-        lz_chunk_truncate(&parser->vm->heap, parser->chunk, target.op_pos,
-                          parser->chunk->constant_count);
+        LzToken op_token = parser->current;
+        LzTokenType assign = op_token.type;
         advance(parser);
         skip_newlines(parser);
         LzToken value_start = parser->current;
+        if (compound) {
+            /*
+             * a[i] += v: OP_INDEX_KEEP left [array][index][item], so v goes on top and
+             * the operator leaves the new item: exactly what OP_SET_INDEX takes. The
+             * array and the index are evaluated once and stay put.
+             */
+            Expr value = expression(parser);
+            Expr result = compound_value(parser, &op_token, &target, &value);
+            emit_op_at(parser, compound_opcode(compound_operator(assign)), index_offset);
+            check_assignment(parser, &result.type, &target.type, &value_start, index_offset);
+            emit_op_at(parser, LZ_OP_SET_INDEX, index_offset);
+            end_statement(parser);
+            return;
+        }
+
+        lz_chunk_truncate(&parser->vm->heap, parser->chunk, target.op_pos,
+                          parser->chunk->constant_count);
         Expr value = expression(parser);
         if (lz_type_assignable(&value.type, &target.type) == LZ_ASSIGN_NEVER) {
             LzToken span = span_from(parser, &value_start);
@@ -3019,6 +3839,7 @@ static void synchronize(Parser *parser) {
         case LZ_TOKEN_CONST:
         case LZ_TOKEN_IF:
         case LZ_TOKEN_WHILE:
+        case LZ_TOKEN_FOR:
         case LZ_TOKEN_FN:
         case LZ_TOKEN_RETURN:
         case LZ_TOKEN_BREAK:
@@ -3081,6 +3902,10 @@ static void declaration(Parser *parser) {
         advance(parser);
         while_statement(parser);
         break;
+    case LZ_TOKEN_FOR:
+        advance(parser);
+        for_statement(parser);
+        break;
     case LZ_TOKEN_LEFT_BRACE:
         block(parser);
         break;
@@ -3091,7 +3916,8 @@ static void declaration(Parser *parser) {
         if (is_type_keyword(parser) && next_token_type(parser) == LZ_TOKEN_IDENTIFIER) {
             advance(parser);
             type_declaration(parser);
-        } else if (next_token_type(parser) == LZ_TOKEN_EQUAL) {
+        } else if (next_token_type(parser) == LZ_TOKEN_EQUAL ||
+                   is_compound(next_token_type(parser))) {
             assignment_statement(parser);
         } else {
             expression_statement(parser);

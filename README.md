@@ -55,7 +55,44 @@ sum(1, 2, *[3, 4])                   # * spreads an array into arguments
 
 ### Loops
 
-`while (condition) { ... }` runs the body while the condition is truthy.
+`for x in ...` walks an array, a string or a range; `for let i = 0; i < n; i += 1
+{ ... }` is the free form; `while (condition) { ... }` runs the body while the
+condition is truthy.
+
+| You want | Write |
+| --- | --- |
+| every item of an array or string | `for x in xs { ... }` |
+| an item and its index | `for i, x in xs { ... }` |
+| a plain counter, up or down | `for i in 0..n { ... }` / `for i in n..0 by -1 { ... }` |
+| a complex step, two counters, your own condition | `for let i = 0; i < n; i *= 2 { ... }` |
+| repeat while a condition holds, with no counter | `while cond { ... }` |
+
+```
+for x in [4, 7, 9] { print(x, " ") }         # 4 7 9
+for i, ch in "hé" { println(i, ch) }         # 0 h / 1 é
+for i in 0..3 { print(i) }                   # 012
+for i in 0..=3 { print(i) }                  # 0123
+for i in 10..0 by -3 { print(i, " ") }       # 10 7 4 1
+for let i = 1; i < 100; i *= 2 { print(i) }  # 1248163264
+```
+
+* `a..b` visits `a` up to `b - 1`; `a..=b` includes `b`. The bounds and the step
+  are evaluated once, must be ints, and are never overflowed: `0..=INT64_MAX`
+  ends after one round of `INT64_MAX`. A step of 0 is an error. A range is not a
+  value: `let r = 0..3` is `a range can only be used in a 'for' loop`.
+* An array's length is read again every round, so a loop over an array the body
+  grows walks the new items and one over an array it shrinks stops early. A
+  string is walked one code point at a time without building an array of them.
+* The loop variables are fresh each round and cannot be assigned
+  (`cannot assign to the loop variable 'x'`). A closure made in the body keeps
+  that round's value.
+* A C-style loop's variables live only in its header and body. `continue` runs
+  the step; `break` leaves the loop. Closures made in the condition or the step
+  are not given a fresh variable.
+* Every back edge, including the one `continue` takes, is charged to the fuel
+  limit, so `for ;; { }` stops when one is set.
+
+
 `break` leaves the innermost loop; `continue` goes straight to its next
 condition. Both are statements of their own, without a value or a label, and
 may stand inside an `if`. Anything after them in the same block does not run.
@@ -125,6 +162,21 @@ Logic can be written with symbols or words; both mean the same thing:
 | `!x` | `not x` |
 | `==` | `equal` |
 | `!=` | `not equal` |
+
+**Compound assignment** writes `x op= v` for `x = x op v`, with every binary operator
+the language has: `+=` `-=` `*=` `/=` `//=` `%=` `&=` `|=` `^=` `<<=` `>>=`. It works on
+locals, globals, captured variables and array items (`xs[i] += 1`, `grid[r][c] += 1`).
+The target is evaluated once, and the result is checked against the variable's type
+exactly as `=` would check it.
+
+```
+let total = 0
+total += 2 * 3        # 6
+let flags = 0b1000
+flags &= ~1           # 8
+flags <<= 1           # 16
+xs[i] += 1
+```
 
 ```
 if i != 2 && i != 3 { ... }

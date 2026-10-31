@@ -20,6 +20,7 @@ static const Keyword keywords[] = {
     {"const", LZ_TOKEN_CONST}, {"if", LZ_TOKEN_IF},   {"else", LZ_TOKEN_ELSE},
     {"while", LZ_TOKEN_WHILE}, {"fn", LZ_TOKEN_FN},   {"return", LZ_TOKEN_RETURN},
     {"break", LZ_TOKEN_BREAK}, {"continue", LZ_TOKEN_CONTINUE},
+    {"for", LZ_TOKEN_FOR},    {"in", LZ_TOKEN_IN},     {"by", LZ_TOKEN_BY},
     /* Words for symbols: `not x` is `!x`, `a equal b` is `a == b`, `a not equal b` is `a != b`. */
     {"not", LZ_TOKEN_BANG},  {"equal", LZ_TOKEN_EQUAL_EQUAL},
 };
@@ -426,31 +427,52 @@ LzToken lz_lexer_next(LzLexer *lexer) {
     case ',':
         return make_token(lexer, LZ_TOKEN_COMMA, start);
     case '.':
+        /* `..` and `..=` are ranges. `1.5` and `3.to_string()` never reach here: the number
+         * lexer takes the dot of a float, and a single dot stays a plain DOT. */
+        if (match(lexer, '.')) {
+            return make_token(lexer,
+                              match(lexer, '=') ? LZ_TOKEN_DOT_DOT_EQUAL : LZ_TOKEN_DOT_DOT, start);
+        }
         return make_token(lexer, LZ_TOKEN_DOT, start);
     case ':':
         return make_token(lexer, LZ_TOKEN_COLON, start);
     case ';':
         return make_token(lexer, LZ_TOKEN_SEMICOLON, start);
     case '+':
-        return make_token(lexer, LZ_TOKEN_PLUS, start);
+        return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_PLUS_EQUAL : LZ_TOKEN_PLUS, start);
     case '-':
-        return make_token(lexer, match(lexer, '>') ? LZ_TOKEN_ARROW : LZ_TOKEN_MINUS, start);
+        if (match(lexer, '>')) {
+            return make_token(lexer, LZ_TOKEN_ARROW, start);
+        }
+        return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_MINUS_EQUAL : LZ_TOKEN_MINUS, start);
     case '*':
-        return make_token(lexer, LZ_TOKEN_STAR, start);
+        return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_STAR_EQUAL : LZ_TOKEN_STAR, start);
     case '%':
-        return make_token(lexer, LZ_TOKEN_PERCENT, start);
+        return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_PERCENT_EQUAL : LZ_TOKEN_PERCENT, start);
     case '|':
-        return make_token(lexer, match(lexer, '|') ? LZ_TOKEN_OR : LZ_TOKEN_PIPE, start);
+        if (match(lexer, '|')) {
+            return make_token(lexer, LZ_TOKEN_OR, start);
+        }
+        return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_PIPE_EQUAL : LZ_TOKEN_PIPE, start);
     case '&':
-        return make_token(lexer, match(lexer, '&') ? LZ_TOKEN_AND : LZ_TOKEN_AMPERSAND, start);
+        if (match(lexer, '&')) {
+            return make_token(lexer, LZ_TOKEN_AND, start);
+        }
+        return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_AMPERSAND_EQUAL : LZ_TOKEN_AMPERSAND,
+                          start);
     case '^':
-        return make_token(lexer, LZ_TOKEN_CARET, start);
+        return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_CARET_EQUAL : LZ_TOKEN_CARET, start);
     case '~':
         return make_token(lexer, LZ_TOKEN_TILDE, start);
     case '?':
         return make_token(lexer, LZ_TOKEN_QUESTION, start);
     case '/':
-        return make_token(lexer, match(lexer, '/') ? LZ_TOKEN_SLASH_SLASH : LZ_TOKEN_SLASH, start);
+        if (match(lexer, '/')) {
+            return make_token(lexer,
+                              match(lexer, '=') ? LZ_TOKEN_SLASH_SLASH_EQUAL : LZ_TOKEN_SLASH_SLASH,
+                              start);
+        }
+        return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_SLASH_EQUAL : LZ_TOKEN_SLASH, start);
     case '!':
         return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_BANG_EQUAL : LZ_TOKEN_BANG, start);
     case '=':
@@ -460,12 +482,16 @@ LzToken lz_lexer_next(LzLexer *lexer) {
         return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_EQUAL_EQUAL : LZ_TOKEN_EQUAL, start);
     case '<':
         if (match(lexer, '<')) {
-            return make_token(lexer, LZ_TOKEN_LESS_LESS, start);
+            return make_token(lexer,
+                              match(lexer, '=') ? LZ_TOKEN_LESS_LESS_EQUAL : LZ_TOKEN_LESS_LESS,
+                              start);
         }
         return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_LESS_EQUAL : LZ_TOKEN_LESS, start);
     case '>':
         if (match(lexer, '>')) {
-            return make_token(lexer, LZ_TOKEN_GREATER_GREATER, start);
+            return make_token(
+                lexer, match(lexer, '=') ? LZ_TOKEN_GREATER_GREATER_EQUAL : LZ_TOKEN_GREATER_GREATER,
+                start);
         }
         return make_token(lexer, match(lexer, '=') ? LZ_TOKEN_GREATER_EQUAL : LZ_TOKEN_GREATER,
                           start);
@@ -587,6 +613,38 @@ const char *lz_token_type_name(LzTokenType type) {
         return "ARROW";
     case LZ_TOKEN_FAT_ARROW:
         return "FAT_ARROW";
+    case LZ_TOKEN_PLUS_EQUAL:
+        return "PLUS_EQUAL";
+    case LZ_TOKEN_MINUS_EQUAL:
+        return "MINUS_EQUAL";
+    case LZ_TOKEN_STAR_EQUAL:
+        return "STAR_EQUAL";
+    case LZ_TOKEN_SLASH_EQUAL:
+        return "SLASH_EQUAL";
+    case LZ_TOKEN_SLASH_SLASH_EQUAL:
+        return "SLASH_SLASH_EQUAL";
+    case LZ_TOKEN_PERCENT_EQUAL:
+        return "PERCENT_EQUAL";
+    case LZ_TOKEN_AMPERSAND_EQUAL:
+        return "AMPERSAND_EQUAL";
+    case LZ_TOKEN_PIPE_EQUAL:
+        return "PIPE_EQUAL";
+    case LZ_TOKEN_CARET_EQUAL:
+        return "CARET_EQUAL";
+    case LZ_TOKEN_LESS_LESS_EQUAL:
+        return "LESS_LESS_EQUAL";
+    case LZ_TOKEN_GREATER_GREATER_EQUAL:
+        return "GREATER_GREATER_EQUAL";
+    case LZ_TOKEN_FOR:
+        return "FOR";
+    case LZ_TOKEN_IN:
+        return "IN";
+    case LZ_TOKEN_BY:
+        return "BY";
+    case LZ_TOKEN_DOT_DOT:
+        return "DOT_DOT";
+    case LZ_TOKEN_DOT_DOT_EQUAL:
+        return "DOT_DOT_EQUAL";
     }
     return "UNKNOWN";
 }

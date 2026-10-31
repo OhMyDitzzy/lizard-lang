@@ -57,7 +57,27 @@ typedef enum LzTokenType {
     LZ_TOKEN_BREAK,
     LZ_TOKEN_CONTINUE,
     LZ_TOKEN_ARROW,
-    LZ_TOKEN_FAT_ARROW /* => */
+    LZ_TOKEN_FAT_ARROW, /* => */
+
+    /* Compound assignment, appended last so the earlier token numbers keep theirs. */
+    LZ_TOKEN_PLUS_EQUAL,           /* += */
+    LZ_TOKEN_MINUS_EQUAL,          /* -= */
+    LZ_TOKEN_STAR_EQUAL,           /* *= */
+    LZ_TOKEN_SLASH_EQUAL,          /* /= */
+    LZ_TOKEN_SLASH_SLASH_EQUAL,    /* //= */
+    LZ_TOKEN_PERCENT_EQUAL,        /* %= */
+    LZ_TOKEN_AMPERSAND_EQUAL,      /* &= */
+    LZ_TOKEN_PIPE_EQUAL,           /* |= */
+    LZ_TOKEN_CARET_EQUAL,          /* ^= */
+    LZ_TOKEN_LESS_LESS_EQUAL,      /* <<= */
+    LZ_TOKEN_GREATER_GREATER_EQUAL, /* >>= */
+
+    /* `for` loops. Appended last so the earlier token numbers keep theirs. */
+    LZ_TOKEN_FOR,     /* for */
+    LZ_TOKEN_IN,      /* in */
+    LZ_TOKEN_BY,      /* by */
+    LZ_TOKEN_DOT_DOT, /* .. */
+    LZ_TOKEN_DOT_DOT_EQUAL /* ..= */
 } LzTokenType;
 
 /*

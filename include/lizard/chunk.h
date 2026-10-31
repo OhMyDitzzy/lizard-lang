@@ -65,7 +65,25 @@ typedef enum LzOpCode {
     LZ_OP_BIT_XOR,       /* pop b, pop a, push a ^ b */
     LZ_OP_BIT_NOT,       /* pop a, push ~a */
     LZ_OP_SHL,           /* pop n, pop a, push a << n (0..63; bits shifted out are dropped) */
-    LZ_OP_SHR            /* pop n, pop a, push a >> n (0..63; arithmetic shift) */
+    LZ_OP_SHR,           /* pop n, pop a, push a >> n (0..63; arithmetic shift) */
+
+    /* Compound index assignment. Appended last so the earlier opcodes keep their numbers. */
+    LZ_OP_INDEX_KEEP,     /* pop index, keep the array, push array[index]: [a][i] -> [a][i][item] */
+
+    /* `for ... in`: one item per round, with no array built for the string case. */
+    LZ_OP_ITER_LENGTH,     /* pop x, push the rounds it has: items of an array, bytes of a
+                              string. Fails with "cannot iterate over <kind>" for anything else. */
+    LZ_OP_ITER_NEXT,       /* pop off, keep x, push item then the next offset:
+                              [x][off] -> [x][off][item][next]; strings step by code point */
+    LZ_OP_RANGE_TEST,      /* u8 inclusive: pop step, pop limit, pop counter, push whether the
+                              counter is still inside. A step of 0 is an error. */
+    LZ_OP_RANGE_LAST,      /* u8 inclusive: pop step, pop limit, pop counter, push the last value
+                              the loop visits. Only runs once the test said the range is not
+                              empty, so the last value is reachable without overflow. */
+    LZ_OP_RANGE_NEXT,      /* pop step, pop counter, push counter + step; never overflows, because
+                              the loop steps only while the counter is before the last value */
+    LZ_OP_CLOSE_UPVALUE_KEEP /* close the upvalue of the top slot and keep the slot: the
+                                captured loop variable of a C-style `for` is fresh each round */
 } LzOpCode;
 
 #define LZ_CONSTANTS_MAX 65536
