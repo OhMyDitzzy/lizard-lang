@@ -1,0 +1,28 @@
+# String literals: raw, multi-line, templates, format specs. See docs/STRINGS.md.
+let name = "Ana"
+let items = [["Coffee", 3.5, 2], ["Bread", 12.25, 1], ["Eggs", 0.5, 12]]
+
+println(r"C:\Users\new\table")              # no escapes in a raw string
+println($"Hello {name}! {{literal braces}}")
+println($"{name=} {items.len()=}")           # debug form
+
+let width = 10
+println($"{"item":<{width}}{"price":>8}{"qty":>5}")
+let total = 0.0
+let i = 0
+while (i < items.len()) {
+    let row = items[i]
+    println($"{row[0]:<{width}}{row[1]:>8.2f}{row[2]:>5}")
+    total = total + row[1] * row[2]
+    i = i + 1
+}
+println($"{"total":<{width}}{total:>8,.2f}")
+
+let report = $"""
+    Report for {name}
+      lines: {items.len()}
+      total: {total:.1f}
+    """
+println(report)
+
+println($"{255:#06x} {255:b} {0.256:.1%} {1234567:,}")

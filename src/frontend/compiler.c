@@ -6,10 +6,12 @@
 #include <string.h>
 
 #include "lizard/array.h"
+#include "lizard/format.h"
 #include "lizard/function.h"
 #include "lizard/lexer.h"
 #include "lizard/native.h"
 #include "lizard/report.h"
+#include "lizard/strlit.h"
 #include "lizard/suggest.h"
 #include "lizard/type.h"
 
@@ -916,6 +918,10 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
     }
     case LZ_TOKEN_STRING: {
         advance(parser);
+        if (parser->previous.value.string.is_template) {
+            error_at_previous(parser, "a template string cannot be used as a type");
+            return false;
+        }
         LzBuffer decoded = {0};
         if (!lz_token_string_value(parser->source, &parser->previous, &decoded)) {
             lz_buffer_free(&decoded);
@@ -1037,16 +1043,9 @@ static Expr number(Parser *parser) {
     return expr_of(lz_type_of_kinds(LZ_KIND_FLOAT));
 }
 
-static Expr string(Parser *parser) {
-    LzBuffer decoded = {0};
-    if (!lz_token_string_value(parser->source, &parser->previous, &decoded)) {
-        lz_buffer_free(&decoded);
-        fail(parser, LZ_ERR_MEMORY);
-        return any_expr();
-    }
-
-    LzString *text = lz_string_new(&parser->vm->heap, decoded.data, decoded.length);
-    lz_buffer_free(&decoded);
+/* A string constant on the stack, from decoded text. */
+static Expr emit_string_value(Parser *parser, const char *data, size_t length) {
+    LzString *text = lz_string_new(&parser->vm->heap, data, length);
     if (text == NULL) {
         fail(parser, lz_vm_out_of_memory(parser->vm));
         return any_expr();
@@ -1058,6 +1057,228 @@ static Expr string(Parser *parser) {
         return expr_of(lz_type_of_value(&parser->chunk->constants[index]));
     }
     return expr_of(lz_type_of_kinds(LZ_KIND_STRING));
+}
+
+static void error_range(Parser *parser, size_t offset, size_t length, const char *message) {
+    if (parser->panic) {
+        return;
+    }
+    parser->panic = true;
+    record(parser, (uint32_t)offset, (uint32_t)(length == 0 ? 1 : length), message);
+}
+
+/*
+ * Compiles source[start, end) as one expression, as if it were written there. The lexer
+ * works on a copy of the source cut at end, so every offset stays the real one.
+ */
+static Expr embedded_expression(Parser *parser, size_t start, size_t end) {
+    LzLexer saved_lexer = parser->lexer;
+    LzToken saved_current = parser->current;
+    LzToken saved_previous = parser->previous;
+    const LzSource *saved_source = parser->source;
+
+    LzSource cut = *saved_source;
+    cut.length = end;
+    parser->source = &cut;
+    lz_lexer_init(&parser->lexer, &cut);
+    parser->lexer.position = start;
+    parser->lexer.nesting = 1; /* line breaks inside {} are not statement ends */
+    parser->lexer.after_newline = false;
+
+    advance(parser);
+    Expr value = expression(parser);
+    if (!check(parser, LZ_TOKEN_EOF)) {
+        error_at_current(parser, "unexpected token in a template expression (expected '}')");
+    }
+
+    parser->lexer = saved_lexer;
+    parser->current = saved_current;
+    parser->previous = saved_previous;
+    parser->source = saved_source;
+    return value;
+}
+
+/* The method of that name, called on the value below it: leaves [callee][value]. */
+static bool emit_method_callee(Parser *parser, const char *name, size_t offset) {
+    LzString *interned = lz_vm_intern(parser->vm, name, strlen(name));
+    if (interned == NULL) {
+        fail(parser, lz_vm_out_of_memory(parser->vm));
+        return false;
+    }
+    const LzValue *method = lz_table_get(&parser->vm->methods, interned);
+    if (method == NULL) {
+        error_range(parser, offset, 1, "template strings need the builtin methods (to_string, format, to_debug)");
+        return false;
+    }
+    (void)emit_constant(parser, *method);
+    emit_op_at(parser, LZ_OP_SWAP, (uint32_t)offset);
+    return true;
+}
+
+static void emit_call_count(Parser *parser, unsigned count, size_t offset) {
+    emit_op_at(parser, LZ_OP_CALL, (uint32_t)offset);
+    emit_byte_at(parser, (uint8_t)count, (uint32_t)offset);
+}
+
+/* An expression whose text form is on the stack. */
+static void emit_as_text(Parser *parser, const Expr *value, size_t offset) {
+    if (lz_type_possible_kinds(&value->type) != LZ_KIND_STRING &&
+        emit_method_callee(parser, "to_string", offset)) {
+        emit_call_count(parser, 1, offset);
+    }
+}
+
+static void format_error(Parser *parser, size_t base, const LzFormatError *error) {
+    if (parser->panic) {
+        return;
+    }
+    LzSuggestions suggestions = {0};
+    if (error->suggestion != 0) {
+        suggestions.count = 1;
+        suggestions.names[0][0] = error->suggestion;
+        suggestions.names[0][1] = '\0';
+    }
+    parser->panic = true;
+    record_full(parser, (uint32_t)(base + error->offset), (uint32_t)error->length, error->message,
+                error->suggestion != 0 ? "not a format type" : NULL,
+                error->suggestion != 0 ? &suggestions : NULL);
+}
+
+/* The spec of {x:spec} as one string on the stack; {w} parts are filled in at run time. */
+static void compile_spec(Parser *parser, const LzStringPart *part) {
+    const char *text = parser->source->text;
+    size_t p = part->spec_start;
+    size_t end = part->spec_end;
+
+    if (memchr(text + p, '{', end - p) == NULL) {
+        LzFormatSpec spec;
+        LzFormatError error;
+        if (!lz_format_parse(text + p, end - p, &spec, &error)) {
+            format_error(parser, p, &error);
+        }
+        (void)emit_string_value(parser, text + p, end - p);
+        return;
+    }
+
+    unsigned pieces = 0;
+    while (p < end || pieces == 0) {
+        size_t stop = p;
+        while (stop < end && text[stop] != '{') {
+            stop++;
+        }
+        if (stop > p || (pieces == 0 && stop >= end)) {
+            (void)emit_string_value(parser, text + p, stop - p);
+            if (pieces++ > 0) {
+                emit_op_at(parser, LZ_OP_ADD, (uint32_t)p);
+            }
+        }
+        if (stop >= end) {
+            break;
+        }
+        LzStringBraces braces;
+        LzStringError error;
+        if (!lz_string_scan_braces(parser->source, stop, part->multiline, &braces, &error)) {
+            error_range(parser, error.offset, error.length, error.message);
+            return;
+        }
+        size_t first = stop + 1;
+        while (first < braces.expr_end && (text[first] == ' ' || text[first] == '\t')) {
+            first++;
+        }
+        if (first >= braces.expr_end) {
+            error_range(parser, stop, braces.close - stop + 1, "empty '{}' in a format spec");
+            return;
+        }
+        Expr value = embedded_expression(parser, stop + 1, braces.expr_end);
+        emit_as_text(parser, &value, stop);
+        if (pieces++ > 0) {
+            emit_op_at(parser, LZ_OP_ADD, (uint32_t)stop);
+        }
+        p = braces.close + 1;
+    }
+}
+
+/* One {...} of a template: leaves its text on the stack. */
+static void interpolation(Parser *parser, const LzStringPart *part) {
+    const char *text = parser->source->text;
+    if (part->debug) {
+        (void)emit_string_value(parser, text + part->open + 1, part->label_end - part->open - 1);
+    }
+    Expr value = embedded_expression(parser, part->expr_start, part->expr_end);
+
+    if (part->has_spec) {
+        if (emit_method_callee(parser, "format", part->open)) {
+            compile_spec(parser, part);
+            emit_call_count(parser, 2, part->open);
+        }
+    } else if (part->debug) {
+        if (emit_method_callee(parser, "to_debug", part->open)) {
+            emit_call_count(parser, 1, part->open);
+        }
+    } else {
+        emit_as_text(parser, &value, part->open);
+    }
+    if (part->debug) {
+        emit_op_at(parser, LZ_OP_ADD, (uint32_t)part->open);
+    }
+}
+
+/* $"text {x} text": the pieces are joined left to right. */
+static Expr template_string(Parser *parser) {
+    LzStringReader reader;
+    if (!lz_string_reader_init(&reader, parser->source, parser->previous.offset)) {
+        error_at_previous(parser, "invalid template string");
+        return any_expr();
+    }
+
+    LzBuffer text = {0};
+    unsigned pieces = 0;
+    Expr result = expr_of(lz_type_of_kinds(LZ_KIND_STRING));
+    bool pure = true;
+    for (;;) {
+        LzStringPart part;
+        text.length = 0;
+        if (!lz_string_reader_next(&reader, &text, &part)) {
+            fail(parser, lz_vm_out_of_memory(parser->vm));
+            break;
+        }
+        if (part.kind == LZ_STRING_END) {
+            break;
+        }
+        if (part.kind == LZ_STRING_ERROR) {
+            error_range(parser, part.offset, part.length, part.message);
+            break;
+        }
+        if (part.kind == LZ_STRING_TEXT) {
+            result = emit_string_value(parser, text.data != NULL ? text.data : "", text.length);
+        } else {
+            interpolation(parser, &part);
+            pure = false;
+        }
+        if (pieces++ > 0) {
+            emit_op(parser, LZ_OP_ADD);
+        }
+    }
+    if (pieces == 0) {
+        result = emit_string_value(parser, "", 0);
+    }
+    lz_buffer_free(&text);
+    return pure ? result : expr_of(lz_type_of_kinds(LZ_KIND_STRING));
+}
+
+static Expr string(Parser *parser) {
+    if (parser->previous.value.string.is_template) {
+        return template_string(parser);
+    }
+    LzBuffer decoded = {0};
+    if (!lz_token_string_value(parser->source, &parser->previous, &decoded)) {
+        lz_buffer_free(&decoded);
+        fail(parser, LZ_ERR_MEMORY);
+        return any_expr();
+    }
+    Expr result = emit_string_value(parser, decoded.data != NULL ? decoded.data : "", decoded.length);
+    lz_buffer_free(&decoded);
+    return result;
 }
 
 static Expr literal(Parser *parser) {

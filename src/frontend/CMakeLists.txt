@@ -1,6 +1,7 @@
 add_library(lizard_frontend STATIC
     compiler.c
-    lexer.c)
+    lexer.c
+    strlit.c)
 
 target_link_libraries(lizard_frontend PUBLIC lizard_core)
 

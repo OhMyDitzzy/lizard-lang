@@ -480,3 +480,10 @@ bool lz_value_write(const LzValue *value, const LzWriter *writer) {
     }
     return false;
 }
+
+bool lz_value_write_debug(const LzValue *value, const LzWriter *writer) {
+    if (value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_STRING) {
+        return write_quoted((const LzString *)value->as.object, writer);
+    }
+    return lz_value_write(value, writer);
+}

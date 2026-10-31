@@ -5,11 +5,62 @@
 
 #include "convert/convert.h"
 #include "lizard/array.h"
+#include "lizard/format.h"
 
 /* ---- methods that need no file of their own ---- */
 
 LzStatus lz_method_to_string(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
     return lz_builtin_string(vm, argc, argv, result);
+}
+
+static LzStatus string_result(LzVM *vm, LzBuffer *text, LzValue *result) {
+    LzString *string = lz_string_new(&vm->heap, text->data, text->length);
+    lz_buffer_free(text);
+    if (string == NULL) {
+        return lz_vm_out_of_memory(vm);
+    }
+    *result = lz_value_object(&string->base);
+    return LZ_OK;
+}
+
+/* x.format(spec) is `{x:spec}`. */
+LzStatus lz_method_format(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
+    (void)argc;
+    if (argv[1].type != LZ_VAL_OBJECT || argv[1].as.object->type != LZ_OBJ_STRING) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "format(): the spec must be a string, got %s",
+                               lz_kind_name(lz_kind_of(&argv[1])));
+    }
+    const LzString *spec_text = (const LzString *)argv[1].as.object;
+    LzFormatSpec spec;
+    LzFormatError error;
+    if (!lz_format_parse(spec_text->data, spec_text->length, &spec, &error)) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "format(): invalid spec \"%s\": %s",
+                               spec_text->data, error.message);
+    }
+    LzBuffer text = {0};
+    LzWriter writer = lz_writer_from_buffer(&text);
+    LzFormatResult done = lz_format_value(&argv[0], &spec, &writer, &error);
+    if (done == LZ_FORMAT_BAD) {
+        lz_buffer_free(&text);
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "format(): %s", error.message);
+    }
+    if (done != LZ_FORMAT_OK) {
+        lz_buffer_free(&text);
+        return lz_vm_out_of_memory(vm);
+    }
+    return string_result(vm, &text, result);
+}
+
+/* x.to_debug() is `{x=}` without the name: strings are quoted. */
+LzStatus lz_method_to_debug(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
+    (void)argc;
+    LzBuffer text = {0};
+    LzWriter writer = lz_writer_from_buffer(&text);
+    if (!lz_value_write_debug(&argv[0], &writer)) {
+        lz_buffer_free(&text);
+        return lz_vm_out_of_memory(vm);
+    }
+    return string_result(vm, &text, result);
 }
 
 LzStatus lz_method_is_empty(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
@@ -61,6 +112,8 @@ LzStatus lz_method_last(LzVM *vm, int argc, const LzValue *argv, LzValue *result
 static const LzMethod methods[] = {
     /* every kind */
     {"to_string", LZ_KINDS_ANY, lz_method_to_string, 0, 0, LZ_KIND_STRING},
+    {"to_debug", LZ_KINDS_ANY, lz_method_to_debug, 0, 0, LZ_KIND_STRING},
+    {"format", LZ_KINDS_ANY, lz_method_format, 1, 1, LZ_KIND_STRING},
     {"to_bool", LZ_KINDS_ANY, lz_builtin_bool, 0, 0, LZ_KIND_BOOL},
     {"to_int", K_CONVERTIBLE, lz_builtin_int, 0, 0, LZ_KIND_INT},
     {"to_float", K_CONVERTIBLE, lz_builtin_float, 0, 0, LZ_KIND_FLOAT},

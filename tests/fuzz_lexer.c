@@ -43,7 +43,7 @@ static void run_one(void) {
         LZ_CHECK(token.offset >= previous_end || token.type == LZ_TOKEN_EOF);
         previous_end = (size_t)token.offset + token.length;
 
-        if (token.type == LZ_TOKEN_STRING) {
+        if (token.type == LZ_TOKEN_STRING && !token.value.string.is_template) {
             LzBuffer value = {0};
             LZ_CHECK(lz_token_string_value(&source, &token, &value));
             LZ_CHECK(value.length <= token.length * 4);

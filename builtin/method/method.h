@@ -29,6 +29,8 @@ LzStatus lz_method_install(LzVM *vm);
 
 /* Implementations (text.c, number.c, method.c). */
 LzStatus lz_method_to_string(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_format(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_to_debug(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 LzStatus lz_method_to_upper(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 LzStatus lz_method_to_lower(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 LzStatus lz_method_trim(LzVM *vm, int argc, const LzValue *argv, LzValue *result);

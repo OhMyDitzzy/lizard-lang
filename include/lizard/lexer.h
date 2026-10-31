@@ -57,7 +57,7 @@ typedef enum LzTokenType {
  * A token is a span of the source: [offset, offset + length). The lexeme is
  * never copied. INTEGER and FLOAT carry their value (an integer literal is a
  * magnitude, and 2^63 is returned as INT64_MIN: valid only after a unary minus);
- * ERROR carries a static message. A string token spans both quotes; use lz_token_string_value to get
+ * ERROR carries a static message. A string token spans the whole literal (markers, fences and all); use lz_token_string_value to get
  * its decoded contents.
  */
 typedef struct LzToken {
@@ -68,6 +68,11 @@ typedef struct LzToken {
         int64_t integer;
         double number;
         const char *error;
+        struct {
+            bool is_template;
+            bool is_raw;
+            bool is_multiline;
+        } string;
     } value;
 } LzToken;
 

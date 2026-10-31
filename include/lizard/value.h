@@ -104,4 +104,7 @@ bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *
  */
 bool lz_value_write(const LzValue *value, const LzWriter *writer);
 
+/* Like lz_value_write, but a string is quoted and escaped even at the top level. */
+bool lz_value_write_debug(const LzValue *value, const LzWriter *writer);
+
 #endif

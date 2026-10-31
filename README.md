@@ -82,6 +82,23 @@ array stored under such a type is checked once and then restricted to it, so
 
 More in `examples/`. Run one with `build/bin/lizard examples/fizzbuzz.lz`.
 
+### Strings
+
+One literal form covers plain, raw, multi-line and template strings: `[$][r]` + quotes.
+
+```
+let name = "Ana"
+println($"Hello {name}! {1 + 2} {{braces}}")      # template
+println($"{3.14159:.2f} {255:#06x} {name:>8}")    # format specs
+println($"{name=}")                               # debug form: name="Ana"
+println(r"C:\path\no\escapes")                    # raw
+println($"""
+    multi-line, indentation follows the closing quotes
+    """)
+```
+
+See [docs/STRINGS.md](docs/STRINGS.md) for the full rules and `examples/strings.lz`.
+
 ## Build
 
 Requires a C11 compiler and CMake 3.16 or newer.

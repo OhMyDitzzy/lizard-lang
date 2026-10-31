@@ -1,6 +1,7 @@
 #include "lizard/lexer.h"
 
 #include "lizard/number.h"
+#include "lizard/strlit.h"
 
 #include <errno.h>
 #include <locale.h>
@@ -283,106 +284,54 @@ static LzToken lex_number(LzLexer *lexer, size_t start) {
 }
 
 /*
- * Escapes: \n \t \r \0 \\ \" \' \xHH (00 to 7F) and \u{H..H} (1 to 6 digits, a
- * scalar value). \x is limited to ASCII so a literal is valid UTF-8 whenever
- * the source is.
+ * A string literal of any kind (see strlit.h). The scan finds its end; a second walk with
+ * the reader reports escapes, braces and indentation that are wrong, so the compiler can
+ * decode a STRING token without failing.
  */
 static LzToken lex_string(LzLexer *lexer, size_t start) {
-    const char *text = lexer->source->text;
-    size_t length = lexer->source->length;
-    char quote = text[start];
-    size_t pos = start + 1;
-    const char *error = NULL;
-
-    for (;;) {
-        if (pos >= length || text[pos] == '\n') {
-            if (error == NULL) {
-                error = "unterminated string";
-            }
-            break;
-        }
-
-        char c = text[pos];
-        if (c == quote) {
-            pos++;
-            break;
-        }
-        if (c != '\\') {
-            pos++;
-            continue;
-        }
-
-        pos++;
-        if (pos >= length || text[pos] == '\n') {
-            if (error == NULL) {
-                error = "unterminated string";
-            }
-            break;
-        }
-
-        switch (text[pos]) {
-        case 'n':
-        case 't':
-        case 'r':
-        case '0':
-        case '\\':
-        case '"':
-        case '\'':
-            pos++;
-            break;
-        case 'x': {
-            pos++;
-            int high = pos < length ? hex_value(text[pos]) : -1;
-            int low = pos + 1 < length ? hex_value(text[pos + 1]) : -1;
-            if (high < 0 || low < 0 || high > 7) {
-                if (error == NULL) {
-                    error = "invalid escape sequence";
-                }
-            } else {
-                pos += 2;
-            }
-            break;
-        }
-        case 'u': {
-            pos++;
-            bool valid = false;
-            if (pos < length && text[pos] == '{') {
-                size_t probe = pos + 1;
-                uint32_t scalar = 0;
-                int digits = 0;
-                while (probe < length && hex_value(text[probe]) >= 0 && digits < 7) {
-                    scalar = scalar * 16 + (uint32_t)hex_value(text[probe]);
-                    probe++;
-                    digits++;
-                }
-                if (probe < length && text[probe] == '}' && digits >= 1 && digits <= 6 &&
-                    scalar <= 0x10FFFF && !(scalar >= 0xD800 && scalar <= 0xDFFF)) {
-                    valid = true;
-                    pos = probe + 1;
-                }
-            }
-            if (!valid && error == NULL) {
-                error = "invalid unicode escape";
-            }
-            break;
-        }
-        default:
-            if (error == NULL) {
-                error = "invalid escape sequence";
-            }
-            pos++;
-            while (pos < length && is_continuation(text[pos])) {
-                pos++;
-            }
-            break;
-        }
+    LzStringHead head;
+    LzStringError error;
+    if (!lz_string_scan(lexer->source, start, &head, &error)) {
+        lexer->position = error.resume;
+        LzToken token = make_error(lexer, start, error.message);
+        token.offset = (uint32_t)error.offset;
+        token.length = (uint32_t)error.length;
+        return token;
     }
 
-    lexer->position = pos;
-    if (error != NULL) {
-        return make_error(lexer, start, error);
+    if (head.needs_check) {
+        LzStringReader reader;
+        lz_string_reader_start(&reader, lexer->source, &head);
+        LzBuffer scratch = {0};
+        for (;;) {
+            LzStringPart part;
+            scratch.length = 0;
+            if (!lz_string_reader_next(&reader, &scratch, &part)) {
+                lz_buffer_free(&scratch);
+                lexer->position = head.end;
+                return make_error(lexer, start, "out of memory");
+            }
+            if (part.kind == LZ_STRING_ERROR) {
+                lz_buffer_free(&scratch);
+                lexer->position = head.end;
+                LzToken token = make_error(lexer, start, part.message);
+                token.offset = (uint32_t)part.offset;
+                token.length = (uint32_t)part.length;
+                return token;
+            }
+            if (part.kind == LZ_STRING_END) {
+                break;
+            }
+        }
+        lz_buffer_free(&scratch);
     }
-    return make_token(lexer, LZ_TOKEN_STRING, start);
+
+    lexer->position = head.end;
+    LzToken token = make_token(lexer, LZ_TOKEN_STRING, start);
+    token.value.string.is_template = head.is_template;
+    token.value.string.is_raw = head.is_raw;
+    token.value.string.is_multiline = head.is_multiline;
+    return token;
 }
 
 LzToken lz_lexer_next(LzLexer *lexer) {
@@ -429,11 +378,11 @@ LzToken lz_lexer_next(LzLexer *lexer) {
     if (is_digit(c)) {
         return lex_number(lexer, start);
     }
+    if (lz_string_starts_at(lexer->source, start)) {
+        return lex_string(lexer, start);
+    }
     if (is_alpha(c)) {
         return lex_identifier(lexer, start);
-    }
-    if (c == '"' || c == '\'') {
-        return lex_string(lexer, start);
     }
 
     lexer->position++;
@@ -600,90 +549,24 @@ const char *lz_token_type_name(LzTokenType type) {
     return "UNKNOWN";
 }
 
-static bool write_utf8(const LzWriter *writer, uint32_t scalar) {
-    char bytes[4];
-    size_t count;
-    if (scalar < 0x80) {
-        bytes[0] = (char)scalar;
-        count = 1;
-    } else if (scalar < 0x800) {
-        bytes[0] = (char)(0xC0 | (scalar >> 6));
-        bytes[1] = (char)(0x80 | (scalar & 0x3F));
-        count = 2;
-    } else if (scalar < 0x10000) {
-        bytes[0] = (char)(0xE0 | (scalar >> 12));
-        bytes[1] = (char)(0x80 | ((scalar >> 6) & 0x3F));
-        bytes[2] = (char)(0x80 | (scalar & 0x3F));
-        count = 3;
-    } else {
-        bytes[0] = (char)(0xF0 | (scalar >> 18));
-        bytes[1] = (char)(0x80 | ((scalar >> 12) & 0x3F));
-        bytes[2] = (char)(0x80 | ((scalar >> 6) & 0x3F));
-        bytes[3] = (char)(0x80 | (scalar & 0x3F));
-        count = 4;
-    }
-    return lz_writer_write(writer, bytes, count);
-}
-
 bool lz_token_string_value(const LzSource *source, const LzToken *token, LzBuffer *out) {
-    LzWriter writer = lz_writer_from_buffer(out);
-    const char *text = source->text;
-    size_t pos = (size_t)token->offset + 1;
-    size_t end = (size_t)token->offset + token->length - 1;
-
-    while (pos < end) {
-        char c = text[pos++];
-        if (c != '\\') {
-            if (!lz_writer_write(&writer, &c, 1)) {
-                return false;
-            }
-            continue;
-        }
-
-        char escape = text[pos++];
-        char simple = '\0';
-        switch (escape) {
-        case 'n':
-            simple = '\n';
-            break;
-        case 't':
-            simple = '\t';
-            break;
-        case 'r':
-            simple = '\r';
-            break;
-        case '0':
-            simple = '\0';
-            break;
-        case '\\':
-        case '"':
-        case '\'':
-            simple = escape;
-            break;
-        case 'x': {
-            simple = (char)(hex_value(text[pos]) * 16 + hex_value(text[pos + 1]));
-            pos += 2;
-            break;
-        }
-        case 'u': {
-            pos++;
-            uint32_t scalar = 0;
-            while (text[pos] != '}') {
-                scalar = scalar * 16 + (uint32_t)hex_value(text[pos]);
-                pos++;
-            }
-            pos++;
-            if (!write_utf8(&writer, scalar)) {
-                return false;
-            }
-            continue;
-        }
-        default:
+    if (token->value.string.is_template) {
+        return false;
+    }
+    LzStringReader reader;
+    if (!lz_string_reader_init(&reader, source, token->offset)) {
+        return false;
+    }
+    for (;;) {
+        LzStringPart part;
+        if (!lz_string_reader_next(&reader, out, &part)) {
             return false;
         }
-        if (!lz_writer_write(&writer, &simple, 1)) {
+        if (part.kind == LZ_STRING_END) {
+            return true;
+        }
+        if (part.kind != LZ_STRING_TEXT) {
             return false;
         }
     }
-    return true;
 }

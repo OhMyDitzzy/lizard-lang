@@ -5,6 +5,7 @@ add_library(lizard_core STATIC
     core/chunk.c
     core/compare.c
     core/debug.c
+    core/format.c
     core/function.c
     core/memory.c
     core/number.c
