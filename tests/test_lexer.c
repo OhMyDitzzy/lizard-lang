@@ -97,6 +97,11 @@ static void check_float(const char *text, double expected) {
 static void test_operators_and_punctuation(void) {
     EXPECT("x: int? | nil", T(IDENTIFIER), T(COLON), T(IDENTIFIER), T(QUESTION), T(PIPE), T(NIL),
            T(NEWLINE));
+    EXPECT("a && b || c", T(IDENTIFIER), T(AND), T(IDENTIFIER), T(OR), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("not a", T(BANG), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a equal b", T(IDENTIFIER), T(EQUAL_EQUAL), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a not equal b", T(IDENTIFIER), T(BANG_EQUAL), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a not  equals", T(IDENTIFIER), T(BANG), T(IDENTIFIER), T(NEWLINE));
     EXPECT("a|b?", T(IDENTIFIER), T(PIPE), T(IDENTIFIER), T(QUESTION), T(NEWLINE));
     EXPECT("+ - * / // % ( ) [ ] { } , . : ; = == != ! < <= > >=", T(PLUS), T(MINUS), T(STAR),
            T(SLASH), T(SLASH_SLASH), T(PERCENT), T(LEFT_PAREN), T(RIGHT_PAREN), T(LEFT_BRACKET),

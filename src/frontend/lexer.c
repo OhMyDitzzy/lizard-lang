@@ -19,6 +19,8 @@ static const Keyword keywords[] = {
     {"false", LZ_TOKEN_FALSE}, {"nil", LZ_TOKEN_NIL}, {"let", LZ_TOKEN_LET},
     {"const", LZ_TOKEN_CONST}, {"if", LZ_TOKEN_IF},   {"else", LZ_TOKEN_ELSE},
     {"while", LZ_TOKEN_WHILE}, {"fn", LZ_TOKEN_FN},   {"return", LZ_TOKEN_RETURN},
+    /* Words for symbols: `not x` is `!x`, `a equal b` is `a == b`, `a not equal b` is `a != b`. */
+    {"not", LZ_TOKEN_BANG},  {"equal", LZ_TOKEN_EQUAL_EQUAL},
 };
 
 /*
@@ -100,6 +102,19 @@ static LzToken lex_identifier(LzLexer *lexer, size_t start) {
     }
 
     size_t length = lexer->position - start;
+    if (length == 3 && memcmp(text + start, "not", 3) == 0) {
+        /* `not equal` is one token, `!=`. */
+        size_t probe = lexer->position;
+        while (probe < lexer->source->length && (text[probe] == ' ' || text[probe] == '\t')) {
+            probe++;
+        }
+        if (probe > lexer->position && probe + 5 <= lexer->source->length &&
+            memcmp(text + probe, "equal", 5) == 0 &&
+            (probe + 5 == lexer->source->length || !is_alnum(text[probe + 5]))) {
+            lexer->position = probe + 5;
+            return make_token(lexer, LZ_TOKEN_BANG_EQUAL, start);
+        }
+    }
     for (size_t i = 0; i < sizeof keywords / sizeof keywords[0]; i++) {
         if (strlen(keywords[i].text) == length && memcmp(keywords[i].text, text + start, length) == 0) {
             return make_token(lexer, keywords[i].type, start);
@@ -424,7 +439,12 @@ LzToken lz_lexer_next(LzLexer *lexer) {
     case '%':
         return make_token(lexer, LZ_TOKEN_PERCENT, start);
     case '|':
-        return make_token(lexer, LZ_TOKEN_PIPE, start);
+        return make_token(lexer, match(lexer, '|') ? LZ_TOKEN_OR : LZ_TOKEN_PIPE, start);
+    case '&':
+        if (match(lexer, '&')) {
+            return make_token(lexer, LZ_TOKEN_AND, start);
+        }
+        return make_error(lexer, start, "unexpected character '&' (write '&&' or 'and')");
     case '?':
         return make_token(lexer, LZ_TOKEN_QUESTION, start);
     case '/':

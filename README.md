@@ -82,6 +82,25 @@ array stored under such a type is checked once and then restricted to it, so
 
 More in `examples/`. Run one with `build/bin/lizard examples/fizzbuzz.lz`.
 
+### Operators
+
+Logic can be written with symbols or words; both mean the same thing:
+
+| Symbol | Word |
+| --- | --- |
+| `&&` | `and` |
+| `\|\|` | `or` |
+| `!x` | `not x` |
+| `==` | `equal` |
+| `!=` | `not equal` |
+
+```
+if i != 2 && i != 3 { ... }
+if not (i equal 2) and i not equal 3 { ... }
+```
+
+`not`, `equal` and `and`/`or` are keywords, so they cannot be used as names.
+
 ### Strings
 
 One literal form covers plain, raw, multi-line and template strings: `[$][r]` + quotes.
