@@ -1,0 +1,54 @@
+# break and continue: leaving a loop early, and skipping to the next round.
+
+# Find the first item that matches, and stop looking.
+fn find(xs, want) {
+  let i = 0
+  while i < len(xs) {
+    if xs[i] == want { return i }
+    i = i + 1
+  }
+  return -1
+}
+println("index of 9:", find([4, 7, 9, 12], 9), "missing:", find([4, 7], 5))
+
+# Add up the odd numbers only: continue skips the rest of the body.
+let i = 0
+let sum_odd = 0
+while i < 10 {
+  i = i + 1
+  if i % 2 == 0 { continue }
+  sum_odd = sum_odd + i
+}
+println("sum of odds below 10:", sum_odd)
+
+# break leaves only the innermost loop.
+let row = 0
+while row < 4 {
+  let col = 0
+  let line = ""
+  while true {
+    col = col + 1
+    if col > 6 { break }
+    if col == 3 { continue }
+    line = line + string(col)
+  }
+  println("row", row, line)
+  row = row + 1
+}
+
+# The first pair that adds up to ten, from a loop over rows and columns.
+let a = 0
+let found = false
+while a < 6 {
+  a = a + 1
+  let b = 0
+  while b < 6 {
+    b = b + 1
+    if a + b == 10 {
+      println("pair:", a, "+", b)
+      found = true
+      break
+    }
+  }
+  if found { break }
+}

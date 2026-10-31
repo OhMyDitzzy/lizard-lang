@@ -142,6 +142,10 @@ static void test_keywords_and_identifiers(void) {
     EXPECT("And NIL", T(IDENTIFIER), T(IDENTIFIER), T(NEWLINE));
     EXPECT("let const if else while letx iff whiled", T(LET), T(CONST), T(IF), T(ELSE), T(WHILE),
            T(IDENTIFIER), T(IDENTIFIER), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("break continue breaker continued breakx", T(BREAK), T(CONTINUE), T(IDENTIFIER),
+           T(IDENTIFIER), T(IDENTIFIER), T(NEWLINE));
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_BREAK), "BREAK") == 0);
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_CONTINUE), "CONTINUE") == 0);
 }
 
 static void test_integers(void) {

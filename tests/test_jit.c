@@ -87,6 +87,8 @@ static const Case programs[] = {
     {"early return in loop", "fn find(n) { let i = 0\n while i < 1000 { if i * i > n { return i }\n i = i + 1 }\n return -1 }\nprintln(find(10), find(500), find(999999999))\n", true},
     {"and or", "{ let i = 0\n let c = 0\n while i < 100 { if i % 2 == 0 and i % 3 == 0 or i == 7 { c = c + 1 }\n i = i + 1 }\n println(c) }\n", true},
     {"truthiness", "{ let vals = [nil, false, true, 0, \"\", [], 0.0]\n let i = 0\n while i < 7 { let v = vals[i]\n if v { println(i, \"t\") } else { println(i, \"f\") }\n i = i + 1 } }\n", true},
+    {"break and continue", "{ let i = 0\n let s = 0\n while i < 1000 { i = i + 1\n if i % 3 == 0 { continue }\n if i > 900 { break }\n s = s + i * 2 }\n println(s, i) }\n", true},
+    {"continue with a closure", "{ let i = 0\n let f = nil\n while i < 200 { i = i + 1\n let v = i\n let g = fn() { return v }\n if i % 2 == 0 { f = g\n continue }\n if i == 5 { break } }\n println(f()) }\n", true},
 };
 
 static const Case heap_programs[] = {

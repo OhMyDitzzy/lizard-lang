@@ -53,6 +53,38 @@ sum(1, 2, *[3, 4])                   # * spreads an array into arguments
   in another captures the variables it uses (closures keep them alive).
 * Calls nest up to 2048 deep. An error inside a function prints a stack trace.
 
+### Loops
+
+`while (condition) { ... }` runs the body while the condition is truthy.
+`break` leaves the innermost loop; `continue` goes straight to its next
+condition. Both are statements of their own, without a value or a label, and
+may stand inside an `if`. Anything after them in the same block does not run.
+
+```
+let xs = [4, 7, 9, 12]
+let i = 0
+while i < len(xs) {
+  if xs[i] % 2 == 0 { break }   # the first even item
+  i = i + 1
+}
+println(i, xs[i])               # 1 7
+
+let s = 0
+let k = 0
+while k < 10 {
+  k = k + 1
+  if k % 2 == 0 { continue }    # skip the even numbers
+  s = s + k
+}
+println(s)                      # 25
+```
+
+* `break` and `continue` outside a loop are compile errors: `'break' outside of
+  a loop`. So is one inside a function or lambda written in a loop body, since
+  the loop is not part of that function.
+* A `continue` jumps to the condition through the same back-edge as the end of
+  the loop, so a `while true { continue }` still runs out of fuel when one is set.
+
 ### Arrays
 
 Arrays are mutable and passed by reference. Negative indexes count from the

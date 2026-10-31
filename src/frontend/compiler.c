@@ -99,6 +99,8 @@ typedef struct FuncState {
     bool saved_terminated;
 } FuncState;
 
+typedef struct LoopFrame LoopFrame;
+
 typedef struct Parser {
     LzVM *vm;
     const LzSource *source;
@@ -121,7 +123,24 @@ typedef struct Parser {
     FuncSig *sigs;      /* every signature made so far */
     bool terminated;    /* the statement just compiled never falls through (return, ...) */
     bool method_name;   /* the identifier being compiled follows a '.' (receiver.name(...)) */
+    LoopFrame *loop; /* innermost while being compiled, NULL outside a loop */
 } Parser;
+
+/*
+ * A `while` being compiled, so that `break` and `continue` in its body know where to
+ * jump and what to pop. A function compiled inside the loop keeps the frame (the
+ * error message names it), but its body may not jump to it: `func` is the function
+ * that owns the loop.
+ */
+typedef struct LoopFrame {
+    LoopFrame *enclosing;
+    FuncState *func;
+    size_t continue_target; /* the first byte of the condition */
+    int scope_depth;        /* locals at or below it belong to the enclosing blocks */
+    size_t *breaks;        /* operand indexes of the JUMPs of every `break`, patched at the end */
+    size_t break_count;
+    size_t break_capacity;
+} LoopFrame;
 
 typedef enum Precedence {
     PREC_NONE,
@@ -590,6 +609,39 @@ static Symbol *add_symbol(Parser *parser, const LzToken *token, LzString *name, 
 
 static void begin_scope(Parser *parser) {
     parser->scope_depth++;
+}
+
+/*
+ * Drops every local declared inside the body of loop (the loop body's own scope and
+ * anything nested in it), exactly as end_scope would when the block ended normally:
+ * a captured local is closed, the rest are popped. The symbols stay in the table
+ * because the code that follows is still compiled against them.
+ */
+static void discard_loop_locals(Parser *parser, LoopFrame *loop, uint32_t offset) {
+    for (size_t i = parser->symbol_count; i > 0; i--) {
+        Symbol *symbol = &parser->symbols[i - 1];
+        if (symbol->depth <= loop->scope_depth) {
+            break;
+        }
+        if (symbol->kind == SYMBOL_LOCAL) {
+            emit_op_at(parser, symbol->captured ? LZ_OP_CLOSE_UPVALUE : LZ_OP_POP, offset);
+        }
+    }
+}
+
+/* Remembers where a `break`'s jump is, to be patched once the loop is complete. */
+static void add_loop_break(Parser *parser, LoopFrame *loop, size_t operand) {
+    if (loop->break_count == loop->break_capacity) {
+        size_t capacity = loop->break_capacity != 0 ? loop->break_capacity * 2 : 4;
+        size_t *grown = realloc(loop->breaks, capacity * sizeof *grown);
+        if (grown == NULL) {
+            fail(parser, LZ_ERR_MEMORY);
+            return;
+        }
+        loop->breaks = grown;
+        loop->break_capacity = capacity;
+    }
+    loop->breaks[loop->break_count++] = operand;
 }
 
 static void end_scope(Parser *parser) {
@@ -2484,7 +2536,7 @@ static void if_statement(Parser *parser) {
 static void while_statement(Parser *parser) {
     uint32_t offset = parser->previous.offset;
     size_t loop_start = parser->chunk->count;
-    /* `while true { ... }` has no way out but a return, so nothing after it is reachable. */
+    /* `while true { ... }` has no way out but a return or a break, so nothing after it is reachable. */
     bool forever = check(parser, LZ_TOKEN_TRUE) && next_token_type(parser) == LZ_TOKEN_LEFT_BRACE;
     (void)expression(parser);
     if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
@@ -2494,11 +2546,55 @@ static void while_statement(Parser *parser) {
 
     size_t exit_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
     emit_op_at(parser, LZ_OP_POP, offset);
+
+    LoopFrame loop;
+    memset(&loop, 0, sizeof loop);
+    loop.enclosing = parser->loop;
+    loop.func = parser->fs;
+    loop.continue_target = loop_start;
+    loop.scope_depth = parser->scope_depth;
+    parser->loop = &loop;
+
     block(parser);
+
+    parser->loop = loop.enclosing;
     emit_loop(parser, loop_start, offset);
     patch_jump(parser, exit_jump);
     emit_op_at(parser, LZ_OP_POP, offset);
-    parser->terminated = forever;
+    for (size_t i = 0; i < loop.break_count; i++) {
+        patch_jump(parser, loop.breaks[i]);
+    }
+    free(loop.breaks);
+    parser->terminated = forever && loop.break_count == 0;
+}
+
+/*
+ * `break` leaves the innermost loop and `continue` goes straight to its next
+ * condition. Neither is reached from a function compiled inside the loop.
+ */
+static void loop_jump_statement(Parser *parser, bool is_break) {
+    uint32_t offset = parser->previous.offset;
+    LoopFrame *loop = parser->loop;
+
+    if (loop == NULL || loop->func != parser->fs) {
+        const char *control = is_break ? "break" : "continue";
+        const char *why = loop == NULL ? "" : " (a function body is not part of the loop)";
+        char message[96];
+        (void)snprintf(message, sizeof message, "'%s' outside of a loop%s", control, why);
+        error_at_previous(parser, message);
+        end_statement(parser);
+        return;
+    }
+
+    discard_loop_locals(parser, loop, offset);
+    if (is_break) {
+        add_loop_break(parser, loop, emit_jump(parser, LZ_OP_JUMP, offset));
+    } else {
+        /* The same back-edge as the end of the loop: fuel and hot code behave alike. */
+        emit_loop(parser, loop->continue_target, offset);
+    }
+    end_statement(parser);
+    parser->terminated = true;
 }
 
 static LzTokenType next_token_type(const Parser *parser) {
@@ -2925,6 +3021,8 @@ static void synchronize(Parser *parser) {
         case LZ_TOKEN_WHILE:
         case LZ_TOKEN_FN:
         case LZ_TOKEN_RETURN:
+        case LZ_TOKEN_BREAK:
+        case LZ_TOKEN_CONTINUE:
         case LZ_TOKEN_RIGHT_BRACE:
             return;
         default:
@@ -2958,6 +3056,14 @@ static void declaration(Parser *parser) {
     case LZ_TOKEN_RETURN:
         advance(parser);
         return_statement(parser);
+        break;
+    case LZ_TOKEN_BREAK:
+        advance(parser);
+        loop_jump_statement(parser, true);
+        break;
+    case LZ_TOKEN_CONTINUE:
+        advance(parser);
+        loop_jump_statement(parser, false);
         break;
     case LZ_TOKEN_LET:
         advance(parser);
