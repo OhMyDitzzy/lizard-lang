@@ -1,6 +1,7 @@
 #include "lizard/value.h"
 
 #include "lizard/array.h"
+#include "lizard/dict.h"
 #include "lizard/function.h"
 #include "lizard/native.h"
 
@@ -115,7 +116,7 @@ static bool write_float(double number, const LzWriter *writer) {
 }
 
 typedef struct WriteFrame {
-    const LzArray *array;
+    const LzObject *object; /* an array or a dict */
     size_t next;
 } WriteFrame;
 
@@ -159,36 +160,61 @@ static bool write_quoted(const LzString *string, const LzWriter *writer) {
     return lz_writer_write_cstr(writer, "\"");
 }
 
+static bool is_string_value(const LzValue *value) {
+    return value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_STRING;
+}
+
+static bool write_entry(const LzValue *value, const LzWriter *writer) {
+    if (is_string_value(value)) {
+        return write_quoted((const LzString *)value->as.object, writer);
+    }
+    return lz_value_write(value, writer);
+}
+
 /*
- * Iterative, so an array nested a million levels deep cannot overflow the C
- * stack. Strings inside an array are quoted; at the top level they are not.
+ * Iterative, so a structure nested a million levels deep cannot overflow the C
+ * stack. Strings inside an array or a dict are quoted; at the top level they are not.
  */
-static bool write_array(const LzArray *root, const LzWriter *writer) {
+static bool write_container(const LzObject *root, const LzWriter *writer) {
     size_t capacity = 16;
     size_t depth = 0;
     WriteFrame *frames = malloc(capacity * sizeof *frames);
     if (frames == NULL) {
         return false;
     }
-    bool ok = lz_writer_write_cstr(writer, "[");
+    bool root_dict = root->type == LZ_OBJ_DICT;
+    bool ok = lz_writer_write_cstr(writer, root_dict ? "{" : "[");
     frames[depth++] = (WriteFrame){root, 0};
 
     while (ok && depth > 0) {
         WriteFrame *frame = &frames[depth - 1];
-        if (frame->next == frame->array->count) {
-            ok = lz_writer_write_cstr(writer, "]");
+        bool dict = frame->object->type == LZ_OBJ_DICT;
+        size_t count = dict ? ((const LzDict *)frame->object)->count
+                            : ((const LzArray *)frame->object)->count;
+        if (frame->next == count) {
+            ok = lz_writer_write_cstr(writer, dict ? "}" : "]");
             depth--;
             continue;
         }
-        const LzValue *item = &frame->array->items[frame->next];
-        if (frame->next > 0) {
-            ok = lz_writer_write_cstr(writer, ", ");
+        const LzValue *item = NULL;
+        if (dict) {
+            const LzDictEntry *entry = &((const LzDict *)frame->object)->entries[frame->next];
+            if (frame->next > 0) {
+                ok = lz_writer_write_cstr(writer, ", ");
+            }
+            ok = ok && write_entry(&entry->key, writer) && lz_writer_write_cstr(writer, ": ");
+            item = &entry->value;
+        } else {
+            if (frame->next > 0) {
+                ok = lz_writer_write_cstr(writer, ", ");
+            }
+            item = &((const LzArray *)frame->object)->items[frame->next];
         }
         frame->next++;
         if (!ok) {
             break;
         }
-        if (lz_value_is_array(item)) {
+        if (lz_value_is_container(item)) {
             if (depth == capacity) {
                 WriteFrame *grown = realloc(frames, capacity * 2 * sizeof *frames);
                 if (grown == NULL) {
@@ -198,16 +224,19 @@ static bool write_array(const LzArray *root, const LzWriter *writer) {
                 frames = grown;
                 capacity *= 2;
             }
-            frames[depth++] = (WriteFrame){lz_value_as_array(item), 0};
-            ok = lz_writer_write_cstr(writer, "[");
-        } else if (item->type == LZ_VAL_OBJECT && item->as.object->type == LZ_OBJ_STRING) {
-            ok = write_quoted((const LzString *)item->as.object, writer);
+            bool inner_dict = item->as.object->type == LZ_OBJ_DICT;
+            frames[depth++] = (WriteFrame){item->as.object, 0};
+            ok = lz_writer_write_cstr(writer, inner_dict ? "{" : "[");
         } else {
-            ok = lz_value_write(item, writer);
+            ok = write_entry(item, writer);
         }
     }
     free(frames);
     return ok;
+}
+
+static bool write_dict(const LzDict *dict, const LzWriter *writer) {
+    return write_container(&dict->base, writer);
 }
 
 static bool write_object(const LzObject *object, const LzWriter *writer) {
@@ -217,7 +246,9 @@ static bool write_object(const LzObject *object, const LzWriter *writer) {
         return lz_writer_write(writer, string->data, string->length);
     }
     case LZ_OBJ_ARRAY:
-        return write_array((const LzArray *)object, writer);
+        return write_container(object, writer);
+    case LZ_OBJ_DICT:
+        return write_dict((const LzDict *)object, writer);
     case LZ_OBJ_NATIVE: {
         const LzNative *native = (const LzNative *)object;
         return lz_writer_write_cstr(writer, "<native ") &&
@@ -256,6 +287,19 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
         }
         free(array->items);
         lz_heap_uncharge(heap, array->capacity * sizeof(LzValue));
+        break;
+    }
+    case LZ_OBJ_DICT: {
+        LzDict *dict = (LzDict *)object;
+        for (size_t i = 0; i < dict->count; i++) {
+            lz_drop_container_holder(&dict->entries[i].value);
+            lz_value_release(heap, &dict->entries[i].key);
+            lz_value_release(heap, &dict->entries[i].value);
+        }
+        free(dict->entries);
+        free(dict->slots);
+        lz_heap_uncharge(heap, dict->capacity * sizeof(LzDictEntry));
+        lz_heap_uncharge(heap, dict->slot_capacity * sizeof(uint32_t));
         break;
     }
     case LZ_OBJ_FUNCTION:
@@ -390,21 +434,73 @@ static bool equal_leaf(const LzValue *left, const LzValue *right) {
 }
 
 typedef struct EqualFrame {
-    const LzArray *left;
-    const LzArray *right;
+    const LzObject *left;
+    const LzObject *right;
     size_t next;
 } EqualFrame;
+
+/* Does right hold left's key, with a value equal to left's? Dicts compare by content. */
+static bool pair_equal(const LzValue *key, const LzValue *value, const LzObject *right,
+                       uint64_t *used, uint64_t budget, bool *exhausted) {
+    const LzValue *other = lz_dict_get((const LzDict *)right, key);
+    if (other == NULL) {
+        return false;
+    }
+    uint64_t work = budget - *used;
+    bool same = lz_value_equal_budget(value, other, &work);
+    *used += work;
+    if (work == UINT64_MAX) {
+        *exhausted = true;
+        return false;
+    }
+    return same;
+}
 
 bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *work) {
     uint64_t budget = *work;
     uint64_t used = 0;
     *work = 0;
 
-    if (!lz_value_is_array(left) || !lz_value_is_array(right) ||
+    if (!lz_value_is_container(left) || !lz_value_is_container(right) ||
         left->as.object == right->as.object) {
         return equal_leaf(left, right);
     }
-    if (lz_value_as_array(left)->count != lz_value_as_array(right)->count) {
+    bool left_dict = left->as.object->type == LZ_OBJ_DICT;
+    bool right_dict = right->as.object->type == LZ_OBJ_DICT;
+    if (left_dict != right_dict) {
+        return false;
+    }
+    if (left_dict) {
+        /* Order does not matter: both must hold the same keys with equal values. */
+        const LzDict *a = lz_value_as_dict(left);
+        const LzDict *b = lz_value_as_dict(right);
+        if (a->count != b->count) {
+            return false;
+        }
+        for (size_t i = 0; i < a->count; i++) {
+            if (++used > budget) {
+                *work = UINT64_MAX;
+                return false;
+            }
+            bool exhausted = false;
+            bool same = pair_equal(&a->entries[i].key, &a->entries[i].value, &b->base, &used, budget,
+                                   &exhausted);
+            if (exhausted) {
+                *work = UINT64_MAX;
+                return false;
+            }
+            if (!same) {
+                *work = used;
+                return false;
+            }
+        }
+        *work = used;
+        return true;
+    }
+
+    const LzArray *x = lz_value_as_array(left);
+    const LzArray *y = lz_value_as_array(right);
+    if (x->count != y->count) {
         return false;
     }
 
@@ -414,27 +510,55 @@ bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *
     if (frames == NULL) {
         return false;
     }
-    frames[depth++] = (EqualFrame){lz_value_as_array(left), lz_value_as_array(right), 0};
+    frames[depth++] = (EqualFrame){&x->base, &y->base, 0};
 
     bool same = true;
     while (same && depth > 0) {
         EqualFrame *frame = &frames[depth - 1];
-        if (frame->next == frame->left->count) {
+        bool frame_dict = frame->left->type == LZ_OBJ_DICT;
+        size_t count = frame_dict ? ((const LzDict *)frame->left)->count
+                                  : ((const LzArray *)frame->left)->count;
+        if (frame->next == count) {
             depth--;
             continue;
         }
-        const LzValue *a = &frame->left->items[frame->next];
-        const LzValue *b = &frame->right->items[frame->next];
+        if (frame_dict) {
+            /* A dict compares by key, in no order: look the other side up. */
+            const LzDictEntry *entry = &((const LzDict *)frame->left)->entries[frame->next];
+            frame->next++;
+            if (++used > budget) {
+                same = false;
+                used = UINT64_MAX;
+                break;
+            }
+            bool exhausted = false;
+            if (!pair_equal(&entry->key, &entry->value, frame->right, &used, budget, &exhausted)) {
+                same = false;
+                used = exhausted ? UINT64_MAX : used;
+                break;
+            }
+            continue;
+        }
+        const LzValue *a = &((const LzArray *)frame->left)->items[frame->next];
+        const LzValue *b = &((const LzArray *)frame->right)->items[frame->next];
         frame->next++;
         if (++used > budget) {
-            used = UINT64_MAX;
             same = false;
+            used = UINT64_MAX;
             break;
         }
-        if (lz_value_is_array(a) && lz_value_is_array(b) && a->as.object != b->as.object) {
-            const LzArray *x = lz_value_as_array(a);
-            const LzArray *y = lz_value_as_array(b);
-            if (x->count != y->count) {
+        if (lz_value_is_container(a) && lz_value_is_container(b) && a->as.object != b->as.object) {
+            if (a->as.object->type != b->as.object->type) {
+                same = false;
+                break;
+            }
+            size_t inner = a->as.object->type == LZ_OBJ_DICT
+                               ? ((const LzDict *)a->as.object)->count
+                               : ((const LzArray *)a->as.object)->count;
+            size_t other = b->as.object->type == LZ_OBJ_DICT
+                               ? ((const LzDict *)b->as.object)->count
+                               : ((const LzArray *)b->as.object)->count;
+            if (inner != other) {
                 same = false;
                 break;
             }
@@ -447,7 +571,7 @@ bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *
                 frames = grown;
                 capacity *= 2;
             }
-            frames[depth++] = (EqualFrame){x, y, 0};
+            frames[depth++] = (EqualFrame){a->as.object, b->as.object, 0};
         } else if (!equal_leaf(a, b)) {
             same = false;
         }

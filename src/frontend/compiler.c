@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "lizard/array.h"
+#include "lizard/dict.h"
 #include "lizard/format.h"
 #include "lizard/function.h"
 #include "lizard/lexer.h"
@@ -57,6 +58,8 @@ typedef struct Symbol {
     bool captured;           /* a closure captured this local: closing its scope must close upvalues */
     bool pending;            /* a top-level `fn` seen ahead of its declaration */
     bool loop_var;           /* a `for ... in` variable: it cannot be assigned */
+    bool dict_value;         /* initialised from a dict literal: `x[k]` reads a key */
+    bool array_value;        /* initialised from an array: `x[k]` needs an int index */
     const FuncSig *sig;      /* set for a declared function: calls of it are checked */
 } Symbol;
 
@@ -180,6 +183,8 @@ typedef struct Expr {
     bool is_range;  /* the expression is `a..b`, left on the stack as start, end and step */
     bool inclusive; /* ...and `..=` counts the end */
     bool is_call;   /* the expression ends in a call: nothing is left on the stack */
+    bool dict_value; /* `any` in type, but known to hold a dict */
+    bool array_value; /* `any` in type, but known to hold an array */
     LzToken start;  /* the first token of the expression, for an error about the whole of it */
 } Expr;
 
@@ -726,6 +731,8 @@ static Expr expr_of(LzType type) {
     expr.op_pos = 0;
     expr.is_range = false;
     expr.inclusive = false;
+    expr.dict_value = false;
+    expr.array_value = false;
     expr.is_call = false;
     memset(&expr.start, 0, sizeof expr.start);
     return expr;
@@ -789,26 +796,55 @@ static void error_operator(Parser *parser, const LzToken *op, const LzType *left
  * always fits needs nothing, one that never fits is a compile error, and one
  * that might fit (any, a union, a wider type) gets a run-time check.
  */
+/* Would assigning `from` to `to` emit a runtime check (as opposed to a compile-time verdict)? */
+static bool check_is_runtime(const LzType *from, const LzType *to) {
+    if (lz_type_assignable(from, to) != LZ_ASSIGN_ALWAYS) {
+        return true; /* MAYBE needs the check; NEVER is a compile error and needs nothing */
+    }
+    /*
+     * An array stored under `T[]` is checked and restricted to T even when it
+     * fits statically, so later pushes and stores into it are checked too.
+     */
+    bool array = (from->kinds & LZ_KIND_ARRAY) != 0 && (to->kinds & LZ_KIND_ARRAY) != 0 &&
+                 to->element != NULL;
+    bool dict = (from->kinds & LZ_KIND_DICT) != 0 && (to->kinds & LZ_KIND_DICT) != 0 &&
+                (to->element != NULL || to->value_element != NULL);
+    return array || dict;
+}
+
+/* `to` is turned into a constant and CHECK_TYPE is emitted: the top of the stack must fit it. */
+static void emit_type_check(Parser *parser, const LzType *to, uint32_t offset) {
+    uint16_t index = 0;
+    if (!lz_chunk_add_type(parser->chunk, to, &index)) {
+        if (parser->chunk->type_count >= LZ_TYPES_MAX) {
+            error_at_previous(parser, "too many types in one chunk");
+        } else {
+            fail(parser, LZ_ERR_MEMORY);
+        }
+        return;
+    }
+    emit_op_at(parser, LZ_OP_CHECK_TYPE, offset);
+    emit_u16_at(parser, index, offset);
+}
+
+/* Emits CHECK_TYPE for `to` unless the compile time already settled it. The top of the
+ * stack must be the value being tested. */
+static void emit_check_if_needed(Parser *parser, const LzType *from, const LzType *to,
+                                 uint32_t offset) {
+    if (lz_type_assignable(from, to) != LZ_ASSIGN_NEVER && check_is_runtime(from, to)) {
+        emit_type_check(parser, to, offset);
+    }
+}
+
 static void check_flow(Parser *parser, const LzType *from, const LzType *to, const LzToken *start,
                        uint32_t offset, LzOpCode check_op, const char *mismatch) {
-    switch (lz_type_assignable(from, to)) {
-    case LZ_ASSIGN_ALWAYS:
-        /*
-         * An array stored under `T[]` is checked and restricted to T even when it
-         * fits statically, so later pushes and stores into it are checked too.
-         */
-        if ((from->kinds & LZ_KIND_ARRAY) == 0 || (to->kinds & LZ_KIND_ARRAY) == 0 ||
-            to->element == NULL) {
-            return;
-        }
-        break;
-    case LZ_ASSIGN_NEVER: {
+    if (lz_type_assignable(from, to) == LZ_ASSIGN_NEVER) {
         LzToken span = span_from(parser, start);
         error_types(parser, &span, mismatch, to, ", got ", from);
         return;
     }
-    case LZ_ASSIGN_MAYBE:
-        break;
+    if (!check_is_runtime(from, to)) {
+        return;
     }
 
     uint16_t index = 0;
@@ -827,6 +863,15 @@ static void check_flow(Parser *parser, const LzType *from, const LzType *to, con
 static void check_assignment(Parser *parser, const LzType *from, const LzType *to,
                              const LzToken *start, uint32_t offset) {
     check_flow(parser, from, to, start, offset, LZ_OP_CHECK_TYPE, "type mismatch: expected ");
+}
+
+/* The compile-time half of a check, for a place that has no value on the stack to test. */
+static void check_static(Parser *parser, const LzType *from, const LzType *to,
+                         const LzToken *start) {
+    if (lz_type_assignable(from, to) == LZ_ASSIGN_NEVER) {
+        LzToken span = span_from(parser, start);
+        error_types(parser, &span, "type mismatch: expected ", to, ", got ", from);
+    }
 }
 
 static Expr union_expr(Expr left, Expr right) {
@@ -854,6 +899,45 @@ static LzType array_type(Parser *parser, const LzType *item) {
     return out;
 }
 
+static bool is_any_type(const LzType *type);
+
+/* The type `dict[keys, values]`; a limit or memory error is reported once. */
+static LzType dict_type(Parser *parser, const LzType *keys, const LzType *values) {
+    LzType shape = lz_type_of_kinds(LZ_KIND_DICT);
+    LzType *stored = NULL;
+    if (keys != NULL && !is_any_type(keys)) {
+        if (lz_vm_intern_type(parser->vm, keys, &stored) != LZ_OK) {
+            error_at_previous(parser, parser->vm->error);
+            return shape;
+        }
+        shape.element = stored;
+    }
+    if (values != NULL && !is_any_type(values)) {
+        if (lz_vm_intern_type(parser->vm, values, &stored) != LZ_OK) {
+            error_at_previous(parser, parser->vm->error);
+            return lz_type_of_kinds(LZ_KIND_DICT);
+        }
+        shape.value_element = stored;
+    }
+    if (shape.element == NULL && shape.value_element == NULL) {
+        return shape;
+    }
+    LzType *found = NULL;
+    LzStatus status = lz_vm_intern_type(parser->vm, &shape, &found);
+    if (status == LZ_ERR_MEMORY || status == LZ_ERR_HEAP_LIMIT) {
+        fail(parser, status);
+        return lz_type_of_kinds(LZ_KIND_DICT);
+    }
+    if (status != LZ_OK) {
+        error_at_previous(parser, parser->vm->error);
+        return lz_type_of_kinds(LZ_KIND_DICT);
+    }
+    LzType out = lz_type_of_kinds(LZ_KIND_DICT);
+    out.element = found->element;
+    out.value_element = found->value_element;
+    return out;
+}
+
 /* Type syntax */
 
 static bool builtin_type(const char *name, LzType *out) {
@@ -873,6 +957,8 @@ static bool builtin_type(const char *name, LzType *out) {
         *out = lz_type_of_kinds(0);
     } else if (strcmp(name, "function") == 0) {
         *out = lz_type_of_kinds(LZ_KIND_FUNCTION);
+    } else if (strcmp(name, "dict") == 0) {
+        *out = lz_type_of_kinds(LZ_KIND_DICT);
     } else {
         return false;
     }
@@ -928,7 +1014,8 @@ static LzSuggestions suggest_names(Parser *parser, const LzToken *token, bool fu
 }
 
 static const char *const BUILTIN_TYPE_NAMES[] = {"int",    "float", "bool", "string",
-                                                 "number", "any",   "never", "function"};
+                                                 "number", "any",   "never", "function",
+                                                 "dict"};
 
 static LzSuggestions suggest_types(Parser *parser, const LzToken *token) {
     LzSuggester suggester;
@@ -1101,6 +1188,32 @@ static bool parse_type_postfix(Parser *parser, LzType *out) {
             if (lz_type_union(&merged, out, &nil)) {
                 *out = merged;
             }
+        } else if (check(parser, LZ_TOKEN_LEFT_BRACKET) && out->kinds == LZ_KIND_DICT &&
+                   out->literal_count == 0) {
+            /* dict[key type, value type] */
+            advance(parser);
+            LzType keys = lz_type_of_kinds(LZ_KINDS_ANY);
+            LzType values = lz_type_of_kinds(LZ_KINDS_ANY);
+            LzToken keys_at = parser->current;
+            bool pair = parse_type_union(parser, &keys);
+            if (!match(parser, LZ_TOKEN_COMMA)) {
+                error_at_current(parser, "dict[...] expects a key type and a value type");
+                while (!check(parser, LZ_TOKEN_RIGHT_BRACKET) && !check(parser, LZ_TOKEN_EOF)) {
+                    advance(parser);
+                }
+                consume(parser, LZ_TOKEN_RIGHT_BRACKET, "expected ']' after the dict types");
+                *out = lz_type_of_kinds(LZ_KIND_DICT);
+                return false;
+            }
+            skip_newlines(parser);
+            pair = parse_type_union(parser, &values) && pair;
+            consume(parser, LZ_TOKEN_RIGHT_BRACKET, "expected ']' after the dict types");
+            uint16_t allowed = LZ_KIND_STRING | LZ_KIND_INT | LZ_KIND_BOOL;
+            if ((lz_type_possible_kinds(&keys) & allowed) == 0) {
+                error_types(parser, &keys_at, "", &keys, " cannot be a dict key", NULL);
+            }
+            *out = dict_type(parser, &keys, &values);
+            ok = pair && ok;
         } else if (check(parser, LZ_TOKEN_LEFT_BRACKET)) {
             advance(parser);
             consume(parser, LZ_TOKEN_RIGHT_BRACKET, "expected ']' in an array type");
@@ -1476,6 +1589,8 @@ static Expr variable_at(Parser *parser, const LzToken *token) {
         }
         Expr found = expr_of(symbol->type);
         found.sig = symbol->sig;
+        found.dict_value = symbol->dict_value;
+        found.array_value = symbol->array_value;
         return found;
     }
 
@@ -1573,6 +1688,346 @@ static Expr unary(Parser *parser) {
     return expr_of(lz_type_of_kinds(numbers));
 }
 
+/*
+ * Skips forward to the `}` that closes the branch, so one mistake in a branch is
+ * one error and the rest of the expression still parses.
+ */
+static void if_skip_to_close(Parser *parser) {
+    int depth = 0;
+    while (!check(parser, LZ_TOKEN_EOF)) {
+        if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            depth++;
+        } else if (check(parser, LZ_TOKEN_RIGHT_BRACE)) {
+            if (depth == 0) {
+                advance(parser);
+                return;
+            }
+            depth--;
+        }
+        advance(parser);
+    }
+}
+
+/*
+ * The `{ ... }` of one branch: exactly one expression, and its value stays on the
+ * stack. A statement where the expression should be is an error; the branch is
+ * then skipped whole so the rest of the expression still parses.
+ */
+static Expr if_expression_branch(Parser *parser) {
+    static const LzTokenType statements[] = {LZ_TOKEN_LET,  LZ_TOKEN_CONST,  LZ_TOKEN_WHILE,
+                                             LZ_TOKEN_FOR,  LZ_TOKEN_RETURN, LZ_TOKEN_BREAK,
+                                             LZ_TOKEN_CONTINUE};
+    advance(parser); /* the '{' */
+    skip_newlines(parser);
+    for (size_t i = 0; i < sizeof statements / sizeof statements[0]; i++) {
+        if (check(parser, statements[i])) {
+            error_at_current(parser,
+                             "a branch of an 'if' expression holds one expression, not a statement");
+            if_skip_to_close(parser);
+            return any_expr();
+        }
+    }
+    if (check(parser, LZ_TOKEN_RIGHT_BRACE) || check(parser, LZ_TOKEN_EOF)) {
+        error_at_current(parser, "expected an expression in the branch of an 'if' expression");
+        if (check(parser, LZ_TOKEN_RIGHT_BRACE)) {
+            advance(parser); /* an empty branch still closes, so the `else` is read */
+        }
+        return any_expr();
+    }
+    Expr value = expression(parser);
+    skip_newlines(parser);
+    if (!check(parser, LZ_TOKEN_RIGHT_BRACE)) {
+        error_at_current(parser, "expected '}' after the expression");
+        if_skip_to_close(parser);
+        return value;
+    }
+    advance(parser);
+    return value;
+}
+
+/* The branch that follows `if <condition>` whose `{` the caller has just seen. */
+static Expr if_then_branch(Parser *parser) {
+    return if_expression_branch(parser);
+}
+
+/*
+ * `if cond { expr } else { expr }` in an expression position, with `else if`
+ * chains. It is a prefix expression, so an operator that follows the last `}`
+ * applies to the whole of it. Each branch leaves exactly one value on the stack
+ * and only the branch taken runs: the same jumps the statement uses, except that
+ * nothing pops the branch's value, so the value of the branch taken is what stays.
+ */
+static Expr if_expression(Parser *parser) {
+    size_t *end_jumps = NULL;
+    size_t end_count = 0;
+    size_t end_capacity = 0;
+    LzToken if_token = parser->previous;
+    Expr result = any_expr();
+    bool first = true;
+
+    for (;;) {
+        uint32_t offset = parser->previous.offset;
+        (void)expression(parser);
+        if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            error_at_current(parser, "expected '{' after the condition");
+            /* Leave the caller at the end of the statement: the rest is not read again. */
+            while (!check(parser, LZ_TOKEN_NEWLINE) && !check(parser, LZ_TOKEN_EOF)) {
+                advance(parser);
+            }
+            break;
+        }
+        size_t then_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
+        emit_op_at(parser, LZ_OP_POP, offset);
+
+        Expr branch = if_then_branch(parser);
+        result = first ? branch : union_expr(result, branch);
+        first = false;
+
+        if (end_count == end_capacity) {
+            size_t capacity = end_capacity != 0 ? end_capacity * 2 : 4;
+            size_t *grown = realloc(end_jumps, capacity * sizeof *grown);
+            if (grown == NULL) {
+                fail(parser, LZ_ERR_MEMORY);
+                break;
+            }
+            end_jumps = grown;
+            end_capacity = capacity;
+        }
+        end_jumps[end_count++] = emit_jump(parser, LZ_OP_JUMP, offset);
+        patch_jump(parser, then_jump);
+        emit_op_at(parser, LZ_OP_POP, offset);
+
+        skip_newlines(parser);
+        if (!match(parser, LZ_TOKEN_ELSE)) {
+            /* The caret goes on the `if` that opened the expression. */
+            error_at(parser, &if_token, "an 'if' expression needs an 'else'");
+            break;
+        }
+        if (match(parser, LZ_TOKEN_IF)) {
+            continue;
+        }
+        if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            error_at_current(parser, "expected '{' or 'if' after 'else'");
+            break;
+        }
+        result = union_expr(result, if_then_branch(parser));
+        break;
+    }
+
+    for (size_t i = 0; i < end_count; i++) {
+        patch_jump(parser, end_jumps[i]);
+    }
+    free(end_jumps);
+    return result;
+}
+
+static bool key_kind_ok(const LzType *type);
+static void error_key(Parser *parser, const LzToken *at, const LzType *type);
+
+/*
+ * Does the `{` after `=>` open a dict literal? `{"a": 1}` and `{}` do; a block of
+ * statements does not. A statement keyword or a ';' settles it, otherwise the first
+ * `:` outside any bracket does.
+ */
+static bool arrow_starts_dict(Parser *parser) {
+    LzLexer ahead = parser->lexer;
+    LzToken token = lz_lexer_next(&ahead);
+    if (token.type == LZ_TOKEN_RIGHT_BRACE) {
+        return true;
+    }
+    switch (token.type) {
+    case LZ_TOKEN_LET:
+    case LZ_TOKEN_CONST:
+    case LZ_TOKEN_IF:
+    case LZ_TOKEN_WHILE:
+    case LZ_TOKEN_FOR:
+    case LZ_TOKEN_RETURN:
+    case LZ_TOKEN_BREAK:
+    case LZ_TOKEN_CONTINUE:
+        return false;
+    default:
+        break;
+    }
+    int depth = 0;
+    for (;;) {
+        if (token.type == LZ_TOKEN_EOF) {
+            return false;
+        }
+        if (depth == 0) {
+            if (token.type == LZ_TOKEN_COLON) {
+                return true;
+            }
+            if (token.type == LZ_TOKEN_RIGHT_BRACE || token.type == LZ_TOKEN_SEMICOLON) {
+                return false;
+            }
+        }
+        if (token.type == LZ_TOKEN_LEFT_PAREN || token.type == LZ_TOKEN_LEFT_BRACKET ||
+            token.type == LZ_TOKEN_LEFT_BRACE) {
+            depth++;
+        } else if (token.type == LZ_TOKEN_RIGHT_PAREN || token.type == LZ_TOKEN_RIGHT_BRACKET ||
+                   token.type == LZ_TOKEN_RIGHT_BRACE) {
+            if (depth == 0) {
+                return false;
+            }
+            depth--;
+        }
+        token = lz_lexer_next(&ahead);
+    }
+}
+
+/*
+ * The key a literal token stands for, when the whole key expression was that one
+ * token: `"a"`, 1 and true are known at compile time, `k` or `"a" + "b"` are not.
+ */
+static bool key_literal(Parser *parser, const LzToken *token, LzLiteral *out) {
+    if (token->offset + token->length != parser->previous.offset + parser->previous.length ||
+        token->offset != parser->previous.offset) {
+        return false;
+    }
+    switch (parser->previous.type) {
+    case LZ_TOKEN_INTEGER:
+        out->kind = LZ_VAL_INT;
+        out->as.integer = parser->previous.value.integer;
+        return true;
+    case LZ_TOKEN_TRUE:
+    case LZ_TOKEN_FALSE:
+        out->kind = LZ_VAL_BOOL;
+        out->as.boolean = parser->previous.type == LZ_TOKEN_TRUE;
+        return true;
+    case LZ_TOKEN_STRING: {
+        if (parser->previous.value.string.is_template) {
+            return false;
+        }
+        LzBuffer decoded = {0};
+        if (!lz_token_string_value(parser->source, &parser->previous, &decoded)) {
+            lz_buffer_free(&decoded);
+            fail(parser, LZ_ERR_MEMORY);
+            return false;
+        }
+        LzString *text = lz_vm_intern(parser->vm, decoded.data != NULL ? decoded.data : "",
+                                      decoded.length);
+        lz_buffer_free(&decoded);
+        if (text == NULL) {
+            fail(parser, lz_vm_out_of_memory(parser->vm));
+            return false;
+        }
+        out->kind = LZ_VAL_OBJECT;
+        out->as.string = text;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+static bool same_key(const LzLiteral *a, const LzLiteral *b) {
+    if (a->kind != b->kind) {
+        return false;
+    }
+    switch (a->kind) {
+    case LZ_VAL_INT:
+        return a->as.integer == b->as.integer;
+    case LZ_VAL_BOOL:
+        return a->as.boolean == b->as.boolean;
+    default:
+        return a->as.string == b->as.string;
+    }
+}
+
+/* The key as the message shows it: a string quoted, a number and a bool bare. */
+static void describe_key(const LzLiteral *literal, char *out, size_t size) {
+    LzValue value;
+    if (literal->kind == LZ_VAL_INT) {
+        value = lz_value_int(literal->as.integer);
+    } else if (literal->kind == LZ_VAL_BOOL) {
+        value = lz_value_bool(literal->as.boolean);
+    } else {
+        value = lz_value_object((LzObject *)literal->as.string);
+    }
+    LzBuffer text = {0};
+    LzWriter writer = lz_writer_from_buffer(&text);
+    lz_value_write_debug(&value, &writer);
+    (void)snprintf(out, size, "%s", text.data != NULL ? text.data : "?");
+    lz_buffer_free(&text);
+}
+
+/*
+ * {...}: a dict literal, in expression position only. The keys and values go on the
+ * stack in source order and OP_DICT builds the dict from them. A duplicate literal key
+ * is a compile error; a duplicate computed key stores over the first (last wins).
+ */
+static Expr dict_literal(Parser *parser) {
+    uint32_t offset = parser->previous.offset;
+    unsigned count = 0;
+    LzType keys = lz_type_of_kinds(0);
+    LzType values = lz_type_of_kinds(0);
+    LzLiteral seen[32];
+    size_t seen_count = 0;
+
+    skip_newlines(parser);
+    if (!check(parser, LZ_TOKEN_RIGHT_BRACE)) {
+        do {
+            skip_newlines(parser);
+            if (check(parser, LZ_TOKEN_RIGHT_BRACE)) {
+                break; /* trailing comma */
+            }
+            LzToken key_at = parser->current;
+            Expr key = expression(parser);
+            if (!key_kind_ok(&key.type)) {
+                error_key(parser, &key_at, &key.type);
+            }
+            LzLiteral literal;
+            if (key_literal(parser, &key_at, &literal)) {
+                bool duplicate = false;
+                for (size_t i = 0; i < seen_count && !duplicate; i++) {
+                    duplicate = same_key(&seen[i], &literal);
+                }
+                if (duplicate) {
+                    char text[48];
+                    char message[128];
+                    describe_key(&literal, text, sizeof text);
+                    (void)snprintf(message, sizeof message, "duplicate key %s in the dict literal",
+                                   text);
+                    error_at(parser, &key_at, message);
+                } else if (seen_count < sizeof seen / sizeof seen[0]) {
+                    seen[seen_count++] = literal;
+                }
+            }
+            LzType widened = lz_type_widen(&key.type);
+            LzType merged;
+            if (lz_type_union(&merged, &keys, &widened)) {
+                keys = merged;
+            }
+
+            if (!match(parser, LZ_TOKEN_COLON)) {
+                error_at_current(parser, "expected ':' after the key in the dict literal");
+                return expr_of(lz_type_of_kinds(LZ_KIND_DICT));
+            }
+            skip_newlines(parser);
+            if (check(parser, LZ_TOKEN_RIGHT_BRACE) || check(parser, LZ_TOKEN_EOF)) {
+                error_at_current(parser, "expected a value after ':'");
+                return expr_of(lz_type_of_kinds(LZ_KIND_DICT));
+            }
+            Expr value = expression(parser);
+            LzType value_widened = lz_type_widen(&value.type);
+            if (lz_type_union(&merged, &values, &value_widened)) {
+                values = merged;
+            }
+            if (++count > 0xFFFF) {
+                error_at(parser, &key_at, "too many entries in one dict literal");
+                count = 0xFFFF;
+            }
+            skip_newlines(parser);
+        } while (match(parser, LZ_TOKEN_COMMA));
+    }
+    skip_newlines(parser);
+    consume(parser, LZ_TOKEN_RIGHT_BRACE, "expected '}' after the dict literal");
+
+    emit_op_at(parser, LZ_OP_DICT, offset);
+    emit_u16_at(parser, (uint16_t)count, offset);
+    return expr_of(dict_type(parser, &keys, &values));
+}
+
 /* [a, b, c]: every literal builds a fresh array, so it is never folded into a constant. */
 static Expr array_literal(Parser *parser) {
     uint32_t offset = parser->previous.offset;
@@ -1605,6 +2060,29 @@ static LzType item_type_of(const LzType *container) {
     return lz_type_of_kinds(LZ_KINDS_ANY);
 }
 
+static bool is_any_type(const LzType *type);
+
+/* The static type of the values of a dict, or any. */
+static LzType dict_value_type(const LzType *container) {
+    if ((container->kinds & LZ_KIND_DICT) != 0 && container->value_element != NULL) {
+        return *container->value_element;
+    }
+    return lz_type_of_kinds(LZ_KINDS_ANY);
+}
+
+/* An index that can never be a key: a float, nil, an array or a dict. */
+static bool key_kind_ok(const LzType *type) {
+    return (lz_type_possible_kinds(type) & (LZ_KIND_STRING | LZ_KIND_INT | LZ_KIND_BOOL)) != 0;
+}
+
+static void error_key(Parser *parser, const LzToken *at, const LzType *type) {
+    char text[96];
+    describe_bit_operand(type, text, sizeof text);
+    char message[160];
+    (void)snprintf(message, sizeof message, "a %s cannot be a dict key", text);
+    error_at(parser, at, message);
+}
+
 static void check_bound(Parser *parser, const LzToken *at, const Expr *bound, bool slice) {
     uint16_t allowed = slice ? (uint16_t)(LZ_KIND_INT | LZ_KIND_NIL) : (uint16_t)LZ_KIND_INT;
     if ((lz_type_possible_kinds(&bound->type) & allowed) == 0) {
@@ -1619,9 +2097,17 @@ static Expr subscript(Parser *parser, Expr left) {
     LzToken bracket = parser->previous;
     uint32_t offset = bracket.offset;
 
-    if ((lz_type_possible_kinds(&left.type) & LZ_KIND_ARRAY) == 0) {
+    uint16_t container_kinds = lz_type_possible_kinds(&left.type);
+    if ((container_kinds & (LZ_KIND_ARRAY | LZ_KIND_DICT)) == 0) {
         error_types(parser, &bracket, "cannot index a value of type ", &left.type, "", NULL);
     }
+    /* Only a value that is a dict for sure reads a key. An `any` stays array-like: the
+     * index must be an int there, and the run time also accepts a dict key. */
+    bool dict = container_kinds == LZ_KIND_DICT ||
+                (left.dict_value && container_kinds == LZ_KINDS_ANY);
+    /* A value of unknown kind may be either; only the run time can say which. */
+    bool array = container_kinds == LZ_KIND_ARRAY ||
+                 (left.array_value && container_kinds == LZ_KINDS_ANY);
 
     bool has_first = !check(parser, LZ_TOKEN_COLON);
     Expr first = expr_of(lz_type_of_kinds(LZ_KIND_NIL));
@@ -1632,6 +2118,9 @@ static Expr subscript(Parser *parser, Expr left) {
     }
 
     if (match(parser, LZ_TOKEN_COLON)) {
+        if (dict) {
+            error_at(parser, &bracket, "cannot use a dict here");
+        }
         if (has_first) {
             check_bound(parser, &bracket, &first, true);
         }
@@ -1651,9 +2140,21 @@ static Expr subscript(Parser *parser, Expr left) {
         return expr_of(slice);
     }
 
-    check_bound(parser, &bracket, &first, false);
+    if (dict) {
+        if (!key_kind_ok(&first.type)) {
+            error_key(parser, &bracket, &first.type);
+        } else if ((left.type.kinds & LZ_KIND_DICT) != 0 && left.type.element != NULL &&
+                   lz_type_assignable(&first.type, left.type.element) == LZ_ASSIGN_NEVER) {
+            error_types(parser, &bracket, "a dict key of type ", left.type.element,
+                        " cannot hold ", &first.type);
+        }
+    } else if (array) {
+        check_bound(parser, &bracket, &first, false);
+    }
     consume(parser, LZ_TOKEN_RIGHT_BRACKET, "expected ']' after index");
-    Expr result = expr_of(item_type_of(&left.type));
+    Expr result = expr_of(dict ? dict_value_type(&left.type) : item_type_of(&left.type));
+    result.dict_value = dict;
+    result.array_value = !dict && array && left.type.element != NULL;
     result.is_index = true;
     result.op_pos = parser->chunk->count;
     /*
@@ -1674,6 +2175,7 @@ static Expr call(Parser *parser, Expr callee);
 static Expr dot_call(Parser *parser, Expr receiver);
 static Expr and_(Parser *parser, Expr left);
 static Expr or_(Parser *parser, Expr left);
+static Expr if_expression(Parser *parser);
 
 static ParseRule rule_for(LzTokenType type) {
     switch (type) {
@@ -1692,10 +2194,14 @@ static ParseRule rule_for(LzTokenType type) {
         return (ParseRule){grouping, call, PREC_CALL};
     case LZ_TOKEN_LEFT_BRACKET:
         return (ParseRule){array_literal, subscript, PREC_CALL};
+    case LZ_TOKEN_LEFT_BRACE:
+        return (ParseRule){dict_literal, NULL, PREC_NONE};
     case LZ_TOKEN_DOT:
         return (ParseRule){NULL, dot_call, PREC_CALL};
     case LZ_TOKEN_FN:
         return (ParseRule){function_expression, NULL, PREC_NONE};
+    case LZ_TOKEN_IF:
+        return (ParseRule){if_expression, NULL, PREC_NONE};
     case LZ_TOKEN_BANG:
     case LZ_TOKEN_TILDE:
         return (ParseRule){unary, NULL, PREC_NONE};
@@ -2152,7 +2658,11 @@ static Expr call_args(Parser *parser, Expr callee, bool receiver) {
     unsigned count = receiver ? 1 : 0;
 
     if ((lz_type_possible_kinds(&callee.type) & LZ_KIND_FUNCTION) == 0) {
-        error_types(parser, &paren, "cannot call a value of type ", &callee.type, "", NULL);
+        if (lz_type_possible_kinds(&callee.type) == LZ_KIND_DICT) {
+            error_at(parser, &paren, "a dict is not callable");
+        } else {
+            error_types(parser, &paren, "cannot call a value of type ", &callee.type, "", NULL);
+        }
     }
     if (call_has_special_args(parser)) {
         return call_special(parser, callee, &paren, receiver);
@@ -2192,7 +2702,6 @@ static Expr call(Parser *parser, Expr callee) {
  * two are swapped so the call finds [callee][receiver][args...].
  */
 static Expr dot_call(Parser *parser, Expr receiver) {
-    (void)receiver; /* its type will pick the method table once types have their own methods */
     if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
         error_at_current(parser, "expected a method name after '.'");
         return any_expr();
@@ -2226,7 +2735,14 @@ static Expr dot_call(Parser *parser, Expr receiver) {
     }
     emit_op_at(parser, LZ_OP_SWAP, name.offset);
     advance(parser); /* the '(' */
-    return call_args(parser, callee, true);
+    /* `d.copy()` gives a dict: `x["a"]` on it reads a key. The receiver says whether the
+     * dict row of the method answered, which `result_kinds` alone cannot tell. */
+    bool dict_receiver = receiver.dict_value ||
+                         lz_type_possible_kinds(&receiver.type) == LZ_KIND_DICT;
+    Expr result = call_args(parser, callee, true);
+    result.dict_value = dict_receiver && callee.native != NULL &&
+                        (callee.native->result_kinds & LZ_KIND_DICT) != 0;
+    return result;
 }
 
 static Expr and_(Parser *parser, Expr left) {
@@ -2257,7 +2773,7 @@ static Expr or_(Parser *parser, Expr left) {
  * `continue` cannot drop them by accident and the local count stays exact while the
  * body is compiled.
  */
-#define FOR_SLOTS 3
+#define FOR_SLOTS 4
 
 static uint16_t slot_reserve(Parser *parser, uint32_t offset) {
     if (parser->local_count + FOR_SLOTS > LZ_MAX_LOCALS) {
@@ -2292,7 +2808,7 @@ static void slot_drop(Parser *parser, uint16_t base, uint32_t offset) {
 /* Is this type one a `for ... in` can walk, or can it not be told at compile time? */
 static bool iterable_type(const LzType *type) {
     uint16_t kinds = lz_type_possible_kinds(type);
-    return (kinds & (LZ_KIND_ARRAY | LZ_KIND_STRING)) != 0 || kinds == LZ_KINDS_ANY;
+    return (kinds & (LZ_KIND_ARRAY | LZ_KIND_STRING | LZ_KIND_DICT)) != 0 || kinds == LZ_KINDS_ANY;
 }
 
 /* "cannot iterate over int": the kind, naming what the loop was given. */
@@ -2322,7 +2838,20 @@ static LzType loop_item_type(const LzType *iterable) {
     if ((kinds & LZ_KIND_ARRAY) != 0) {
         return item_type_of(iterable);
     }
+    if ((kinds & LZ_KIND_DICT) != 0) {
+        /* `for k in d` walks the keys. */
+        if ((kinds & (LZ_KIND_STRING | LZ_KIND_ARRAY)) == 0 && iterable->element != NULL) {
+            return *iterable->element;
+        }
+        return lz_type_of_kinds(LZ_KINDS_ANY);
+    }
     return lz_type_of_kinds(LZ_KIND_STRING); /* one code point */
+}
+
+/* The second name of `for a, b in x`: the value of a dict entry, otherwise the round. */
+static bool pair_is_value(const LzType *iterable) {
+    return (lz_type_possible_kinds(iterable) & LZ_KIND_DICT) != 0 &&
+           (lz_type_possible_kinds(iterable) & (LZ_KIND_ARRAY | LZ_KIND_STRING)) == 0;
 }
 
 /*
@@ -2525,7 +3054,7 @@ static void for_in_statement(Parser *parser, uint32_t offset) {
         loop_variable(parser, &first_token, first_name, &annotated);
         if (has_annotation) {
             LzType counter_type = lz_type_of_kinds(LZ_KIND_INT);
-            check_assignment(parser, &counter_type, &annotated, &annotation_at, offset);
+            check_static(parser, &counter_type, &annotated, &annotation_at);
         }
         slot_get(parser, (uint16_t)(slots + 0), offset);
         store_variable(parser, first_name, find_symbol(parser, first_name), &first_token);
@@ -2578,16 +3107,23 @@ static void for_in_statement(Parser *parser, uint32_t offset) {
     }
     slot_set(parser, (uint16_t)(slots + 0), offset); /* the iterable */
 
+    bool pair_value = two && pair_is_value(&start.type);
     LzType item = loop_item_type(&start.type);
+    LzType first_type = lz_type_of_kinds(LZ_KIND_INT);
+    if (pair_value) {
+        /* `for k, v in d`: the first name is the key, the second the value. */
+        first_type = item;
+        item = dict_value_type(&start.type);
+    }
+    LzType item_static = item;
     if (has_annotation) {
-        check_assignment(parser, &item, &annotated, &annotation_at, offset);
+        check_static(parser, &item, &annotated, &annotation_at);
         item = annotated;
     }
-
     /* An iterable that is not one is reported here, once, even if the loop never runs. */
     slot_get(parser, (uint16_t)(slots + 0), offset);
     emit_op_at(parser, LZ_OP_ITER_LENGTH, offset);
-    emit_op_at(parser, LZ_OP_POP, offset);
+    slot_set(parser, (uint16_t)(slots + 3), offset); /* the size it began with, for a dict */
     emit_constant(parser, lz_value_int(0));
     slot_set(parser, (uint16_t)(slots + 1), offset); /* the cursor: an item index or a byte offset */
     emit_constant(parser, lz_value_int(0));
@@ -2603,6 +3139,10 @@ static void for_in_statement(Parser *parser, uint32_t offset) {
     parser->loop = &loop;
 
     size_t loop_start = parser->chunk->count;
+    /* A dict may have its values changed while it is walked, but not its size. */
+    slot_get(parser, (uint16_t)(slots + 3), offset);
+    slot_get(parser, (uint16_t)(slots + 0), offset);
+    emit_op_at(parser, LZ_OP_ITER_CHECK, offset);
     /* The item count is read again every round, so an array that grows is walked further. */
     slot_get(parser, (uint16_t)(slots + 1), offset); /* the cursor */
     slot_get(parser, (uint16_t)(slots + 0), offset);
@@ -2613,22 +3153,33 @@ static void for_in_statement(Parser *parser, uint32_t offset) {
 
     begin_scope(parser);
     if (two) {
-        LzType counter_kind = lz_type_of_kinds(LZ_KIND_INT);
-        loop_variable(parser, &first_token, first_name, &counter_kind);
+        loop_variable(parser, &first_token, first_name, &first_type);
     }
     loop_variable(parser, &second_token, second_name, &item);
 
     /* The item and the next cursor, with both hidden values still in their slots. */
     slot_get(parser, (uint16_t)(slots + 0), offset);
     slot_get(parser, (uint16_t)(slots + 1), offset);
-    emit_op_at(parser, LZ_OP_ITER_NEXT, offset);
-    slot_set(parser, (uint16_t)(slots + 1), offset); /* the cursor moves past the item */
-    store_variable(parser, second_name, find_symbol(parser, second_name), &second_token);
-    /* The item is stored and the cursor is already in its slot: only the iterable copy is left. */
-    emit_op_at(parser, LZ_OP_POP, offset);
     if (two) {
-        slot_get(parser, (uint16_t)(slots + 2), offset);
+        /* [x][off] -> [x][first][second][next] */
+        slot_get(parser, (uint16_t)(slots + 2), offset); /* the round, for an array */
+        emit_op_at(parser, LZ_OP_ITER_PAIR, offset);
+        slot_set(parser, (uint16_t)(slots + 1), offset); /* the next cursor, off the top */
+        if (has_annotation) {
+            emit_check_if_needed(parser, &item_static, &item, offset);
+        }
+        store_variable(parser, second_name, find_symbol(parser, second_name), &second_token);
         store_variable(parser, first_name, find_symbol(parser, first_name), &first_token);
+        emit_op_at(parser, LZ_OP_POP, offset); /* the iterable copy */
+    } else {
+        emit_op_at(parser, LZ_OP_ITER_NEXT, offset);
+        slot_set(parser, (uint16_t)(slots + 1), offset); /* the cursor moves past the item */
+        if (has_annotation) {
+            emit_check_if_needed(parser, &item_static, &item, offset);
+        }
+        store_variable(parser, second_name, find_symbol(parser, second_name), &second_token);
+        /* The item is stored and the cursor is already in its slot: only the iterable copy is left. */
+        emit_op_at(parser, LZ_OP_POP, offset);
     }
 
     block(parser);
@@ -2637,7 +3188,7 @@ static void for_in_statement(Parser *parser, uint32_t offset) {
     end_scope(parser);
     parser->loop = loop.enclosing;
 
-    if (two) {
+    if (two && !pair_value) {
         slot_get(parser, (uint16_t)(slots + 2), offset);
         emit_constant(parser, lz_value_int(1));
         emit_op_at(parser, LZ_OP_ADD, offset);
@@ -3148,6 +3699,18 @@ static void variable_declaration(Parser *parser, bool is_const) {
         stored = lz_type_widen(&initializer.type);
     }
     declare_variable(parser, &name_token, name, is_const, &stored);
+    /* `let d = {...}` stays an `any` (a later `d = 5` is legal), but `d["a"]` reads a key
+     * rather than an array index, which a string would not survive. */
+    if (!annotated && has_initializer) {
+        uint16_t kinds = lz_type_possible_kinds(&initializer.type);
+        bool dict = kinds == LZ_KIND_DICT || initializer.dict_value;
+        bool array = kinds == LZ_KIND_ARRAY || initializer.array_value;
+        Symbol *symbol = find_symbol(parser, name);
+        if (symbol != NULL && (dict || array)) {
+            symbol->dict_value = dict;
+            symbol->array_value = array;
+        }
+    }
 }
 
 /* The instruction that stores the top of the stack into a variable. */
@@ -3227,6 +3790,9 @@ static void assignment_statement(Parser *parser) {
     } else {
         check_assignment(parser, &value.type, &symbol->type, &value_start, name_token.offset);
         store_variable(parser, name, symbol, &name_token);
+        /* The variable may hold anything again: `x[k]` is settled by the value it gets. */
+        ((Symbol *)symbol)->dict_value = false;
+        ((Symbol *)symbol)->array_value = false;
     }
     end_statement(parser);
 }
@@ -3635,7 +4201,7 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
         advance(parser);
         uint32_t arrow = parser->previous.offset;
         skip_newlines(parser);
-        if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+        if (check(parser, LZ_TOKEN_LEFT_BRACE) && !arrow_starts_dict(parser)) {
             /* `=>` takes one expression; a block is the plain form. */
             error_at_current(parser, "a block body is written without '=>': fn(x) { ... }");
             block_after_arrow = true; /* still read as the body, so one mistake is one error */

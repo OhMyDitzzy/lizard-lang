@@ -210,8 +210,12 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_INDEX_KEEP:
     case LZ_OP_ITER_LENGTH:
     case LZ_OP_ITER_NEXT:
+    case LZ_OP_ITER_PAIR:
+    case LZ_OP_ITER_CHECK:
     case LZ_OP_RANGE_NEXT:
         return simple_instruction(lz_opcode_name(opcode), offset, out);
+    case LZ_OP_DICT:
+        return slot_instruction(chunk, offset, out);
     case LZ_OP_CLOSE_UPVALUE_KEEP:
         return slot_instruction(chunk, offset, out);
     case LZ_OP_RANGE_TEST:

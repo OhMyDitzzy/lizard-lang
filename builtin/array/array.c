@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "lizard/array.h"
+#include "lizard/dict.h"
 
 static const char *kind_of(const LzValue *value) {
     return lz_kind_name(lz_kind_of(value));
@@ -53,6 +54,10 @@ LzStatus lz_builtin_len(LzVM *vm, int argc, const LzValue *argv, LzValue *result
     (void)argc;
     if (lz_value_is_array(&argv[0])) {
         *result = lz_value_int((int64_t)lz_value_as_array(&argv[0])->count);
+        return LZ_OK;
+    }
+    if (lz_value_is_dict(&argv[0])) {
+        *result = lz_value_int((int64_t)lz_value_as_dict(&argv[0])->count);
         return LZ_OK;
     }
     if (is_string(&argv[0])) {

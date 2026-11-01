@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "lizard/dict.h"
+
 #define LZ_VM_ARRAY_TYPES_MAX 4096
 
 void lz_array_clear_mark(LzObject *array) {
@@ -52,10 +54,30 @@ LzArray *lz_array_new(LzHeap *heap, size_t capacity) {
     return array;
 }
 
+void lz_note_container_store(LzHeap *heap, const LzValue *value) {
+    (void)heap;
+    if (lz_value_is_array(value)) {
+        lz_value_as_array(value)->holders++;
+    } else if (lz_value_is_dict(value)) {
+        lz_value_as_dict(value)->holders++;
+    }
+}
+
+void lz_drop_container_holder(const LzValue *value) {
+    if (lz_value_is_array(value)) {
+        lz_value_as_array(value)->holders--;
+    } else if (lz_value_is_dict(value)) {
+        lz_value_as_dict(value)->holders--;
+    }
+}
+
 void lz_array_note_store(LzArray *array, const LzValue *value) {
     if (lz_value_is_array(value)) {
         array->has_arrays = true;
         lz_value_as_array(value)->holders++;
+    } else if (lz_value_is_dict(value)) {
+        array->has_arrays = true; /* the walk has to visit it too */
+        lz_value_as_dict(value)->holders++;
     }
 }
 
@@ -151,50 +173,87 @@ bool lz_array_admit(const LzArray *container, const LzValue *value) {
     return lz_type_matches(wanted, value);
 }
 
-int lz_array_would_cycle(LzHeap *heap, const LzValue *value, const LzArray *target,
-                         uint64_t *work) {
-    if (!lz_value_is_array(value)) {
+/* The containers a value leads to, one at a time: an array's items, a dict's values. */
+static bool container_is_array(const LzObject *object) {
+    return object->type == LZ_OBJ_ARRAY;
+}
+
+static bool container_may_open(const LzObject *object) {
+    if (container_is_array(object)) {
+        return ((const LzArray *)object)->has_arrays;
+    }
+    return ((const LzDict *)object)->count != 0;
+}
+
+static size_t container_items(const LzObject *object) {
+    return container_is_array(object) ? ((const LzArray *)object)->count
+                                      : ((const LzDict *)object)->count;
+}
+
+static const LzValue *container_item_at(const LzObject *object, size_t index) {
+    return container_is_array(object) ? &((const LzArray *)object)->items[index]
+                                      : &((const LzDict *)object)->entries[index].value;
+}
+
+int lz_containers_would_cycle(LzHeap *heap, const LzValue *value, const LzObject *target,
+                              uint64_t *work) {
+    if (!lz_value_is_container(value)) {
         return 0;
     }
-    const LzArray *root = lz_value_as_array(value);
+    LzObject *root = value->as.object;
     if (root == target) {
         return 1;
     }
     (*work)++;
-    if (!root->has_arrays || target->holders == 0) {
+    /*
+     * A container that nothing holds cannot be inside `value` (reaching one would need a
+     * holder), so the common store of a freshly built structure costs nothing.
+     */
+    if (!container_may_open(root) || target == NULL) {
+        return 0;
+    }
+    if (target->type == LZ_OBJ_ARRAY ? ((const LzArray *)target)->holders == 0
+                                     : ((const LzDict *)target)->holders == 0) {
         return 0;
     }
 
     uint32_t epoch = lz_heap_next_epoch(heap);
     size_t capacity = 16;
     size_t depth = 0;
-    const LzArray **stack = malloc(capacity * sizeof *stack);
+    const LzObject **stack = malloc(capacity * sizeof *stack);
     if (stack == NULL) {
         return -1;
     }
-    ((LzArray *)root)->mark = epoch;
+    if (container_is_array(root)) {
+        ((LzArray *)root)->mark = epoch;
+    } else {
+        ((LzDict *)root)->mark = epoch;
+    }
     stack[depth++] = root;
 
     int result = 0;
     while (depth > 0 && result == 0) {
-        const LzArray *array = stack[--depth];
-        *work += array->count;
-        for (size_t i = 0; i < array->count; i++) {
-            const LzValue *item = &array->items[i];
-            if (!lz_value_is_array(item)) {
+        LzObject *container = (LzObject *)stack[--depth];
+        size_t count = container_items(container);
+        *work += count;
+        for (size_t i = 0; i < count; i++) {
+            const LzValue *item = container_item_at(container, i);
+            if (!lz_value_is_container(item)) {
                 continue;
             }
-            LzArray *inner = lz_value_as_array(item);
+            LzObject *inner = item->as.object;
             if (inner == target) {
                 result = 1;
                 break;
             }
-            if (inner->mark == epoch || !inner->has_arrays) {
+            uint32_t *mark = container_is_array(inner) ? &((LzArray *)inner)->mark
+                                                       : &((LzDict *)inner)->mark;
+            if (*mark == epoch || !container_may_open(inner)) {
                 continue;
             }
-            inner->mark = epoch;
+            *mark = epoch;
             if (depth == capacity) {
-                const LzArray **grown = realloc(stack, capacity * 2 * sizeof *stack);
+                const LzObject **grown = realloc(stack, capacity * 2 * sizeof *stack);
                 if (grown == NULL) {
                     result = -1;
                     break;
@@ -229,9 +288,9 @@ static LzStatus store_type_error(LzVM *vm, const LzArray *array, const LzValue *
 }
 
 LzStatus lz_array_check_store(LzVM *vm, LzArray *array, const LzValue *value) {
-    if (lz_value_is_array(value)) {
+    if (lz_value_is_container(value)) {
         uint64_t work = 0;
-        int cycle = lz_array_would_cycle(&vm->heap, value, array, &work);
+        int cycle = lz_containers_would_cycle(&vm->heap, value, &array->base, &work);
         LzStatus charged = lz_vm_charge_fuel(vm, lz_array_cost((size_t)work));
         if (charged != LZ_OK) {
             return charged;
@@ -400,36 +459,44 @@ LzStatus lz_array_concat(LzVM *vm, const LzArray *a, const LzArray *b, LzValue *
     return LZ_OK;
 }
 
+/* The VM's copy of `type`, shared so that two equal types are the same pointer. */
+LzStatus lz_vm_intern_type(LzVM *vm, const LzType *type, LzType **out) {
+    for (size_t i = 0; i < vm->array_type_count; i++) {
+        if (lz_type_equal(vm->array_types[i], type)) {
+            *out = vm->array_types[i];
+            return LZ_OK;
+        }
+    }
+    if (vm->array_type_count >= LZ_VM_ARRAY_TYPES_MAX) {
+        return lz_vm_set_error(vm, LZ_ERR_COMPILE, "too many distinct types");
+    }
+    if (vm->array_type_count == vm->array_type_capacity) {
+        size_t capacity = vm->array_type_capacity != 0 ? vm->array_type_capacity * 2 : 16;
+        LzType **grown = realloc(vm->array_types, capacity * sizeof *grown);
+        if (grown == NULL) {
+            return lz_vm_set_error(vm, LZ_ERR_MEMORY, "out of memory");
+        }
+        vm->array_types = grown;
+        vm->array_type_capacity = capacity;
+    }
+    LzType *copy = malloc(sizeof *copy);
+    if (copy == NULL) {
+        return lz_vm_set_error(vm, LZ_ERR_MEMORY, "out of memory");
+    }
+    *copy = *type;
+    vm->array_types[vm->array_type_count++] = copy;
+    *out = copy;
+    return LZ_OK;
+}
+
 LzStatus lz_vm_array_of(LzVM *vm, const LzType *element, LzType *out) {
     LzType array = lz_type_of_kinds(LZ_KIND_ARRAY);
     bool is_any = element == NULL || (element->kinds == LZ_KINDS_ANY && element->element == NULL);
     if (!is_any) {
-        const LzType *found = NULL;
-        for (size_t i = 0; i < vm->array_type_count && found == NULL; i++) {
-            if (lz_type_equal(vm->array_types[i], element)) {
-                found = vm->array_types[i];
-            }
-        }
-        if (found == NULL) {
-            if (vm->array_type_count >= LZ_VM_ARRAY_TYPES_MAX) {
-                return lz_vm_set_error(vm, LZ_ERR_COMPILE, "too many distinct array types");
-            }
-            if (vm->array_type_count == vm->array_type_capacity) {
-                size_t capacity = vm->array_type_capacity != 0 ? vm->array_type_capacity * 2 : 16;
-                LzType **grown = realloc(vm->array_types, capacity * sizeof *grown);
-                if (grown == NULL) {
-                    return lz_vm_set_error(vm, LZ_ERR_MEMORY, "out of memory");
-                }
-                vm->array_types = grown;
-                vm->array_type_capacity = capacity;
-            }
-            LzType *copy = malloc(sizeof *copy);
-            if (copy == NULL) {
-                return lz_vm_set_error(vm, LZ_ERR_MEMORY, "out of memory");
-            }
-            *copy = *element;
-            vm->array_types[vm->array_type_count++] = copy;
-            found = copy;
+        LzType *found = NULL;
+        LzStatus status = lz_vm_intern_type(vm, element, &found);
+        if (status != LZ_OK) {
+            return status;
         }
         array.element = found;
     }

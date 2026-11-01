@@ -43,6 +43,14 @@ static const char *const words[] = {
     "for i, x in x { }", "for x: int in x { }", "for i in 0..=2 by -1 { }",
     "for let i = 0; i < 3; i += 1 { }", "for ;; { break }", "for let i = 0, j = 2; i < j; i += 1, j -= 1 { }",
     "for x in x { x = 1 }", "0..3", "[1, 2]..3",
+    "if x { 1 } else { 2 }", "let v = if x { 1 } else { 2 }", "if x { 1 }", "if x { let } else { }",
+    "if x { 1 } else if y { 2 } else { 3 }", "$\"{if x { 1 } else { 2 }}\"", "if x { 1 } else { while }",
+    "dict", "dict[int, string]", "dict", "dict[string]", "dict[,]", "let d: dict = {}",
+    "let d: dict[string, int] = {}", "let d: dikt = {}", "{\"a\": 1}", "{}", "{1: 2, true: 3}",
+    "{\"a\": 1,}", "{\"a\" 1}", "{\"a\": }", "{\"a\": 1", "{\"a\": 1, \"a\": 2}", "{x: y}",
+    "key", "{1.5: 1}", "{[]: 1}", "{{}: 1}", "d[\"a\"]", "d[\"a\"] = 1", "d[1] += 2", "d.k", "d.len()",
+    "d.copy()", "d.merge(d)", "for k in d { }", "for k, v in d { }", "fn() => {\"a\": 1}",
+    "fn() => { }", "$\"{ {\"a\": 1}[\"a\"] }\"",
 };
 
 static void run_one(void) {

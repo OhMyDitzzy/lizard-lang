@@ -12,13 +12,14 @@ typedef enum LzKind {
     LZ_KIND_FLOAT = 1 << 3,
     LZ_KIND_STRING = 1 << 4,
     LZ_KIND_FUNCTION = 1 << 5,
-    LZ_KIND_ARRAY = 1 << 6
+    LZ_KIND_ARRAY = 1 << 6,
+    LZ_KIND_DICT = 1 << 7
 } LzKind;
 
 #define LZ_KINDS_NUMBER (LZ_KIND_INT | LZ_KIND_FLOAT)
 #define LZ_KINDS_ANY                                                                               \
     (LZ_KIND_NIL | LZ_KIND_BOOL | LZ_KIND_INT | LZ_KIND_FLOAT | LZ_KIND_STRING | LZ_KIND_FUNCTION |   \
-     LZ_KIND_ARRAY)
+     LZ_KIND_ARRAY | LZ_KIND_DICT)
 
 #define LZ_TYPE_MAX_LITERALS 8
 
@@ -46,8 +47,12 @@ typedef struct LzType {
      * Only meaningful when kinds has LZ_KIND_ARRAY: the type of the items, or
      * NULL for any. Points at a type interned by the VM (lz_vm_array_of), so
      * two equal element types are the same pointer.
+     *
+     * For LZ_KIND_DICT: element is the key type and value_element the value
+     * type (both NULL for a bare `dict`). Interned by lz_vm_dict_of.
      */
     const struct LzType *element;
+    const struct LzType *value_element;
 } LzType;
 
 typedef enum LzAssign {

@@ -1,0 +1,54 @@
+# Dicts: counting, grouping, and defaults.
+
+let text = "the quick brown fox jumps over the lazy dog the fox"
+let counts = {}
+for word in text.split(" ") {
+  counts[word] = counts.get(word, 0) + 1
+}
+
+# Insertion order, not sorted: "the" is first because it was seen first.
+for word, n in counts {
+  if n > 1 { println($"{word:>5} {n}") }
+}
+
+# A default instead of a missing-key error.
+println(counts.get("cat", 0), counts.has("cat"), counts["fox"])
+
+# A dict of arrays: group words by their first letter.
+let groups = {}
+for word in text.split(" ") {
+  let letter = word.slice(0, 1)
+  if !groups.has(letter) { groups[letter] = [] }
+  push(groups[letter], word)
+}
+for letter in groups {
+  println(letter, groups[letter].len())
+}
+
+# Nested data, display and equality.
+let people = {
+  "ana": {"age": 20, "city": "Bandung"},
+  "budi": {"age": 31, "city": "Jakarta"},
+}
+println(people)
+println(people["budi"]["city"], people.len())
+println(people == {"budi": {"age": 31, "city": "Jakarta"},
+                   "ana": {"age": 20, "city": "Bandung"}})
+
+# merge gives a new dict; neither argument changes.
+let defaults = {"color": "red", "size": 2}
+let chosen = defaults.merge({"size": 3})
+println(chosen, defaults)
+
+# remove returns the value it took out.
+let mutable = {"a": 1, "b": 2, "c": 3}
+println(mutable.remove("b"), mutable.keys(), mutable.len())
+
+# A typed dict is checked once and then restricted.
+let ages: dict[string, int] = {"ana": 20}
+ages["budi"] = 31
+println(ages, ages.values())
+
+# get with a default never fails; d["ane"] would name the closest key.
+let d = {"ana": 20, "andi": 31}
+println(d.get("ane", -1))

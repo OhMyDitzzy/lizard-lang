@@ -254,6 +254,12 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_JUMP_IF_SUPPLIED";
     case LZ_OP_ARRAY_EXTEND:
         return "OP_ARRAY_EXTEND";
+    case LZ_OP_DICT:
+        return "OP_DICT";
+    case LZ_OP_ITER_PAIR:
+        return "OP_ITER_PAIR";
+    case LZ_OP_ITER_CHECK:
+        return "OP_ITER_CHECK";
     case LZ_OP_SWAP:
         return "OP_SWAP";
     case LZ_OP_BIT_AND:
@@ -352,6 +358,12 @@ size_t lz_opcode_length(uint8_t opcode) {
         return 1;
     case LZ_OP_CLOSE_UPVALUE_KEEP:
         return 3; /* the slot whose upvalue is closed */
+    case LZ_OP_DICT:
+        return 3; /* the entry count */
+    case LZ_OP_ITER_CHECK:
+        return 1;
+    case LZ_OP_ITER_PAIR:
+        return 1;
     case LZ_OP_RANGE_TEST:
     case LZ_OP_RANGE_LAST:
         return 2; /* the inclusive flag */

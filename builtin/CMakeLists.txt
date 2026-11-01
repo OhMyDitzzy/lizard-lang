@@ -3,6 +3,7 @@ add_library(lizard_builtin STATIC
     array/array.c
     array/higher.c
     method/casemap.c
+    method/dict.c
     method/method.c
     method/number.c
     method/text.c

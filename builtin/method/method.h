@@ -57,6 +57,17 @@ LzStatus lz_method_pow(LzVM *vm, int argc, const LzValue *argv, LzValue *result)
 LzStatus lz_method_min(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 LzStatus lz_method_max(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 LzStatus lz_method_bit_count(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+/* dict.c */
+LzStatus lz_method_dict_len(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_dict_keys(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_dict_values(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_dict_items(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_dict_get(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_dict_has(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_dict_remove(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_dict_clear(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_dict_copy(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_method_dict_merge(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 LzStatus lz_method_bit_length(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 LzStatus lz_method_bit(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 

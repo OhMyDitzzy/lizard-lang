@@ -43,6 +43,7 @@ typedef struct Gen {
     int name_count;
     int arrays;        /* a0..a{arrays-1}, each created non-empty, numbers only */
     int objs;          /* b0..b{objs-1}: arrays holding strings and arrays, to exercise reference counting */
+    bool dict;         /* d0: a dict of string keys to scalars, holding no array: walking it is safe */
     int serial;        /* unique suffix for loop counters and temporaries */
     bool safe;         /* keep values small and divisors non-zero, so programs run deep before failing */
 } Gen;
@@ -218,6 +219,43 @@ static void gen_object_index(Gen *g, int array) {
     }
 }
 
+/* Statements on d0: a scalar under a key, an int key, a get, a walk, the size. */
+static void gen_dict_stmt(Gen *g) {
+    static const char *const keys[] = {"\"a\"", "\"b\"", "\"c\""};
+    const char *key = keys[below(sizeof keys / sizeof keys[0])];
+    switch (below(9)) {
+    case 0:
+        emit(g, "d0[%s] = ", key);
+        gen_literal(g);
+        emit(g, "\n");
+        break;
+    case 1:
+        emit(g, "d0[%d] = %u\n", (int)below(3), below(10));
+        break;
+    case 2:
+        emit(g, "println(d0[%s])\n", key);
+        break;
+    case 3:
+        emit(g, "println(d0.get(%s), d0.has(%s))\n", key, key);
+        break;
+    case 4:
+        emit(g, "println(d0.len(), len(d0), d0.is_empty())\n");
+        break;
+    case 5:
+        emit(g, "for k in d0 { println(k) }\n");
+        break;
+    case 6:
+        emit(g, "for k, v in d0 { println(k, v) }\n");
+        break;
+    case 7:
+        emit(g, "println(d0.keys(), d0.values())\n");
+        break;
+    default:
+        emit(g, "println(d0 == d0.copy())\n");
+        break;
+    }
+}
+
 /* Statements on the arrays of objects: scalars over objects, objects over objects, arrays into arrays. */
 static void gen_object_stmt(Gen *g) {
     int k = (int)below((unsigned)g->objs);
@@ -282,6 +320,10 @@ static void gen_body(Gen *g, int depth, unsigned count) {
 static void gen_stmt(Gen *g, int depth) {
     if (g->objs > 0 && below(100) < 12) {
         gen_object_stmt(g);
+        return;
+    }
+    if (g->dict && below(100) < 14) {
+        gen_dict_stmt(g);
         return;
     }
     unsigned r = below(100);
@@ -354,6 +396,7 @@ static void gen_program(Gen *g, bool locals, bool safe) {
     int vars = 2 + (int)below(3);
     g->arrays = (int)below(3);
     g->objs = below(3) == 0 ? 0 : 1 + (int)below(2);
+    g->dict = safe && below(2) == 0;
     if (locals) {
         emit(g, "{\n");
     }
@@ -386,6 +429,9 @@ static void gen_program(Gen *g, bool locals, bool safe) {
             emit(g, j == 0 ? "%s" : ", %s", items[below(sizeof items / sizeof items[0])]);
         }
         emit(g, "]\n");
+    }
+    if (g->dict) {
+        emit(g, "let d0 = {\"a\": 1, \"b\": 2}\n");
     }
     gen_body(g, 0, 4 + below(8));
     emit(g, "println(");

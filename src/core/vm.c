@@ -28,6 +28,7 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->out = out;
     vm->err = err;
     vm->error[0] = '\0';
+    vm->error_suggestions.count = 0;
     lz_skink_init(&vm->skink);
     vm->heap.reclaim = lz_skink_reclaim; /* before --max-heap refuses an allocation */
     vm->heap.reclaim_context = vm;
@@ -122,6 +123,7 @@ const LzValue *lz_vm_lookup(const LzVM *vm, const LzString *name) {
 
 LzStatus lz_vm_set_error(LzVM *vm, LzStatus status, const char *format, ...) {
     va_list args;
+    vm->error_suggestions.count = 0;
     va_start(args, format);
     (void)vsnprintf(vm->error, sizeof vm->error, format, args);
     va_end(args);

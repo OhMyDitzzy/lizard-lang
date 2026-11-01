@@ -218,6 +218,22 @@ static void report_runtime_error(const LzVM *vm, const LzSource *source,
         }
     }
 
+    /*
+     * A dict key that is not there: the closest keys of that dict, offered the way an
+     * unknown name's candidates are.
+     */
+    char help[192];
+    if (vm->error_suggestions.count > 0 && strncmp(vm->error, "key ", 4) == 0) {
+        size_t used = (size_t)snprintf(help, sizeof help, "did you mean ");
+        size_t count = vm->error_suggestions.count;
+        for (size_t i = 0; i < count && used < sizeof help; i++) {
+            used += (size_t)snprintf(help + used, sizeof help - used, "%s\"%s\"%s",
+                                     i == 0 ? "" : i + 1 == count ? " or " : ", ",
+                                     vm->error_suggestions.names[i], i + 1 == count ? "?" : "");
+        }
+        report.help = help;
+    }
+
     LzReportFrame frames[LZ_TRACE_MAX];
     char names[LZ_TRACE_MAX][48];
     for (size_t i = 0; i < vm->trace_count && i < LZ_TRACE_MAX; i++) {

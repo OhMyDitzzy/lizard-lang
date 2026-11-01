@@ -295,6 +295,18 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
             ok = d >= 2;
             nd = d + 1; /* the iterable and the offset stay, the item and the next offset go on top */
             break;
+        case LZ_OP_ITER_PAIR:
+            ok = d >= 3;
+            nd = d + 1; /* the iterable, the offset and the round stay: two names and the next offset */
+            break;
+        case LZ_OP_ITER_CHECK:
+            ok = d >= 2;
+            nd = d - 2; /* the size and the iterable are both consumed */
+            break;
+        case LZ_OP_DICT:
+            ok = d >= (int32_t)a * 2;
+            nd = d - (int32_t)a * 2 + 1; /* the key and value pairs become one dict */
+            break;
         case LZ_OP_RANGE_TEST:
         case LZ_OP_RANGE_LAST:
             ok = d >= 3;

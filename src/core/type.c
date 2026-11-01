@@ -1,6 +1,7 @@
 #include "lizard/type.h"
 
 #include "lizard/array.h"
+#include "lizard/dict.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -23,6 +24,8 @@ uint16_t lz_kind_of(const LzValue *value) {
             return LZ_KIND_STRING;
         case LZ_OBJ_ARRAY:
             return LZ_KIND_ARRAY;
+        case LZ_OBJ_DICT:
+            return LZ_KIND_DICT;
         case LZ_OBJ_NATIVE:
         case LZ_OBJ_CLOSURE:
             return LZ_KIND_FUNCTION;
@@ -51,6 +54,8 @@ const char *lz_kind_name(uint16_t kind) {
         return "function";
     case LZ_KIND_ARRAY:
         return "array";
+    case LZ_KIND_DICT:
+        return "dict";
     default:
         return "value";
     }
@@ -139,6 +144,9 @@ LzType lz_type_of_value(const LzValue *value) {
         type.kinds = lz_kind_of(value);
         if (lz_value_is_array(value)) {
             type.element = lz_value_as_array(value)->element;
+        } else if (lz_value_is_dict(value)) {
+            type.element = lz_value_as_dict(value)->key_type;
+            type.value_element = lz_value_as_dict(value)->value_type;
         }
     }
     return type;
@@ -155,6 +163,7 @@ uint16_t lz_type_possible_kinds(const LzType *type) {
 LzType lz_type_widen(const LzType *type) {
     LzType widened = lz_type_of_kinds(lz_type_possible_kinds(type));
     widened.element = type->element;
+    widened.value_element = type->value_element;
     return widened;
 }
 
@@ -190,6 +199,19 @@ bool lz_type_union(LzType *out, const LzType *a, const LzType *b) {
     } else if ((b->kinds & LZ_KIND_ARRAY) != 0) {
         result.element = b->element;
     }
+    /* Two different dict types in a union merge into a dict of any, like arrays do. */
+    if ((a->kinds & LZ_KIND_DICT) != 0 && (b->kinds & LZ_KIND_DICT) != 0) {
+        if (a->element == b->element && a->value_element == b->value_element) {
+            result.element = a->element;
+            result.value_element = a->value_element;
+        }
+    } else if ((a->kinds & LZ_KIND_DICT) != 0) {
+        result.element = a->element;
+        result.value_element = a->value_element;
+    } else if ((b->kinds & LZ_KIND_DICT) != 0) {
+        result.element = b->element;
+        result.value_element = b->value_element;
+    }
     for (size_t i = 0; i < a->literal_count; i++) {
         if (!lz_type_add_literal(&result, &a->literals[i])) {
             return false;
@@ -209,6 +231,10 @@ bool lz_type_equal(const LzType *a, const LzType *b) {
         return false;
     }
     if ((a->kinds & LZ_KIND_ARRAY) != 0 && a->element != b->element) {
+        return false;
+    }
+    if ((a->kinds & LZ_KIND_DICT) != 0 &&
+        (a->element != b->element || a->value_element != b->value_element)) {
         return false;
     }
     for (size_t i = 0; i < a->literal_count; i++) {
@@ -232,6 +258,10 @@ uint32_t lz_type_hash(const LzType *type) {
     uint32_t hash = mix(type->kinds + 1u);
     if ((type->kinds & LZ_KIND_ARRAY) != 0) {
         hash ^= mix((uint64_t)(uintptr_t)type->element);
+    }
+    if ((type->kinds & LZ_KIND_DICT) != 0) {
+        hash ^= mix((uint64_t)(uintptr_t)type->element ^ 0x7777u);
+        hash ^= mix((uint64_t)(uintptr_t)type->value_element ^ 0x8888u);
     }
     for (size_t i = 0; i < type->literal_count; i++) {
         const LzLiteral *literal = &type->literals[i];
@@ -272,6 +302,16 @@ bool lz_type_matches(const LzType *type, const LzValue *value) {
         }
         return true;
     }
+    if (lz_value_is_dict(value)) {
+        if ((type->kinds & LZ_KIND_DICT) == 0) {
+            return false;
+        }
+        const LzDict *dict = lz_value_as_dict(value);
+        if (type->element == NULL && type->value_element == NULL) {
+            return true;
+        }
+        return lz_dict_conform((LzDict *)dict, type->element, type->value_element);
+    }
     if ((lz_kind_of(value) & type->kinds) != 0) {
         return true;
     }
@@ -296,7 +336,7 @@ static LzAssign element_assignable(const LzType *from, const LzType *to) {
 }
 
 LzAssign lz_type_assignable(const LzType *from, const LzType *to) {
-    uint16_t scalar = (uint16_t)~LZ_KIND_ARRAY;
+    uint16_t scalar = (uint16_t)~(LZ_KIND_ARRAY | LZ_KIND_DICT);
     bool always = (from->kinds & ~to->kinds & LZ_KINDS_ANY & scalar) == 0;
     bool overlap = (from->kinds & to->kinds & scalar) != 0;
 
@@ -309,6 +349,53 @@ LzAssign lz_type_assignable(const LzType *from, const LzType *to) {
                 always = false;
             }
             if (items != LZ_ASSIGN_NEVER) {
+                overlap = true;
+            }
+        }
+    }
+
+    if ((from->kinds & LZ_KIND_DICT) != 0) {
+        if ((to->kinds & LZ_KIND_DICT) == 0) {
+            always = false;
+        } else {
+            LzType from_keys = lz_type_of_kinds(0);
+            LzType to_keys = lz_type_of_kinds(0);
+            LzType from_values = lz_type_of_kinds(0);
+            LzType to_values = lz_type_of_kinds(0);
+            if (from->element != NULL) {
+                from_keys = *from->element;
+            }
+            if (to->element != NULL) {
+                to_keys = *to->element;
+            }
+            if (from->value_element != NULL) {
+                from_values = *from->value_element;
+            }
+            if (to->value_element != NULL) {
+                to_values = *to->value_element;
+            }
+            LzType any = lz_type_of_kinds(LZ_KINDS_ANY);
+            if (from->element == NULL) {
+                from_keys = any;
+            }
+            if (to->element == NULL) {
+                to_keys = any;
+            }
+            if (from->value_element == NULL) {
+                from_values = any;
+            }
+            if (to->value_element == NULL) {
+                to_values = any;
+            }
+            LzAssign keys = to->element == NULL ? LZ_ASSIGN_ALWAYS
+                                                : lz_type_assignable(&from_keys, &to_keys);
+            LzAssign values = to->value_element == NULL
+                                  ? LZ_ASSIGN_ALWAYS
+                                  : lz_type_assignable(&from_values, &to_values);
+            if (keys != LZ_ASSIGN_ALWAYS || values != LZ_ASSIGN_ALWAYS) {
+                always = false;
+            }
+            if (keys != LZ_ASSIGN_NEVER && values != LZ_ASSIGN_NEVER) {
                 overlap = true;
             }
         }
@@ -361,6 +448,22 @@ static void write_literal(const LzWriter *out, const LzLiteral *literal) {
         write_string(out, literal->as.string);
         break;
     }
+}
+
+/* A nested type in brackets: parenthesised when it is a union, like (int | string)[]. */
+static void write_nested(const LzType *type, const LzWriter *out) {
+    if (type == NULL) {
+        write_text(out, "any");
+        return;
+    }
+    LzBuffer item = {0};
+    LzWriter item_out = lz_writer_from_buffer(&item);
+    lz_type_describe(type, &item_out);
+    bool compound = item.data != NULL && strstr(item.data, " | ") != NULL;
+    write_text(out, compound ? "(" : "");
+    write_text(out, item.data != NULL ? item.data : "?");
+    write_text(out, compound ? ")" : "");
+    lz_buffer_free(&item);
 }
 
 void lz_type_describe(const LzType *type, const LzWriter *out) {
@@ -425,6 +528,20 @@ void lz_type_describe(const LzType *type, const LzWriter *out) {
             lz_buffer_free(&item);
         }
     }
+    if ((kinds & LZ_KIND_DICT) != 0) {
+        if (!first) {
+            write_text(out, " | ");
+        }
+        first = false;
+        write_text(out, "dict");
+        if (type->element != NULL || type->value_element != NULL) {
+            write_text(out, "[");
+            write_nested(type->element, out);
+            write_text(out, ", ");
+            write_nested(type->value_element, out);
+            write_text(out, "]");
+        }
+    }
 #undef PART
 
     for (size_t i = 0; i < type->literal_count; i++) {
@@ -441,7 +558,13 @@ void lz_value_describe(const LzValue *value, const LzWriter *out) {
     if (literal_from_value(value, &literal)) {
         write_literal(out, &literal);
     } else if (value->type == LZ_VAL_OBJECT) {
-        write_text(out, lz_value_is_array(value) ? "array" : "function");
+        if (lz_value_is_array(value)) {
+            write_text(out, "array");
+        } else if (lz_value_is_dict(value)) {
+            write_text(out, "dict");
+        } else {
+            write_text(out, "function");
+        }
     } else {
         (void)lz_value_write(value, out);
     }

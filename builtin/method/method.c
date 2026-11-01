@@ -5,6 +5,7 @@
 
 #include "convert/convert.h"
 #include "lizard/array.h"
+#include "lizard/dict.h"
 #include "lizard/format.h"
 
 /* ---- methods that need no file of their own ---- */
@@ -68,6 +69,8 @@ LzStatus lz_method_is_empty(LzVM *vm, int argc, const LzValue *argv, LzValue *re
     (void)argc;
     if (lz_value_is_array(&argv[0])) {
         *result = lz_value_bool(lz_value_as_array(&argv[0])->count == 0);
+    } else if (lz_value_is_dict(&argv[0])) {
+        *result = lz_value_bool(lz_value_as_dict(&argv[0])->count == 0);
     } else {
         *result = lz_value_bool(((const LzString *)argv[0].as.object)->length == 0);
     }
@@ -134,8 +137,9 @@ static const LzMethod methods[] = {
     {"chars", K_TEXT, lz_method_chars, 0, 0, LZ_KIND_ARRAY},
     {"slice", K_TEXT, lz_method_slice, 1, 2, LZ_KIND_STRING},
 
-    /* string and array */
-    {"is_empty", LZ_KIND_STRING | LZ_KIND_ARRAY, lz_method_is_empty, 0, 0, LZ_KIND_BOOL},
+    /* string, array and dict */
+    {"is_empty", LZ_KIND_STRING | LZ_KIND_ARRAY | LZ_KIND_DICT, lz_method_is_empty, 0, 0,
+     LZ_KIND_BOOL},
 
     /* array */
     {"first", LZ_KIND_ARRAY, lz_method_first, 0, 0, LZ_KINDS_ANY},
@@ -151,6 +155,18 @@ static const LzMethod methods[] = {
     {"min", K_NUMBER, lz_method_min, 1, 1, LZ_KINDS_NUMBER},
     {"max", K_NUMBER, lz_method_max, 1, 1, LZ_KINDS_NUMBER},
 
+    /* dict */
+    {"len", LZ_KIND_DICT, lz_method_dict_len, 0, 0, LZ_KIND_INT},
+    {"keys", LZ_KIND_DICT, lz_method_dict_keys, 0, 0, LZ_KIND_ARRAY},
+    {"values", LZ_KIND_DICT, lz_method_dict_values, 0, 0, LZ_KIND_ARRAY},
+    {"items", LZ_KIND_DICT, lz_method_dict_items, 0, 0, LZ_KIND_ARRAY},
+    {"get", LZ_KIND_DICT, lz_method_dict_get, 1, 2, LZ_KINDS_ANY},
+    {"has", LZ_KIND_DICT, lz_method_dict_has, 1, 1, LZ_KIND_BOOL},
+    {"remove", LZ_KIND_DICT, lz_method_dict_remove, 1, 1, LZ_KINDS_ANY},
+    {"clear", LZ_KIND_DICT, lz_method_dict_clear, 0, 0, LZ_KIND_NIL},
+    {"copy", LZ_KIND_DICT, lz_method_dict_copy, 0, 0, LZ_KIND_DICT},
+    {"merge", LZ_KIND_DICT, lz_method_dict_merge, 1, 1, LZ_KIND_DICT},
+
     /* int only */
     {"bit_count", LZ_KIND_INT, lz_method_bit_count, 0, 0, LZ_KIND_INT},
     {"bit_length", LZ_KIND_INT, lz_method_bit_length, 0, 0, LZ_KIND_INT},
@@ -158,6 +174,7 @@ static const LzMethod methods[] = {
 };
 
 #define METHOD_COUNT (sizeof methods / sizeof methods[0])
+
 
 static bool same_group(const LzMethod *a, const LzMethod *b) {
     return strcmp(a->name, b->name) == 0;
@@ -171,7 +188,7 @@ static void kinds_served(const LzMethod *first, char *out, size_t size) {
     }
     out[0] = '\0';
     size_t used = 0;
-    for (uint16_t bit = 1; bit != 0 && bit <= LZ_KIND_ARRAY; bit = (uint16_t)(bit << 1)) {
+    for (uint16_t bit = 1; bit != 0 && bit <= LZ_KIND_DICT; bit = (uint16_t)(bit << 1)) {
         if ((mask & bit) == 0 || used + 24 > size) {
             continue;
         }

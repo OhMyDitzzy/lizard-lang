@@ -1,6 +1,7 @@
 #include "lizard/skink.h"
 
 #include "lizard/array.h"
+#include "lizard/dict.h"
 #include "lizard/type.h"
 #include "lizard/vm.h"
 
@@ -95,6 +96,10 @@ static bool type_is_closure_free(const LzType *type, unsigned depth) {
     if ((kinds & LZ_KIND_ARRAY) != 0) {
         return depth > 0 && type_is_closure_free(type->element, depth - 1);
     }
+    if ((kinds & LZ_KIND_DICT) != 0) {
+        /* Keys are strings, ints or bools: only the values can reach a closure. */
+        return depth > 0 && type_is_closure_free(type->value_element, depth - 1);
+    }
     return true;
 }
 
@@ -112,6 +117,14 @@ static bool array_may_hold_cycles(const LzArray *array) {
     return array->count != 0 && !array_is_typed_leaf(array);
 }
 
+static bool dict_is_typed_leaf(const LzDict *dict) {
+    return type_is_closure_free(dict->value_type, 16);
+}
+
+static bool dict_may_hold_cycles(const LzDict *dict) {
+    return dict->count != 0 && !dict_is_typed_leaf(dict);
+}
+
 /* Objects that can take part in a cycle. Strings, natives and functions are leaves. */
 static bool is_node(const LzObject *object) {
     switch (object->type) {
@@ -120,6 +133,8 @@ static bool is_node(const LzObject *object) {
         return true;
     case LZ_OBJ_ARRAY:
         return array_may_hold_cycles((const LzArray *)object);
+    case LZ_OBJ_DICT:
+        return dict_may_hold_cycles((const LzDict *)object);
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
     case LZ_OBJ_FUNCTION:
@@ -147,6 +162,8 @@ static bool may_join_cycle(const LzValue *value) {
         return true;
     case LZ_OBJ_ARRAY:
         return !array_is_typed_leaf((const LzArray *)value->as.object);
+    case LZ_OBJ_DICT:
+        return !dict_is_typed_leaf((const LzDict *)value->as.object);
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
     case LZ_OBJ_FUNCTION:
@@ -163,6 +180,8 @@ static size_t slot_count(const LzObject *node) {
         return ((const LzClosure *)node)->upvalue_count;
     case LZ_OBJ_ARRAY:
         return ((const LzArray *)node)->count;
+    case LZ_OBJ_DICT:
+        return ((const LzDict *)node)->count;
     case LZ_OBJ_UPVALUE:
         return 1;
     case LZ_OBJ_STRING:
@@ -202,6 +221,16 @@ static bool each_edge(Trial *trial, LzObject *node, EdgeFn visit) {
         for (size_t i = 0; i < array->count; i++) {
             const LzValue *item = &array->items[i];
             if (is_graph_value(item) && !visit(trial, item->as.object)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    case LZ_OBJ_DICT: {
+        const LzDict *dict = (const LzDict *)node;
+        for (size_t i = 0; i < dict->count; i++) {
+            const LzValue *value = &dict->entries[i].value;
+            if (is_graph_value(value) && !visit(trial, value->as.object)) {
                 return false;
             }
         }
@@ -399,6 +428,9 @@ static void clear_edges(LzVM *vm, LzObject *node) {
     switch (node->type) {
     case LZ_OBJ_ARRAY:
         lz_array_clear(&vm->heap, (LzArray *)node);
+        break;
+    case LZ_OBJ_DICT:
+        lz_dict_clear(&vm->heap, (LzDict *)node);
         break;
     case LZ_OBJ_CLOSURE: {
         LzClosure *closure = (LzClosure *)node;

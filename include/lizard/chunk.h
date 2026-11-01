@@ -82,8 +82,15 @@ typedef enum LzOpCode {
                               empty, so the last value is reachable without overflow. */
     LZ_OP_RANGE_NEXT,      /* pop step, pop counter, push counter + step; never overflows, because
                               the loop steps only while the counter is before the last value */
-    LZ_OP_CLOSE_UPVALUE_KEEP /* close the upvalue of the top slot and keep the slot: the
-                                captured loop variable of a C-style `for` is fresh each round */
+    LZ_OP_CLOSE_UPVALUE_KEEP, /* close the upvalue of the top slot and keep the slot: the
+                                 captured loop variable of a C-style `for` is fresh each round */
+
+    /* Dicts. Appended last so the earlier opcodes keep their numbers. */
+    LZ_OP_DICT,        /* u16 count: pop 2*count values (key, value, ...) and push a new dict */
+    LZ_OP_ITER_PAIR,   /* u16 counter slot: [x][off] -> [x][first][second][next]. An array or
+                          a string gives the round and the item, a dict the key and the value */
+    LZ_OP_ITER_CHECK   /* pop size, pop x: fail with "dict changed size during iteration" when
+                          x is a dict whose size is no longer size. A no-op for anything else */
 } LzOpCode;
 
 #define LZ_CONSTANTS_MAX 65536

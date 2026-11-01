@@ -32,6 +32,15 @@ Releasing is iterative: a release that happens while another object is being
 finalized is queued, so freeing an array nested a million levels deep cannot
 overflow the C stack.
 
+Dicts (`LzDict`) keep their entries in a dense `entries[]` in insertion order
+plus an open-addressing `slots[]` that indexes them (0 empty, else entry + 1),
+both charged to the heap. A key is hashed once per lookup with the dict's own
+seed, so `1`, `true` and `"1"` never collide by accident and a hostile script
+cannot aim at a bucket. Removing an entry moves the rest down and reindexes, so
+order is `[k0 k1 k2]` minus one, and a key removed and stored again goes to the
+end. A dict counts as a holder for the cycle check, and it can reach a closure,
+so it is a Skink suspect only when its key or value type does not rule one out.
+
 Reference counting cannot free a cycle, so storing an array inside itself,
 directly or through other arrays, is a runtime error. Each array counts how many
 arrays hold it (`holders`); an array held by nobody cannot be inside the value
@@ -259,6 +268,20 @@ into `SET_INDEX`. A literal is never folded into a `const`: each evaluation must
 build a fresh array, so `const xs = [1]` is an ordinary variable that cannot be
 reassigned (its items can change). Arrays are limited to `LZ_ARRAY_MAX_LENGTH`
 (16,777,216) items.
+
+**Dicts.** A literal compiles to one `DICT` with the pair count (it pops 2×count
+values and pushes the dict), so its size is not limited by the value stack.
+`d[k]` and `d[k] = v` reuse `INDEX`/`SET_INDEX`, which pick the dict path when
+the container is one. Keys are string, int or bool; a float, nil, array, dict or
+function key is a compile error when the kind can be judged, a runtime error
+otherwise. A duplicate key in one literal is a compile error; a duplicate that
+only shows at runtime (two variable keys) is last-wins, and the entry keeps its
+first position. `for k in d` compiles to `ITER_CHECK` + `ITER_NEXT` and
+`for k, v in d` to `ITER_CHECK` + `ITER_PAIR`, the same as arrays; the initial
+size is checked so a store during the loop reports
+`dict changed size during iteration`. The type `dict[K, V]` is interned like an
+array item type and restricted onto the object on the first checked store,
+exactly like an array's.
 
 **Constants are shared.** Identical constants of a chunk are stored once (names by
 identity, numbers by value, floats by their bits, strings by content), so a

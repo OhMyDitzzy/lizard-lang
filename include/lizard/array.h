@@ -15,12 +15,26 @@ static inline LzArray *lz_value_as_array(const LzValue *value) {
     return (LzArray *)value->as.object;
 }
 
-/* An array item that is itself an array records who holds it; see lz_array_would_cycle. */
+/*
+ * A container held by another one records who holds it; see lz_containers_would_cycle.
+ * Only arrays count their holders, so only dropping one of them is cheap here.
+ */
 static inline void lz_array_drop_holder(const LzValue *item) {
     if (lz_value_is_array(item)) {
         lz_value_as_array(item)->holders--;
     }
 }
+
+/* The holder bookkeeping of any container: an array item, or a dict value. */
+void lz_note_container_store(LzHeap *heap, const LzValue *value);
+void lz_drop_container_holder(const LzValue *value);
+
+/*
+ * Would storing `value` in the container `target` create a reference cycle? 1 yes,
+ * 0 no, -1 out of memory. Walks arrays and dicts, *work counts the items visited.
+ */
+int lz_containers_would_cycle(LzHeap *heap, const LzValue *value, const LzObject *target,
+                              uint64_t *work);
 
 /* Used by the heap when a stamp counter wraps. */
 void lz_array_clear_mark(LzObject *array);
@@ -60,13 +74,6 @@ bool lz_array_admit(const LzArray *container, const LzValue *value);
  * the array is already restricted to an unrelated type.
  */
 bool lz_array_conform(LzArray *array, const LzType *element);
-
-/*
- * Would storing `value` in `target` create a reference cycle? 1 yes, 0 no,
- * -1 out of memory. *work counts the arrays visited. An array that no other
- * array holds cannot be inside `value`, so the common case costs nothing.
- */
-int lz_array_would_cycle(LzHeap *heap, const LzValue *value, const LzArray *target, uint64_t *work);
 
 /* Fuel for a pass over n items: one unit per 8. */
 static inline uint64_t lz_array_cost(size_t n) {
@@ -112,5 +119,8 @@ LzStatus lz_vm_values_equal(LzVM *vm, const LzValue *a, const LzValue *b, bool *
 
 /* Builds the type `element[]`. The element type is interned in the VM. */
 LzStatus lz_vm_array_of(LzVM *vm, const LzType *element, LzType *out);
+
+/* An interned copy of type, so two equal types are the same pointer (array and dict types). */
+LzStatus lz_vm_intern_type(LzVM *vm, const LzType *type, LzType **out);
 
 #endif

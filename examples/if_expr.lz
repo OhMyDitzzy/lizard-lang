@@ -1,0 +1,44 @@
+# if as an expression: every branch holds one expression and gives a value.
+
+let n = 7
+let label = if n > 0 { "positive" } else { "non-positive" }
+println(label)
+
+# An else-if chain is one expression; the last branch must be a plain else.
+let sign = fn(x: int) -> int { return if x > 0 { 1 } else if x < 0 { -1 } else { 0 } }
+println(sign(7), sign(-7), sign(0))
+
+# Only the branch taken runs, so a division that would fail is never reached.
+let d = 0
+println(if d != 0 { 100 // d } else { 0 })
+
+# The type of the result is the union of both branches.
+let mixed = if n > 0 { 1 } else { "x" }
+println(mixed, if n > 0 { "int" } else { "string" })
+
+# As an argument, an array item and an operand of a larger expression.
+println(if n > 10 { "big" } else { "small" })
+let xs = [if n > 0 { 1 } else { 0 }, if n > 10 { 1 } else { 0 }]
+println(xs)
+println((if n > 0 { 10 } else { 20 }) + 5)
+
+# `if` is a prefix expression: an operator after the last `}` applies to all of it.
+println(if n > 0 { 2 } else { 3 } * 10)   # 20, not 2 or 30
+
+# Inside a template string, with and without a format spec.
+println($"sign is {if n > 0 { "+" } else { "-" }}")
+println($"{if n > 0 { 42 } else { 7 }:05}")
+
+# Multi-line branches.
+let word = if n > 1 {
+    "many"
+} else {
+    "few"
+}
+println(word)
+
+# A lambda in a branch, and an if expression as a lambda's body.
+let twice = if n > 0 { fn(x) { return x * 2 } } else { fn(x) { return x } }
+println(twice(21))
+let abs = fn(x) => if x < 0 { -x } else { x }
+println(abs(-9))

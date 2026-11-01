@@ -32,6 +32,31 @@ xs[1:3]           # [2, 3]
 xs + ys           # [10, 2, 3, 4, 5]
 ```
 
+### Conditions as expressions
+
+`if` in an expression position gives a value: after `=`, `(`, `,`, `[`, `return`, `=>`, an
+operator, or inside `{}` of a template string.
+
+```
+let label = if n > 0 { "positive" } else { "non-positive" }
+let sign  = if n > 0 { 1 } else if n < 0 { -1 } else { 0 }
+let abs   = fn(x) => if x < 0 { -x } else { x }
+println($"{if n > 0 { "yes" } else { "no" }}")
+println(if n > 0 { 2 } else { 3 } * 10)      # 20: the operator applies to the whole if
+```
+
+* Each branch holds exactly one expression; a newline after `{` and before `}` is fine.
+  A statement there is an error: `a branch of an 'if' expression holds one expression,
+  not a statement`.
+* `else` is required, and an `else if` chain must end in a plain `else`:
+  `an 'if' expression needs an 'else'`.
+* Only the branch taken runs, and the result's type is the union of the two branches, so
+  `if a { 1 } else { "x" }` is an `int | string`.
+* `if` at the start of a statement is still the statement form, unchanged.
+* `if` is a prefix expression: it binds looser than everything to its right, so an
+  operator after the last `}` applies to the whole `if`. `if a { 1 } else { 2 } + 3` is
+  `(if a { 1 } else { 2 }) + 3`. Use parentheses when in doubt.
+
 ### Functions
 
 ```
@@ -148,6 +173,60 @@ Indexing out of range is a runtime error. A slice clamps instead.
 `int[]`, `string[]`, `int[][]`, `(int | string)[]` and `int?[]` are types. An
 array stored under such a type is checked once and then restricted to it, so
 `push(ys, "x")` fails on an `int[]`. An unannotated array holds anything.
+
+### Dicts
+
+A dict maps keys to values and keeps the order the keys were added in.
+
+```
+let ages = {"ana": 20, "budi": 31}
+ages["cici"] = 24               # added at the end
+ages["ana"] = 21                # overwritten in place: still first
+println(ages)                   # {"ana": 21, "budi": 31, "cici": 24}
+println(ages["budi"], ages.len(), len(ages))   # 31 3 3
+```
+
+| Builtin | Effect |
+| --- | --- |
+| `len(d)`, `d.len()` | number of entries |
+| `d.keys()`, `d.values()`, `d.items()` | new arrays of the keys, of the values, or of `[key, value]` pairs |
+| `d.get(k)`, `d.get(k, default)` | the value, or `nil` / the default when the key is absent |
+| `d.has(k)` | whether the key is there |
+| `d.remove(k)` | remove and return the value; an error when the key is absent |
+| `d.clear()`, `d.copy()` | empty in place; a shallow copy |
+| `d.merge(other)` | a new dict: `other` wins on a shared key, and the key keeps its place |
+| `d.is_empty()` | whether it has no entries |
+
+* Keys are `string`, `int` or `bool`, and the kinds never mix: `1`, `true` and
+  `"1"` are three different keys. `{1.5: 1}` and `{[]: 1}` are compile errors,
+  and a key that turns out to be one of those at run time fails with
+  `a float cannot be a dict key`.
+* A literal key written twice is a compile error; a key that is the same only at
+  run time (`{k: 1, k: 2}`) stores the last value.
+* `d[k]` on a missing key is a run-time error, with a suggestion from the keys
+  that are there: `key "dewi" not found` / `did you mean "ana"?`. `d[k] = v`
+  adds the key; `d[k] += v` needs it to exist already and says
+  `use d.get(k, 0) + v` when it does not.
+* A dict is a reference, like an array, and a dict may not hold itself: storing
+  one inside itself fails instead of making a cycle.
+* `d == other` compares by content, ignoring the order. Display quotes the
+  strings and nests, and `{d}`, `{d=}` and `{d:s}` in a template work as they do
+  for arrays. Only an empty dict and `false` are falsy.
+* `dict`, `dict[K, V]` and `dict[string, int]` are types, and a dict stored under
+  one is restricted to it, so a later `d["b"] = "no"` on a `dict[string, int]`
+  fails. An unannotated `let d = {...}` is not restricted.
+* `for k in d` walks the keys, `for k, v in d` the key and the value, both in
+  order. Changing a value during the walk is fine; changing the size is
+  `dict changed size during iteration`.
+* A `{` at the start of a statement is still a block, so a dict literal after
+  `in` needs parentheses: `for k in (d) { ... }`, and in a template
+  `$"{ {"a": 1}["a"] }"` needs the space. `{{` is still the brace escape.
+
+```
+let counts = {}
+for word in "a b a".split(" ") { counts[word] = counts.get(word, 0) + 1 }
+for word, n in counts { println(word, n) }   # a 2 / b 1
+```
 
 More in `examples/`. Run one with `build/bin/lizard examples/fizzbuzz.lz`.
 

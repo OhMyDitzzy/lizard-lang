@@ -3,6 +3,7 @@
 #include "lizard/arith.h"
 #include "lizard/array.h"
 #include "lizard/compare.h"
+#include "lizard/dict.h"
 #include "lizard/native.h"
 
 #include <stdio.h>
@@ -85,7 +86,7 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
     LzWriter actual_out = lz_writer_from_buffer(&actual);
 
     lz_type_describe(type, &expected_out);
-    if (lz_value_is_array(value)) {
+    if (lz_value_is_array(value) || lz_value_is_dict(value)) {
         LzType shown = lz_type_of_value(value);
         lz_type_describe(&shown, &actual_out);
     } else if (type->literal_count > 0) {
@@ -135,6 +136,32 @@ static LzStatus array_new(LzVM *vm) {
     return status;
 }
 
+/* OP_DICT n: the key and value pairs are on top, in source order. */
+static LzStatus dict_new(LzVM *vm, uint16_t count) {
+    size_t needed = (size_t)count * 2;
+    if (vm->stack_count < needed) {
+        return malformed(vm, "stack underflow");
+    }
+    LzDict *dict = lz_dict_new(&vm->heap, count);
+    if (dict == NULL) {
+        return lz_vm_out_of_memory(vm);
+    }
+    LzValue result = lz_value_object(&dict->base);
+    size_t base = vm->stack_count - needed;
+    LzStatus status = LZ_OK;
+    for (size_t i = 0; status == LZ_OK && i < count; i++) {
+        status = lz_dict_set(vm, dict, &vm->stack[base + i * 2], &vm->stack[base + i * 2 + 1]);
+    }
+    for (size_t i = 0; i < needed; i++) {
+        pop(vm);
+    }
+    if (status == LZ_OK) {
+        status = push(vm, result);
+    }
+    lz_object_release(&vm->heap, &dict->base);
+    return status;
+}
+
 static LzStatus array_push(LzVM *vm) {
     if (vm->stack_count < 2) {
         return malformed(vm, "stack underflow");
@@ -155,12 +182,36 @@ static LzStatus not_indexable(LzVM *vm, const LzValue *value) {
                            lz_kind_name(lz_kind_of(value)));
 }
 
+/*
+ * d[key]: the item, or "key \"x\" not found" with a hint drawn from the dict's own
+ * string keys. `op` is the instruction, so a compound store can suggest get().
+ */
+static LzStatus dict_index_op(LzVM *vm, const LzDict *dict, const LzValue *key) {
+    LzStatus status = lz_dict_own_key(vm, key);
+    if (status != LZ_OK) {
+        return status;
+    }
+    const LzValue *stored = lz_dict_get(dict, key);
+    if (stored == NULL) {
+        return lz_vm_dict_key_error(vm, dict, key, NULL);
+    }
+    LzValue item = *stored;
+    lz_value_retain(&item); /* keep it alive across the pops, which may free the dict */
+    pop(vm);
+    pop(vm);
+    vm->stack[vm->stack_count++] = item;
+    return LZ_OK;
+}
+
 static LzStatus index_op(LzVM *vm) {
     if (vm->stack_count < 2) {
         return malformed(vm, "stack underflow");
     }
     const LzValue *container = &vm->stack[vm->stack_count - 2];
     const LzValue *index = &vm->stack[vm->stack_count - 1];
+    if (lz_value_is_dict(container)) {
+        return dict_index_op(vm, lz_value_as_dict(container), index);
+    }
     if (!lz_value_is_array(container)) {
         return not_indexable(vm, container);
     }
@@ -216,6 +267,8 @@ static LzStatus iter_length_op(LzVM *vm) {
         length = (int64_t)text->length;
     } else if (lz_value_is_array(value)) {
         length = (int64_t)lz_value_as_array(value)->count;
+    } else if (lz_value_is_dict(value)) {
+        length = (int64_t)lz_value_as_dict(value)->count;
     } else {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
                                lz_kind_name(lz_kind_of(value)));
@@ -256,6 +309,12 @@ static LzStatus iter_next_op(LzVM *vm) {
             return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "index out of range");
         }
         item = array->items[at];
+    } else if (lz_value_is_dict(container)) {
+        const LzDict *dict = lz_value_as_dict(container);
+        if (at < 0 || (size_t)at >= dict->count) {
+            return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "index out of range");
+        }
+        item = dict->entries[at].key; /* `for k in d` walks the keys */
     } else {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
                                lz_kind_name(lz_kind_of(container)));
@@ -275,6 +334,90 @@ static LzStatus iter_next_op(LzVM *vm) {
     if (piece != NULL) {
         lz_object_release(&vm->heap, &piece->base);
     }
+    return status;
+}
+
+/* [x][off][round] -> [x][first][second][next]: an array or a string gives the round and
+ * the item, a dict its key and its value. */
+static LzStatus iter_pair_op(LzVM *vm) {
+    if (vm->stack_count < 3) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *container = &vm->stack[vm->stack_count - 3];
+    const LzValue *offset = &vm->stack[vm->stack_count - 2];
+    const LzValue *round = &vm->stack[vm->stack_count - 1];
+    if (offset->type != LZ_VAL_INT || round->type != LZ_VAL_INT) {
+        return malformed(vm, "loop offset is not an int");
+    }
+    int64_t at = offset->as.integer;
+    LzValue first = *round;
+    LzValue second = lz_value_nil();
+    int64_t next = at + 1;
+    const LzString *text = NULL;
+    LzString *piece = NULL;
+
+    if (lz_value_is_dict(container)) {
+        const LzDict *dict = lz_value_as_dict(container);
+        if (at < 0 || (size_t)at >= dict->count) {
+            return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "index out of range");
+        }
+        first = dict->entries[at].key;
+        second = dict->entries[at].value;
+    } else if (text_at(container, &text)) {
+        if (at < 0 || (size_t)at >= text->length) {
+            return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "loop offset out of range");
+        }
+        size_t size = code_point_length(text->data, text->length, (size_t)at);
+        piece = lz_string_new(&vm->heap, text->data + at, size);
+        if (piece == NULL) {
+            return lz_vm_out_of_memory(vm);
+        }
+        second = lz_value_object(&piece->base);
+        next = at + (int64_t)size;
+    } else if (lz_value_is_array(container)) {
+        const LzArray *array = lz_value_as_array(container);
+        if (at < 0 || (size_t)at >= array->count) {
+            return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "index out of range");
+        }
+        second = array->items[at];
+    } else {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
+                               lz_kind_name(lz_kind_of(container)));
+    }
+
+    lz_value_retain(&first);
+    lz_value_retain(&second);
+    pop(vm); /* the round */
+    pop(vm); /* the offset */
+    LzStatus status = push(vm, first);
+    if (status == LZ_OK) {
+        status = push(vm, second);
+    }
+    if (status == LZ_OK) {
+        status = push(vm, lz_value_int(next));
+    }
+    lz_value_release(&vm->heap, &first);
+    lz_value_release(&vm->heap, &second);
+    if (piece != NULL) {
+        lz_object_release(&vm->heap, &piece->base);
+    }
+    return status;
+}
+
+/* A dict may have its values changed while it is walked, but not its size. */
+static LzStatus iter_check_op(LzVM *vm) {
+    if (vm->stack_count < 2) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *container = &vm->stack[vm->stack_count - 1];
+    const LzValue *size = &vm->stack[vm->stack_count - 2];
+    LzStatus status = LZ_OK;
+    if (lz_value_is_dict(container) &&
+        (size->type != LZ_VAL_INT || (size_t)size->as.integer != lz_value_as_dict(container)->count)) {
+        status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "dict changed size during iteration");
+    }
+    pop(vm);
+    pop(vm);
     return status;
 }
 
@@ -398,6 +541,20 @@ static LzStatus index_keep_op(LzVM *vm) {
         return malformed(vm, "stack underflow");
     }
     const LzValue *container = &vm->stack[vm->stack_count - 2];
+    if (lz_value_is_dict(container)) {
+        /* `d[k] op= v`: the read keeps the dict and the key for OP_SET_INDEX below. */
+        const LzDict *dict = lz_value_as_dict(container);
+        const LzValue *key = &vm->stack[vm->stack_count - 1];
+        LzStatus status = lz_dict_own_key(vm, key);
+        if (status != LZ_OK) {
+            return status;
+        }
+        const LzValue *stored = lz_dict_get(dict, key);
+        if (stored == NULL) {
+            return lz_vm_dict_key_error(vm, dict, key, " (use d.get(k, 0) + v)");
+        }
+        return push(vm, *stored);
+    }
     if (!lz_value_is_array(container)) {
         return not_indexable(vm, container);
     }
@@ -416,6 +573,18 @@ static LzStatus set_index_op(LzVM *vm) {
         return malformed(vm, "stack underflow");
     }
     const LzValue *container = &vm->stack[vm->stack_count - 3];
+    if (lz_value_is_dict(container)) {
+        LzStatus status = lz_dict_set(vm, lz_value_as_dict(container),
+                                      &vm->stack[vm->stack_count - 2],
+                                      &vm->stack[vm->stack_count - 1]);
+        if (status != LZ_OK) {
+            return status;
+        }
+        pop(vm);
+        pop(vm);
+        pop(vm);
+        return LZ_OK;
+    }
     if (!lz_value_is_array(container)) {
         return not_indexable(vm, container);
     }
@@ -926,6 +1095,22 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
     case LZ_OP_ITER_NEXT:
         status = iter_next_op(vm);
         break;
+    case LZ_OP_ITER_PAIR: {
+        status = iter_pair_op(vm);
+        break;
+    }
+    case LZ_OP_ITER_CHECK:
+        status = iter_check_op(vm);
+        break;
+    case LZ_OP_DICT: {
+        uint16_t count;
+        if (!read_u16(chunk, &ip, &count)) {
+            status = malformed(vm, "truncated operand");
+        } else {
+            status = dict_new(vm, count);
+        }
+        break;
+    }
     case LZ_OP_RANGE_TEST: {
         bool inclusive = ip < chunk->count && chunk->code[ip++] != 0;
         status = range_test_op(vm, inclusive);

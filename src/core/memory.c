@@ -1,6 +1,7 @@
 #include "lizard/memory.h"
 
 #include "lizard/array.h"
+#include "lizard/dict.h"
 #include "lizard/function.h"
 
 #include <assert.h>
@@ -142,6 +143,8 @@ uint32_t lz_heap_next_epoch(LzHeap *heap) {
         for (LzObject *object = heap->head; object != NULL; object = object->next) {
             if (object->type == LZ_OBJ_ARRAY) {
                 lz_array_clear_mark(object);
+            } else if (object->type == LZ_OBJ_DICT) {
+                lz_dict_clear_mark(object);
             }
         }
         heap->epoch = 0;

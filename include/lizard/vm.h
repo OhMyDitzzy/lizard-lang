@@ -6,6 +6,7 @@
 #include "lizard/function.h"
 #include "lizard/memory.h"
 #include "lizard/skink.h"
+#include "lizard/suggest.h"
 #include "lizard/table.h"
 #include "lizard/writer.h"
 
@@ -60,6 +61,12 @@ struct LzVM {
     size_t trace_count;
     size_t trace_total; /* frames in the whole stack, so a caller can say how many were left out */
     char error[256];
+    /*
+     * "did you mean" names for the run-time error in vm->error, when it names a value
+     * that does not exist (a dict key, usually). Empty unless it does; the CLI draws
+     * them like the ones the compiler recorded.
+     */
+    LzSuggestions error_suggestions;
     uint32_t native_call_offset; /* source call site of the native that is running, for callback traces */
     unsigned native_depth;       /* callbacks nested inside natives right now, see lz_vm_call_value */
     const struct LzNative *current_native; /* the native lz_native_call is about to run; valid at its entry only */
