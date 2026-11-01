@@ -129,6 +129,9 @@ typedef struct Parser {
     bool method_name;   /* the identifier being compiled follows a '.' (receiver.name(...)) */
     bool for_range_ok;  /* a `..` here belongs to the header of the `for` being compiled */
     bool comma_list;    /* a `,` may separate this statement from the next (a `for` header) */
+    int bracket_depth;  /* ( [ { opened and not yet closed, as tokens are consumed */
+    int no_in_depth;    /* `in` is not an operator at this bracket depth (-1: nowhere): the
+                           iterable of a `for ... in` header, where `in` is part of the loop */
     LoopFrame *loop; /* innermost while being compiled, NULL outside a loop */
 } Parser;
 
@@ -155,6 +158,7 @@ typedef struct LoopFrame {
 
 typedef enum Precedence {
     PREC_NONE,
+    PREC_COALESCE, /* ?? */
     PREC_OR,
     PREC_AND,
     PREC_EQUALITY,
@@ -217,6 +221,8 @@ static size_t emit_jump(Parser *parser, LzOpCode op, uint32_t offset);
 
 static Expr expression(Parser *parser);
 static Expr range_(Parser *parser, Expr left);
+static void error_range_here(Parser *parser, const LzToken *at);
+static void error_range_bound(Parser *parser, const LzToken *at, const LzType *type);
 static bool is_compound(LzTokenType type);
 static void declaration(Parser *parser);
 static LzTokenType next_token_type(const Parser *parser);
@@ -304,6 +310,20 @@ static void fail(Parser *parser, LzStatus status) {
 /* Token handling */
 
 static void advance(Parser *parser) {
+    switch (parser->current.type) {
+    case LZ_TOKEN_LEFT_PAREN:
+    case LZ_TOKEN_LEFT_BRACKET:
+    case LZ_TOKEN_LEFT_BRACE:
+        parser->bracket_depth++;
+        break;
+    case LZ_TOKEN_RIGHT_PAREN:
+    case LZ_TOKEN_RIGHT_BRACKET:
+    case LZ_TOKEN_RIGHT_BRACE:
+        parser->bracket_depth--;
+        break;
+    default:
+        break;
+    }
     parser->previous = parser->current;
     for (;;) {
         parser->current = lz_lexer_next(&parser->lexer);
@@ -1182,7 +1202,8 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
 static bool parse_type_postfix(Parser *parser, LzType *out) {
     bool ok = parse_type_primary(parser, out);
     for (;;) {
-        if (match(parser, LZ_TOKEN_QUESTION)) {
+        /* `int??` is `int?` written twice: nullable twice is nullable (the lexer made it `??`). */
+        if (match(parser, LZ_TOKEN_QUESTION) || match(parser, LZ_TOKEN_QUESTION_QUESTION)) {
             LzType nil = lz_type_of_kinds(LZ_KIND_NIL);
             LzType merged;
             if (lz_type_union(&merged, out, &nil)) {
@@ -1301,6 +1322,9 @@ static Expr embedded_expression(Parser *parser, size_t start, size_t end) {
     LzToken saved_current = parser->current;
     LzToken saved_previous = parser->previous;
     const LzSource *saved_source = parser->source;
+    int saved_depth = parser->bracket_depth;
+    int saved_no_in = parser->no_in_depth;
+    parser->no_in_depth = -1; /* a template's expression is not a `for` header, whatever holds it */
 
     LzSource cut = *saved_source;
     cut.length = end;
@@ -1320,6 +1344,8 @@ static Expr embedded_expression(Parser *parser, size_t start, size_t end) {
     parser->current = saved_current;
     parser->previous = saved_previous;
     parser->source = saved_source;
+    parser->bracket_depth = saved_depth;
+    parser->no_in_depth = saved_no_in;
     return value;
 }
 
@@ -2175,6 +2201,8 @@ static Expr call(Parser *parser, Expr callee);
 static Expr dot_call(Parser *parser, Expr receiver);
 static Expr and_(Parser *parser, Expr left);
 static Expr or_(Parser *parser, Expr left);
+static Expr in_(Parser *parser, Expr left);
+static Expr coalesce(Parser *parser, Expr left);
 static Expr if_expression(Parser *parser);
 
 static ParseRule rule_for(LzTokenType type) {
@@ -2234,6 +2262,11 @@ static ParseRule rule_for(LzTokenType type) {
     case LZ_TOKEN_DOT_DOT:
     case LZ_TOKEN_DOT_DOT_EQUAL:
         return (ParseRule){NULL, range_, PREC_OR};
+    case LZ_TOKEN_IN:
+    case LZ_TOKEN_NOT_IN:
+        return (ParseRule){NULL, in_, PREC_COMPARISON};
+    case LZ_TOKEN_QUESTION_QUESTION:
+        return (ParseRule){NULL, coalesce, PREC_COALESCE};
     case LZ_TOKEN_AND:
         return (ParseRule){NULL, and_, PREC_AND};
     case LZ_TOKEN_OR:
@@ -2271,6 +2304,11 @@ static Expr parse_precedence(Parser *parser, Precedence precedence) {
         if (parser->fatal != LZ_OK || precedence > rule_for(parser->current.type).precedence) {
             break;
         }
+        /* The `in` of a `for` header belongs to the loop, not to the iterable's expression. */
+        if ((parser->current.type == LZ_TOKEN_IN || parser->current.type == LZ_TOKEN_NOT_IN) &&
+            parser->no_in_depth == parser->bracket_depth) {
+            break;
+        }
         InfixFn infix = rule_for(parser->current.type).infix;
         advance(parser);
         left = infix(parser, left);
@@ -2280,7 +2318,7 @@ static Expr parse_precedence(Parser *parser, Precedence precedence) {
 }
 
 static Expr expression(Parser *parser) {
-    return parse_precedence(parser, PREC_OR);
+    return parse_precedence(parser, PREC_COALESCE);
 }
 
 /* The type of an arithmetic result, or a compile error when no operand pairing can work. */
@@ -2766,6 +2804,145 @@ static Expr or_(Parser *parser, Expr left) {
     return union_expr(left, right);
 }
 
+/*
+ * `x in xs`, `x not in xs` and `x in a..b`. The operator sits with the comparisons. A range
+ * is only allowed right after `in`, where it becomes one instruction over [x][a][b], so each
+ * of the three is evaluated once, left to right. Anything else on the right is a container:
+ * the instruction itself says which, and what it cannot be.
+ */
+static Expr in_(Parser *parser, Expr left) {
+    LzToken op = parser->previous;
+    bool negate = op.type == LZ_TOKEN_NOT_IN;
+    Expr result = expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
+    skip_newlines(parser);
+    if (rule_for(parser->current.type).prefix == NULL) {
+        error_at_current(parser, "expected an expression after 'in'");
+        return result;
+    }
+
+    LzToken right_at = parser->current;
+    Expr right = parse_precedence(parser, PREC_BIT_OR);
+    if (right.start.length != 0) {
+        right_at = right.start;
+    }
+    LzType left_wide = lz_type_widen(&left.type);
+    LzType right_wide = lz_type_widen(&right.type);
+    if (right.is_range) {
+        /* `x in (a..b)` in a `for` header: the range is not a value. */
+        error_range_here(parser, &right_at);
+        return result;
+    }
+
+    if (check(parser, LZ_TOKEN_DOT_DOT) || check(parser, LZ_TOKEN_DOT_DOT_EQUAL)) {
+        advance(parser);
+        LzToken range_op = parser->previous;
+        bool inclusive = range_op.type == LZ_TOKEN_DOT_DOT_EQUAL;
+        skip_newlines(parser);
+        LzToken end_at = parser->current;
+        Expr end = parse_precedence(parser, PREC_BIT_OR);
+        if (end.start.length != 0) {
+            end_at = end.start;
+        }
+        LzType end_wide = lz_type_widen(&end.type);
+        if (check(parser, LZ_TOKEN_BY)) {
+            error_at_current(parser, "a range with 'by' cannot be used with 'in'");
+            advance(parser);
+            skip_newlines(parser);
+            (void)parse_precedence(parser, PREC_BIT_OR); /* the step: parsed so no error follows */
+            return result;
+        }
+        if ((lz_type_possible_kinds(&left_wide) & LZ_KINDS_NUMBER) == 0) {
+            char text[64];
+            char message[160];
+            describe_bit_operand(&left.type, text, sizeof text);
+            (void)snprintf(message, sizeof message,
+                           "the value tested with a range must be a number, got %s", text);
+            error_at(parser, &left.start, message);
+        }
+        if ((lz_type_possible_kinds(&right_wide) & LZ_KIND_INT) == 0) {
+            error_range_bound(parser, &right_at, &right.type);
+        }
+        if ((lz_type_possible_kinds(&end_wide) & LZ_KIND_INT) == 0) {
+            error_range_bound(parser, &end_at, &end.type);
+        }
+        emit_op_at(parser, LZ_OP_IN_RANGE, range_op.offset);
+        emit_byte_at(parser, inclusive ? 1 : 0, range_op.offset);
+        if (negate) {
+            emit_op_at(parser, LZ_OP_NOT, op.offset);
+        }
+        return result;
+    }
+
+    if (check(parser, LZ_TOKEN_BY)) {
+        /* `x in a by 2`: a range was meant, and it has no `..` */
+        error_at_current(parser, "a range with 'by' cannot be used with 'in'");
+        return result;
+    }
+
+    uint16_t kinds = lz_type_possible_kinds(&right_wide);
+    if ((kinds & (LZ_KIND_ARRAY | LZ_KIND_DICT | LZ_KIND_STRING)) == 0) {
+        char text[64];
+        char message[160];
+        describe_bit_operand(&right.type, text, sizeof text);
+        (void)snprintf(message, sizeof message, "cannot use 'in' with %s", text);
+        error_at(parser, &right_at, message);
+    } else if (kinds == LZ_KIND_STRING &&
+               (lz_type_possible_kinds(&left_wide) & LZ_KIND_STRING) == 0) {
+        char text[64];
+        char message[200];
+        describe_bit_operand(&left.type, text, sizeof text);
+        (void)snprintf(message, sizeof message,
+                       "the left side of 'in' must be a string when the right side is a string, "
+                       "got %s",
+                       text);
+        error_at(parser, &right_at, message); /* where the instruction reports it at run time */
+    }
+    emit_op_at(parser, LZ_OP_IN, right_at.offset);
+    if (negate) {
+        emit_op_at(parser, LZ_OP_NOT, op.offset);
+    }
+    return result;
+}
+
+/* The type with its nil taken out: what `a` can be when `a ?? b` did not use b. */
+static LzType without_nil(const LzType *type) {
+    LzType out = *type;
+    out.kinds = (uint16_t)(out.kinds & ~LZ_KIND_NIL);
+    return out;
+}
+
+/*
+ * `a ?? b`: b only when a is nil (0, "", false and [] are values and stay). The lowest binary
+ * operator, so `a or b ?? c` is `(a or b) ?? c`, and it chains to the left.
+ *
+ *     a  NIL_TEST  JUMP_IF_FALSE .keep  POP POP  b  JUMP .end  .keep: POP  .end:
+ */
+static Expr coalesce(Parser *parser, Expr left) {
+    uint32_t offset = parser->previous.offset;
+    emit_op_at(parser, LZ_OP_NIL_TEST, offset);
+    size_t keep_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
+    emit_op_at(parser, LZ_OP_POP, offset); /* the test */
+    emit_op_at(parser, LZ_OP_POP, offset); /* the nil */
+    skip_newlines(parser);
+    if (rule_for(parser->current.type).prefix == NULL) {
+        error_at_current(parser, "expected an expression after '?" "?'");
+        return any_expr();
+    }
+    /* One level up: the caller's loop absorbs the next `??`, so a long chain iterates. */
+    Expr right = parse_precedence(parser, PREC_OR);
+    size_t end_jump = emit_jump(parser, LZ_OP_JUMP, offset);
+    patch_jump(parser, keep_jump);
+    emit_op_at(parser, LZ_OP_POP, offset); /* the test; the value stays */
+    patch_jump(parser, end_jump);
+
+    /* a without nil, joined with b. A left that cannot be nil is allowed all the same. */
+    LzType kept = without_nil(&left.type);
+    if (kept.kinds == 0 && kept.literal_count == 0) {
+        return expr_of(right.type);
+    }
+    return union_expr(expr_of(kept), right);
+}
+
 /* `for` loops */
 
 /*
@@ -2895,9 +3072,9 @@ static void close_round_variables(Parser *parser, const LoopFrame *loop, uint32_
     }
 }
 
-/* "a range can only be used in a 'for' loop", with the caret on the operator. */
+/* "a range can only be used in a 'for' loop or after 'in'", with the caret on the operator. */
 static void error_range_here(Parser *parser, const LzToken *at) {
-    error_at(parser, at, "a range can only be used in a 'for' loop");
+    error_at(parser, at, "a range can only be used in a 'for' loop or after 'in'");
 }
 
 /*
@@ -3007,7 +3184,10 @@ static void for_in_statement(Parser *parser, uint32_t offset) {
     uint16_t slots = slot_reserve(parser, offset);
     LzToken value_at = parser->current;
     parser->for_range_ok = true;
+    int saved_no_in = parser->no_in_depth;
+    parser->no_in_depth = parser->bracket_depth; /* the next `in` at this depth is not an operator */
     Expr start = expression(parser);
+    parser->no_in_depth = saved_no_in;
     parser->for_range_ok = false;
 
     if (start.is_range) {
@@ -3297,6 +3477,9 @@ static void for_c_statement(Parser *parser, uint32_t offset) {
     }
     if (!match(parser, LZ_TOKEN_SEMICOLON)) {
         error_at_current(parser, "expected ';' after the loop condition");
+        parser->loop = loop.enclosing; /* `loop` is about to go out of scope */
+        free(loop.breaks);
+        free(loop.continues);
         return;
     }
     skip_newlines(parser);
@@ -4543,6 +4726,7 @@ LzStatus lz_compile(LzVM *vm, const LzSource *source, LzChunk *chunk, LzDiagnost
     parser->source = source;
     parser->chunk = chunk;
     parser->diagnostics = diagnostics;
+    parser->no_in_depth = -1;
     lz_lexer_init(&parser->lexer, source);
 
     LzStatus status = compile_into(parser);

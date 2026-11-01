@@ -288,6 +288,12 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_RANGE_NEXT";
     case LZ_OP_CLOSE_UPVALUE_KEEP:
         return "OP_CLOSE_UPVALUE_KEEP";
+    case LZ_OP_IN:
+        return "OP_IN";
+    case LZ_OP_IN_RANGE:
+        return "OP_IN_RANGE";
+    case LZ_OP_NIL_TEST:
+        return "OP_NIL_TEST";
     default:
         return "OP_UNKNOWN";
     }
@@ -355,6 +361,8 @@ size_t lz_opcode_length(uint8_t opcode) {
     case LZ_OP_ITER_LENGTH:
     case LZ_OP_ITER_NEXT:
     case LZ_OP_RANGE_NEXT:
+    case LZ_OP_IN:
+    case LZ_OP_NIL_TEST:
         return 1;
     case LZ_OP_CLOSE_UPVALUE_KEEP:
         return 3; /* the slot whose upvalue is closed */
@@ -366,6 +374,7 @@ size_t lz_opcode_length(uint8_t opcode) {
         return 1;
     case LZ_OP_RANGE_TEST:
     case LZ_OP_RANGE_LAST:
+    case LZ_OP_IN_RANGE:
         return 2; /* the inclusive flag */
     default:
         return 0;

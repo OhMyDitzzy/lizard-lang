@@ -77,7 +77,11 @@ typedef enum LzTokenType {
     LZ_TOKEN_IN,      /* in */
     LZ_TOKEN_BY,      /* by */
     LZ_TOKEN_DOT_DOT, /* .. */
-    LZ_TOKEN_DOT_DOT_EQUAL /* ..= */
+    LZ_TOKEN_DOT_DOT_EQUAL, /* ..= */
+
+    /* Membership and nil fallback. Appended last so the earlier token numbers keep theirs. */
+    LZ_TOKEN_NOT_IN,        /* `not in`: `not`, blanks, `in`, as one token */
+    LZ_TOKEN_QUESTION_QUESTION /* ?? */
 } LzTokenType;
 
 /*

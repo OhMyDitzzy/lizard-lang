@@ -264,8 +264,8 @@ static void test_compile_errors(void) {
     check_compile_error("for x in {\n}\n", "expected an expression after 'in'", 1, 10);
     check_compile_error("for x in [1] print(x)\n", "expected '{' after the 'for' header", 1, 14);
     check_compile_error("for i in 0..10 print(i)\n", "expected '{' after the 'for' header", 1, 16);
-    check_compile_error("let r = 0..3\n", "a range can only be used in a 'for' loop", 1, 10);
-    check_compile_error("println(0..3)\n", "a range can only be used in a 'for' loop", 1, 10);
+    check_compile_error("let r = 0..3\n", "a range can only be used in a 'for' loop or after 'in'", 1, 10);
+    check_compile_error("println(0..3)\n", "a range can only be used in a 'for' loop or after 'in'", 1, 10);
     check_compile_error("for i in 0..10 by 0 {\n}\n", "range step cannot be 0", 1, 19);
     check_compile_error("for x in 5 {\n}\n", "cannot iterate over int", 1, 10);
     check_compile_error("for x in true {\n}\n", "cannot iterate over bool", 1, 10);

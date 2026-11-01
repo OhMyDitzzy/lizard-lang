@@ -7,6 +7,7 @@
 #include "lizard/native.h"
 
 #include <stdio.h>
+#include <string.h>
 
 static bool read_u16(const LzChunk *chunk, size_t *ip, uint16_t *out) {
     if (*ip + 2 > chunk->count) {
@@ -467,6 +468,128 @@ static LzStatus range_test_op(LzVM *vm, bool inclusive) {
  * The last value the loop visits. It runs only when the range is not empty, so the
  * distance fits in 64 bits and the last value is one the loop reaches exactly.
  */
+/* Is `needle` a substring of `hay`? Bytes, like contains(); the empty string is in everything. */
+static bool bytes_contain(const LzString *hay, const LzString *needle) {
+    if (needle->length == 0) {
+        return true;
+    }
+    if (needle->length > hay->length) {
+        return false;
+    }
+    size_t last = hay->length - needle->length;
+    for (size_t i = 0; i <= last; i++) {
+        const char *at = memchr(hay->data + i, needle->data[0], last - i + 1);
+        if (at == NULL) {
+            return false;
+        }
+        i = (size_t)(at - hay->data);
+        if (memcmp(at, needle->data, needle->length) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * `a in b`. An array holds a when one of its items == a (the rule of ==, so 1.0 in [1] is
+ * true), a dict when a is one of its keys (a value that cannot be a key is simply absent),
+ * a string when a is a substring. The caret of an error is on b, whatever the cause.
+ */
+static LzStatus in_op(LzVM *vm) {
+    if (vm->stack_count < 2) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *left = &vm->stack[vm->stack_count - 2];
+    const LzValue *right = &vm->stack[vm->stack_count - 1];
+    bool found = false;
+
+    if (lz_value_is_array(right)) {
+        const LzArray *array = lz_value_as_array(right);
+        /* One unit of fuel per 8 items looked at, spent before the items are, so a huge array
+         * cannot be walked once the budget is gone. */
+        for (size_t i = 0; i < array->count && !found; i++) {
+            if (i % 8 == 0) {
+                LzStatus charged = lz_vm_charge_fuel(vm, 1);
+                if (charged != LZ_OK) {
+                    return charged;
+                }
+            }
+            LzStatus status = lz_vm_values_equal(vm, left, &array->items[i], &found);
+            if (status != LZ_OK) {
+                return status;
+            }
+        }
+    } else if (lz_value_is_dict(right)) {
+        uint16_t kind = lz_kind_of(left);
+        if ((kind & (LZ_KIND_STRING | LZ_KIND_INT | LZ_KIND_BOOL)) != 0) {
+            found = lz_dict_get(lz_value_as_dict(right), left) != NULL;
+        }
+    } else if (right->type == LZ_VAL_OBJECT && right->as.object->type == LZ_OBJ_STRING) {
+        const LzString *hay = (const LzString *)right->as.object;
+        const LzString *needle = NULL;
+        if (!text_at(left, &needle)) {
+            return lz_vm_set_error(vm, LZ_ERR_TYPE,
+                                   "the left side of 'in' must be a string when the right side "
+                                   "is a string, got %s",
+                                   lz_kind_name(lz_kind_of(left)));
+        }
+        uint64_t width = needle->length < 64 ? needle->length / 8 + 1 : 9;
+        LzStatus charged = lz_vm_charge_fuel(vm, ((uint64_t)hay->length / 64 + 1) * width);
+        if (charged != LZ_OK) {
+            return charged;
+        }
+        found = bytes_contain(hay, needle);
+    } else {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot use 'in' with %s",
+                               lz_kind_name(lz_kind_of(right)));
+    }
+
+    pop(vm);
+    pop(vm);
+    return push(vm, lz_value_bool(found));
+}
+
+/* `x in a..b` / `x in a..=b`: [x][a][b] -> bool, with the same answers as x >= a and x < b. */
+static LzStatus in_range_op(LzVM *vm, bool inclusive) {
+    if (vm->stack_count < 3) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *value = &vm->stack[vm->stack_count - 3];
+    const LzValue *low = &vm->stack[vm->stack_count - 2];
+    const LzValue *high = &vm->stack[vm->stack_count - 1];
+    if (!range_bounds_int(vm, low, high, high)) {
+        return LZ_ERR_TYPE; /* already reported */
+    }
+    if (value->type != LZ_VAL_INT && value->type != LZ_VAL_FLOAT) {
+        return lz_vm_set_error(vm, LZ_ERR_TYPE,
+                               "the value tested with a range must be a number, got %s",
+                               lz_kind_name(lz_kind_of(value)));
+    }
+    LzValue above;
+    LzValue below;
+    LzStatus status = lz_compare_order(vm, LZ_OP_GREATER_EQUAL, value, low, &above);
+    if (status == LZ_OK) {
+        status = lz_compare_order(vm, inclusive ? LZ_OP_LESS_EQUAL : LZ_OP_LESS, value, high,
+                                  &below);
+    }
+    if (status != LZ_OK) {
+        return status;
+    }
+    bool inside = above.as.boolean && below.as.boolean;
+    pop(vm);
+    pop(vm);
+    pop(vm);
+    return push(vm, lz_value_bool(inside));
+}
+
+/* `??`: [x] -> [x][x is nil]. */
+static LzStatus nil_test_op(LzVM *vm) {
+    if (vm->stack_count == 0) {
+        return malformed(vm, "stack underflow");
+    }
+    return push(vm, lz_value_bool(vm->stack[vm->stack_count - 1].type == LZ_VAL_NIL));
+}
+
 static LzStatus range_last_op(LzVM *vm, bool inclusive) {
     if (vm->stack_count < 3) {
         return malformed(vm, "stack underflow");
@@ -1123,6 +1246,17 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
     }
     case LZ_OP_RANGE_NEXT:
         status = range_next_op(vm);
+        break;
+    case LZ_OP_IN:
+        status = in_op(vm);
+        break;
+    case LZ_OP_IN_RANGE: {
+        bool inclusive = ip < chunk->count && chunk->code[ip++] != 0;
+        status = in_range_op(vm, inclusive);
+        break;
+    }
+    case LZ_OP_NIL_TEST:
+        status = nil_test_op(vm);
         break;
     case LZ_OP_CLOSE_UPVALUE_KEEP: {
         uint16_t slot;

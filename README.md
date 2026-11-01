@@ -104,7 +104,7 @@ for let i = 1; i < 100; i *= 2 { print(i) }  # 1248163264
 * `a..b` visits `a` up to `b - 1`; `a..=b` includes `b`. The bounds and the step
   are evaluated once, must be ints, and are never overflowed: `0..=INT64_MAX`
   ends after one round of `INT64_MAX`. A step of 0 is an error. A range is not a
-  value: `let r = 0..3` is `a range can only be used in a 'for' loop`.
+  value: `let r = 0..3` is `a range can only be used in a 'for' loop or after 'in'`.
 * An array's length is read again every round, so a loop over an array the body
   grows walks the new items and one over an array it shrinks stops early. A
   string is walked one code point at a time without building an array of them.
@@ -241,6 +241,7 @@ Logic can be written with symbols or words; both mean the same thing:
 | `!x` | `not x` |
 | `==` | `equal` |
 | `!=` | `not equal` |
+| | `not in` (one operator, see below) |
 
 **Compound assignment** writes `x op= v` for `x = x op v`, with every binary operator
 the language has: `+=` `-=` `*=` `/=` `//=` `%=` `&=` `|=` `^=` `<<=` `>>=`. It works on
@@ -267,6 +268,53 @@ if not (i equal 2) and i not equal 3 { ... }
 Bitwise operators work on `int` only and always give an `int` (64-bit two's complement):
 `a & b`, `a | b`, `a ^ b`, `~a`, `a << n`, `a >> n`. They have no word forms.
 
+### Membership: `in`, `not in` and `??`
+
+`x in c` asks whether `x` is in `c` and gives a `bool`. `not in` is the opposite and is one
+operator (`not` and `in` separated by blanks; `!in` does not exist). `in` sits with the
+comparisons (`<` `<=` `>` `>=`) and is left-associative, so `1 + 2 in xs` is `(1 + 2) in xs`
+and `x in xs == true` is `(x in xs) == true`.
+
+| Right side | `x in c` is true when | Cost |
+| --- | --- | --- |
+| array | an item `== x` (the rule of `==`: `1.0 in [1]` is true, arrays and dicts compare by value) | O(n), fuel per item |
+| dict | `x` is a **key** (never a value). A left side that cannot be a key (float, nil, array, dict) is simply `false` | O(1) |
+| string | `x` is a substring (bytes, like `contains`; `"" in s` is true). The left side must be a string | fuel by length |
+| range | `x in a..b` is `x >= a and x < b`; `x in a..=b` is `x >= a and x <= b` | two comparisons, no allocation |
+| anything else | error `cannot use 'in' with <kind>`, at compile time when the type is known | |
+
+A range is still not a value. It is allowed in a `for` header and right after `in`, nowhere
+else (`let r = 0..3` is an error). In `x in a..b` the value `x` and the bounds are each
+evaluated once, in that order; the bounds must be ints, `x` an int or a float. A range with
+`by` is an error here. `not in` works the same.
+
+```
+if "ana" in ages { ... }          # a key of a dict
+if age in 18..=65 { ... }         # no array is built
+if "x" not in ages { ... }
+```
+
+In the header of a `for` the first `in` after the loop variable belongs to the loop, and `in`
+is not an operator at the top level of the iterable (`for x in xs in ys` is an error). Put it
+in parentheses or a call to use it there: `for b in f(x in xs)`. A C-style header is
+ordinary: `for let i = 0; i in xs; i += 1`.
+
+`a ?? b` is `b` when `a` is `nil`, and `a` otherwise. Only `nil` counts: `0`, `""`, `false`
+and `[]` are kept. This differs from `or` only for `false`, since `false` and `nil` are the only
+false values: `false or 5` is `5` but `false ?? 5` is `false`. `b` is not evaluated unless
+`a` is nil. It is the weakest binary operator, below `or` (`a or b ?? c` is `(a or b) ?? c`),
+it chains to the left, and a newline after it is ignored.
+
+```
+let name = ages.get("ana") ?? "anon"     # get without a default gives nil
+let n = a ?? b ?? 0                      # the first one that is not nil
+println(false ?? 5, false or 5)          # false 5
+```
+
+The type of `a ?? b` is the type of `a` without `nil`, joined with the type of `b`
+(`int? ?? int` is `int`). A left side that cannot be `nil` is allowed, with no error. In a type,
+`int??` is accepted and means `int?` (nullable twice is nullable).
+
 **Precedence**, from the strongest to the weakest. Binary operators are left-associative, and
 a newline after one is ignored.
 
@@ -283,6 +331,7 @@ a newline after one is ignored.
 | equality | `==` `!=` |
 | logical and | `and` `&&` |
 | logical or | `or` `\|\|` |
+| fallback | `??` |
 
 So `flags & 4 == 4` means `(flags & 4) == 4` (unlike C), and `1 + 2 << 3` is `24`.
 

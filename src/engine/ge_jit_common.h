@@ -278,6 +278,7 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
         case LZ_OP_INDEX:
         case LZ_OP_ARRAY_PUSH:
         case LZ_OP_ARRAY_EXTEND:
+        case LZ_OP_IN:
             ok = d >= 2;
             nd = d - 1;
             break;
@@ -309,6 +310,7 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
             break;
         case LZ_OP_RANGE_TEST:
         case LZ_OP_RANGE_LAST:
+        case LZ_OP_IN_RANGE:
             ok = d >= 3;
             nd = d - 2; /* the three ints become one */
             break;
@@ -318,6 +320,10 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
             break;
         case LZ_OP_CLOSE_UPVALUE_KEEP:
             ok = d >= 1; /* the depth does not change */
+            break;
+        case LZ_OP_NIL_TEST:
+            ok = d >= 1;
+            nd = d + 1; /* the value stays, whether it is nil goes on top */
             break;
         case LZ_OP_NEGATE:
         case LZ_OP_BIT_NOT:

@@ -150,6 +150,27 @@ static void test_operators_and_punctuation(void) {
     EXPECT("===", T(EQUAL_EQUAL), T(EQUAL), T(NEWLINE));
 }
 
+static void test_in_and_coalesce(void) {
+    EXPECT("a in b", T(IDENTIFIER), T(IN), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a not in b", T(IDENTIFIER), T(NOT_IN), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a not  in b", T(IDENTIFIER), T(NOT_IN), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a not\tin b", T(IDENTIFIER), T(NOT_IN), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a not inside", T(IDENTIFIER), T(BANG), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a not in_x", T(IDENTIFIER), T(BANG), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a not in", T(IDENTIFIER), T(NOT_IN), T(NEWLINE));
+    EXPECT("a not\nin b", T(IDENTIFIER), T(BANG), T(NEWLINE), T(IN), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a !in b", T(IDENTIFIER), T(BANG), T(IN), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a ?? b", T(IDENTIFIER), T(QUESTION_QUESTION), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a??b", T(IDENTIFIER), T(QUESTION_QUESTION), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a ? b", T(IDENTIFIER), T(QUESTION), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("a ? ? b", T(IDENTIFIER), T(QUESTION), T(QUESTION), T(IDENTIFIER), T(NEWLINE));
+    EXPECT("int?", T(IDENTIFIER), T(QUESTION), T(NEWLINE));
+    EXPECT("int??", T(IDENTIFIER), T(QUESTION_QUESTION), T(NEWLINE));
+    EXPECT("int?[]", T(IDENTIFIER), T(QUESTION), T(LEFT_BRACKET), T(RIGHT_BRACKET), T(NEWLINE));
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_NOT_IN), "NOT_IN") == 0);
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_QUESTION_QUESTION), "QUESTION_QUESTION") == 0);
+}
+
 static void test_keywords_and_identifiers(void) {
     EXPECT("and or true false nil android orx nile _a a1 A_b", T(AND), T(OR), T(TRUE), T(FALSE),
            T(NIL), T(IDENTIFIER), T(IDENTIFIER), T(IDENTIFIER), T(IDENTIFIER), T(IDENTIFIER),
@@ -362,6 +383,7 @@ static void test_type_names(void) {
 
 int main(void) {
     test_operators_and_punctuation();
+    test_in_and_coalesce();
     test_keywords_and_identifiers();
     test_integers();
     test_floats();

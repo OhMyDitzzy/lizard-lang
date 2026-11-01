@@ -89,8 +89,15 @@ typedef enum LzOpCode {
     LZ_OP_DICT,        /* u16 count: pop 2*count values (key, value, ...) and push a new dict */
     LZ_OP_ITER_PAIR,   /* u16 counter slot: [x][off] -> [x][first][second][next]. An array or
                           a string gives the round and the item, a dict the key and the value */
-    LZ_OP_ITER_CHECK   /* pop size, pop x: fail with "dict changed size during iteration" when
+    LZ_OP_ITER_CHECK,  /* pop size, pop x: fail with "dict changed size during iteration" when
                           x is a dict whose size is no longer size. A no-op for anything else */
+
+    /* `in`, `not in` and `??`. Appended last so the earlier opcodes keep their numbers. */
+    LZ_OP_IN,          /* pop b, pop a, push whether a is in b: an item of an array, a key of a
+                          dict, a substring of a string. Anything else on the right is an error */
+    LZ_OP_IN_RANGE,    /* u8 inclusive: pop b, pop a, pop x, push a <= x < b (a <= x <= b when
+                          inclusive). The bounds must be ints and x a number */
+    LZ_OP_NIL_TEST     /* keep x, push whether it is nil: [x] -> [x][is nil] */
 } LzOpCode;
 
 #define LZ_CONSTANTS_MAX 65536

@@ -116,6 +116,13 @@ static LzToken lex_identifier(LzLexer *lexer, size_t start) {
             lexer->position = probe + 5;
             return make_token(lexer, LZ_TOKEN_BANG_EQUAL, start);
         }
+        /* `not in` is one token too. `not inside` is `not` followed by an identifier. */
+        if (probe > lexer->position && probe + 2 <= lexer->source->length &&
+            memcmp(text + probe, "in", 2) == 0 &&
+            (probe + 2 == lexer->source->length || !is_alnum(text[probe + 2]))) {
+            lexer->position = probe + 2;
+            return make_token(lexer, LZ_TOKEN_NOT_IN, start);
+        }
     }
     for (size_t i = 0; i < sizeof keywords / sizeof keywords[0]; i++) {
         if (strlen(keywords[i].text) == length && memcmp(keywords[i].text, text + start, length) == 0) {
@@ -465,6 +472,9 @@ LzToken lz_lexer_next(LzLexer *lexer) {
     case '~':
         return make_token(lexer, LZ_TOKEN_TILDE, start);
     case '?':
+        if (match(lexer, '?')) {
+            return make_token(lexer, LZ_TOKEN_QUESTION_QUESTION, start);
+        }
         return make_token(lexer, LZ_TOKEN_QUESTION, start);
     case '/':
         if (match(lexer, '/')) {
@@ -645,6 +655,10 @@ const char *lz_token_type_name(LzTokenType type) {
         return "DOT_DOT";
     case LZ_TOKEN_DOT_DOT_EQUAL:
         return "DOT_DOT_EQUAL";
+    case LZ_TOKEN_NOT_IN:
+        return "NOT_IN";
+    case LZ_TOKEN_QUESTION_QUESTION:
+        return "QUESTION_QUESTION";
     }
     return "UNKNOWN";
 }

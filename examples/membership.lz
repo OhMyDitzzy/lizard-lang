@@ -1,0 +1,51 @@
+# Membership with `in` / `not in`, and fallbacks with `??`.
+
+let ages = {"ana": 31, "budi": 17, "citra": 70}
+
+# A dict: is it a key?
+for name in ["ana", "dewi"] {
+  if name in ages { println($"{name} is known") }
+  if name not in ages { println($"{name} is unknown") }
+}
+
+# Arrays and strings.
+let vowels = ["a", "e", "i", "o", "u"]
+let word = "dictionary"
+let found = word.chars().filter(fn(c) => c in vowels)
+println(found)
+println("tion" in word, "ion" in word, "xyz" not in word)
+
+# A range after `in`: validation without building an array.
+for name, age in ages {
+  if age in 18..=65 {
+    println($"{name} ({age}): adult")
+  } else if age in 0..18 {
+    println($"{name} ({age}): minor")
+  } else {
+    println($"{name} ({age}): senior")
+  }
+}
+println([5, 18, 65, 66].filter(fn(n) => n in 18..=65))
+
+# `in` inside a for header needs brackets (the first `in` is the loop's).
+let allowed = ["ana", "citra"]
+for ok in ["ana", "budi"].map(fn(n) => n in allowed) { print(ok, "") }
+println()
+
+# `??` replaces only nil. `or` also replaces false.
+println(ages.get("dewi") ?? "no age")
+println(ages.get("ana") ?? 0)
+let flag = false
+println(flag ?? true, flag or true)
+
+# The first value that is not nil, and a fallback that runs only when needed.
+let nickname = nil
+let username = nil
+println(nickname ?? username ?? "guest")
+fn expensive() {
+  println("computing the default")
+  return "default"
+}
+println(ages.get("budi") ?? expensive())
+println(ages.get("zzz") ?? expensive())
+println($"{ages.get("zzz") ?? "none"} / {"b" in "abc"}")
