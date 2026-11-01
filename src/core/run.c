@@ -550,7 +550,7 @@ static LzStatus in_op(LzVM *vm) {
 }
 
 /* `x in a..b` / `x in a..=b`: [x][a][b] -> bool, with the same answers as x >= a and x < b. */
-static LzStatus in_range_op(LzVM *vm, bool inclusive) {
+static LzStatus in_range_op(LzVM *vm, bool inclusive, bool lenient) {
     if (vm->stack_count < 3) {
         return malformed(vm, "stack underflow");
     }
@@ -561,6 +561,12 @@ static LzStatus in_range_op(LzVM *vm, bool inclusive) {
         return LZ_ERR_TYPE; /* already reported */
     }
     if (value->type != LZ_VAL_INT && value->type != LZ_VAL_FLOAT) {
+        if (lenient) { /* a `case` range: what is not a number is not in it */
+            pop(vm);
+            pop(vm);
+            pop(vm);
+            return push(vm, lz_value_bool(false));
+        }
         return lz_vm_set_error(vm, LZ_ERR_TYPE,
                                "the value tested with a range must be a number, got %s",
                                lz_kind_name(lz_kind_of(value)));
@@ -1251,12 +1257,19 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         status = in_op(vm);
         break;
     case LZ_OP_IN_RANGE: {
-        bool inclusive = ip < chunk->count && chunk->code[ip++] != 0;
-        status = in_range_op(vm, inclusive);
+        uint8_t flags = ip < chunk->count ? chunk->code[ip++] : 0;
+        status = in_range_op(vm, (flags & 1) != 0, (flags & 2) != 0);
         break;
     }
     case LZ_OP_NIL_TEST:
         status = nil_test_op(vm);
+        break;
+    case LZ_OP_DUP:
+        if (vm->stack_count == 0) {
+            status = malformed(vm, "stack underflow");
+        } else {
+            status = push(vm, vm->stack[vm->stack_count - 1]);
+        }
         break;
     case LZ_OP_CLOSE_UPVALUE_KEEP: {
         uint16_t slot;

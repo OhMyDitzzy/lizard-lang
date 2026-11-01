@@ -150,6 +150,16 @@ static void test_operators_and_punctuation(void) {
     EXPECT("===", T(EQUAL_EQUAL), T(EQUAL), T(NEWLINE));
 }
 
+static void test_switch_words(void) {
+    EXPECT("switch x { case 1 => 2 else => 3 }", T(SWITCH), T(IDENTIFIER), T(LEFT_BRACE), T(CASE),
+           T(INTEGER), T(FAT_ARROW), T(INTEGER), T(ELSE), T(FAT_ARROW), T(INTEGER),
+           T(RIGHT_BRACE), T(NEWLINE));
+    EXPECT("switcher cases switch_x casey", T(IDENTIFIER), T(IDENTIFIER), T(IDENTIFIER),
+           T(IDENTIFIER), T(NEWLINE));
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_SWITCH), "SWITCH") == 0);
+    LZ_CHECK(strcmp(lz_token_type_name(LZ_TOKEN_CASE), "CASE") == 0);
+}
+
 static void test_in_and_coalesce(void) {
     EXPECT("a in b", T(IDENTIFIER), T(IN), T(IDENTIFIER), T(NEWLINE));
     EXPECT("a not in b", T(IDENTIFIER), T(NOT_IN), T(IDENTIFIER), T(NEWLINE));
@@ -384,6 +394,7 @@ static void test_type_names(void) {
 int main(void) {
     test_operators_and_punctuation();
     test_in_and_coalesce();
+    test_switch_words();
     test_keywords_and_identifiers();
     test_integers();
     test_floats();

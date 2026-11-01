@@ -325,6 +325,7 @@ bool ge_translate(const LzChunk *chunk, GeProgram *program) {
         case LZ_OP_IN:
         case LZ_OP_IN_RANGE:
         case LZ_OP_NIL_TEST:
+        case LZ_OP_DUP:
             in->op = GE_OP_DELEGATE;
             break;
         default:

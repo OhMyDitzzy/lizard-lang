@@ -129,6 +129,7 @@ typedef struct Parser {
     bool method_name;   /* the identifier being compiled follows a '.' (receiver.name(...)) */
     bool for_range_ok;  /* a `..` here belongs to the header of the `for` being compiled */
     bool comma_list;    /* a `,` may separate this statement from the next (a `for` header) */
+    bool range_case;    /* a range is being read as the item of a `case`: no step, no value pushed */
     int bracket_depth;  /* ( [ { opened and not yet closed, as tokens are consumed */
     int no_in_depth;    /* `in` is not an operator at this bracket depth (-1: nowhere): the
                            iterable of a `for ... in` header, where `in` is part of the loop */
@@ -1865,6 +1866,7 @@ static bool arrow_starts_dict(Parser *parser) {
     case LZ_TOKEN_LET:
     case LZ_TOKEN_CONST:
     case LZ_TOKEN_IF:
+    case LZ_TOKEN_SWITCH:
     case LZ_TOKEN_WHILE:
     case LZ_TOKEN_FOR:
     case LZ_TOKEN_RETURN:
@@ -2204,6 +2206,8 @@ static Expr or_(Parser *parser, Expr left);
 static Expr in_(Parser *parser, Expr left);
 static Expr coalesce(Parser *parser, Expr left);
 static Expr if_expression(Parser *parser);
+static Expr switch_expression(Parser *parser);
+static void switch_statement(Parser *parser);
 
 static ParseRule rule_for(LzTokenType type) {
     switch (type) {
@@ -2230,6 +2234,8 @@ static ParseRule rule_for(LzTokenType type) {
         return (ParseRule){function_expression, NULL, PREC_NONE};
     case LZ_TOKEN_IF:
         return (ParseRule){if_expression, NULL, PREC_NONE};
+    case LZ_TOKEN_SWITCH:
+        return (ParseRule){switch_expression, NULL, PREC_NONE};
     case LZ_TOKEN_BANG:
     case LZ_TOKEN_TILDE:
         return (ParseRule){unary, NULL, PREC_NONE};
@@ -3101,7 +3107,15 @@ static Expr range_(Parser *parser, Expr left) {
     if ((lz_type_possible_kinds(&end.type) & LZ_KIND_INT) == 0) {
         error_range_bound(parser, &end_at, &end.type);
     }
-    if (match(parser, LZ_TOKEN_BY)) {
+    if (parser->range_case) {
+        /* The item of a `case`: [a][b] is all there is, and a step has no meaning. */
+        if (check(parser, LZ_TOKEN_BY)) {
+            error_at_current(parser, "a range with 'by' cannot be used in a 'case'");
+            advance(parser);
+            skip_newlines(parser);
+            (void)parse_precedence(parser, PREC_COMPARISON);
+        }
+    } else if (match(parser, LZ_TOKEN_BY)) {
         skip_newlines(parser);
         LzToken step_at = parser->current;
         Expr step = parse_precedence(parser, PREC_COMPARISON);
@@ -3686,6 +3700,388 @@ static void loop_jump_statement(Parser *parser, bool is_break) {
     parser->terminated = true;
 }
 
+/* `switch` */
+
+/* A literal case item seen so far, to catch the same one written twice. */
+typedef struct {
+    LzTokenType type;
+    int64_t integer;
+    uint32_t offset; /* of the lexeme, for a string */
+    uint32_t length;
+} CaseLiteral;
+
+typedef struct {
+    bool as_expr;
+    bool has_subject;
+    uint16_t slot;      /* the hidden local that holds the subject (a statement) */
+    LzType subject;     /* its static type */
+    CaseLiteral *seen;  /* the literal items so far */
+    size_t seen_count;
+    size_t seen_capacity;
+    size_t *hits;       /* the jumps of one case's items that matched, to its body */
+    size_t hit_count;
+    size_t hit_capacity;
+} SwitchState;
+
+/* Skips to just past the `}` that closes the switch whose `{` took the depth to `depth`. */
+static void switch_recover(Parser *parser, int depth) {
+    while (!check(parser, LZ_TOKEN_EOF) && parser->bracket_depth >= depth) {
+        advance(parser);
+    }
+}
+
+static bool switch_add_hit(Parser *parser, SwitchState *state, size_t operand) {
+    if (state->hit_count == state->hit_capacity) {
+        size_t capacity = state->hit_capacity != 0 ? state->hit_capacity * 2 : 4;
+        size_t *grown = realloc(state->hits, capacity * sizeof *grown);
+        if (grown == NULL) {
+            fail(parser, LZ_ERR_MEMORY);
+            return false;
+        }
+        state->hits = grown;
+        state->hit_capacity = capacity;
+    }
+    state->hits[state->hit_count++] = operand;
+    return true;
+}
+
+/*
+ * If the item just read was one literal (a number, a string, true, false or nil), checks it
+ * against the ones before it in this switch: the same one twice can never be reached.
+ */
+static void switch_check_duplicate(Parser *parser, SwitchState *state, const LzToken *first) {
+    const LzToken *last = &parser->previous;
+    CaseLiteral literal;
+    memset(&literal, 0, sizeof literal);
+    LzToken at = *first;
+    bool negative = first->type == LZ_TOKEN_MINUS && last->type == LZ_TOKEN_INTEGER &&
+                    last->offset == first->offset + first->length;
+    if (negative) {
+        literal.type = LZ_TOKEN_INTEGER;
+        literal.integer = (int64_t)(0 - (uint64_t)last->value.integer);
+    } else if (first->offset == last->offset &&
+               (first->type == LZ_TOKEN_INTEGER || first->type == LZ_TOKEN_STRING ||
+                first->type == LZ_TOKEN_TRUE || first->type == LZ_TOKEN_FALSE ||
+                first->type == LZ_TOKEN_NIL)) {
+        literal.type = first->type;
+        literal.integer = first->type == LZ_TOKEN_INTEGER ? first->value.integer : 0;
+        literal.offset = first->offset;
+        literal.length = first->length;
+    } else {
+        return;
+    }
+    for (size_t i = 0; i < state->seen_count; i++) {
+        const CaseLiteral *other = &state->seen[i];
+        bool same = other->type == literal.type;
+        if (same && literal.type == LZ_TOKEN_INTEGER) {
+            same = other->integer == literal.integer;
+        } else if (same && literal.type == LZ_TOKEN_STRING) {
+            same = other->length == literal.length &&
+                   memcmp(parser->source->text + other->offset,
+                          parser->source->text + literal.offset, literal.length) == 0;
+        }
+        if (same) {
+            char message[160];
+            int shown = (int)(negative ? last->offset + last->length - first->offset : first->length);
+            (void)snprintf(message, sizeof message, "duplicate case %.*s", shown,
+                           parser->source->text + first->offset);
+            error_at(parser, &at, message);
+            return;
+        }
+    }
+    if (state->seen_count == state->seen_capacity) {
+        size_t capacity = state->seen_capacity != 0 ? state->seen_capacity * 2 : 8;
+        CaseLiteral *grown = realloc(state->seen, capacity * sizeof *grown);
+        if (grown == NULL) {
+            fail(parser, LZ_ERR_MEMORY);
+            return;
+        }
+        state->seen = grown;
+        state->seen_capacity = capacity;
+    }
+    state->seen[state->seen_count++] = literal;
+}
+
+/* Can a value of `subject` ever be == a value of `item`? An int and a float can be. */
+static bool switch_kinds_meet(const LzType *subject, const LzType *item) {
+    uint16_t a = lz_type_possible_kinds(subject);
+    uint16_t b = lz_type_possible_kinds(item);
+    if ((a & LZ_KINDS_NUMBER) != 0) {
+        a = (uint16_t)(a | LZ_KINDS_NUMBER);
+    }
+    if ((b & LZ_KINDS_NUMBER) != 0) {
+        b = (uint16_t)(b | LZ_KINDS_NUMBER);
+    }
+    return (a & b) != 0;
+}
+
+static void error_never_matches(Parser *parser, const LzToken *at, const LzType *subject,
+                                const LzType *item) {
+    char subject_text[64];
+    char item_text[64];
+    char message[220];
+    describe_bit_operand(subject, subject_text, sizeof subject_text);
+    describe_bit_operand(item, item_text, sizeof item_text);
+    (void)snprintf(message, sizeof message,
+                   "this case can never match: the subject is %s, but the case is %s", subject_text,
+                   item_text);
+    error_at(parser, at, message);
+}
+
+/*
+ * One item of a `case`. With a subject it leaves whether the subject matches: a copy of the
+ * subject is taken first, then the item is compared to it with == or, for a range, tested
+ * against it. Without a subject the item is the condition itself.
+ */
+static void switch_item(Parser *parser, SwitchState *state) {
+    LzToken first = parser->current;
+    uint32_t offset = first.offset;
+    if (state->has_subject) {
+        if (state->as_expr) {
+            emit_op_at(parser, LZ_OP_DUP, offset);
+        } else {
+            slot_get(parser, state->slot, offset);
+        }
+    }
+    bool saved_ok = parser->for_range_ok;
+    bool saved_case = parser->range_case;
+    parser->for_range_ok = true;
+    parser->range_case = true;
+    Expr item = parse_precedence(parser, PREC_COALESCE);
+    parser->for_range_ok = saved_ok;
+    parser->range_case = saved_case;
+    if (item.is_range) {
+        if (!state->has_subject) {
+            error_at(parser, &first, "a range cannot be used in a 'switch' without a subject");
+            return;
+        }
+        LzType bounds = lz_type_of_kinds(LZ_KIND_INT);
+        LzType subject = lz_type_widen(&state->subject);
+        if ((lz_type_possible_kinds(&subject) & LZ_KINDS_NUMBER) == 0) {
+            error_never_matches(parser, &first, &subject, &bounds);
+        }
+        emit_op_at(parser, LZ_OP_IN_RANGE, offset);
+        emit_byte_at(parser, (uint8_t)((item.inclusive ? 1 : 0) | 2), offset);
+        return;
+    }
+    if (!state->has_subject) {
+        return;
+    }
+    LzType subject = lz_type_widen(&state->subject);
+    LzType item_type = lz_type_widen(&item.type);
+    if (!switch_kinds_meet(&subject, &item_type)) {
+        error_never_matches(parser, &first, &subject, &item_type);
+    } else {
+        switch_check_duplicate(parser, state, &first);
+    }
+    emit_op_at(parser, LZ_OP_EQUAL, offset);
+}
+
+/*
+ * Both forms. The subject is evaluated once. A statement keeps it in a hidden local of its
+ * own scope, so `break`, `continue` and the end of the scope drop it like any other local.
+ * An expression cannot name a slot (values of the expression it sits in may be below), so it
+ * keeps the subject on the stack and copies it with OP_DUP; the value of the arm taken ends up
+ * above it, and a swap and a pop leave the value alone.
+ *
+ *     case a, b { body }  =>   test a  JUMP_IF_TRUE .hit  POP  test b  JUMP_IF_FALSE .miss
+ *                              .hit: POP  body  JUMP .end   .miss: POP
+ */
+static Expr switch_core(Parser *parser, bool as_expr) {
+    LzToken switch_token = parser->previous;
+    uint32_t offset = switch_token.offset;
+    SwitchState state;
+    memset(&state, 0, sizeof state);
+    state.as_expr = as_expr;
+    Expr result = any_expr();
+    bool first_arm = true;
+    bool has_else = false;
+    bool all_terminate = true;
+    size_t *end_jumps = NULL;
+    size_t end_count = 0;
+    size_t end_capacity = 0;
+    int depth = 0;
+
+    if (parser->nesting >= LZ_MAX_NESTING) {
+        error_at_current(parser, "blocks nested too deeply");
+        return result;
+    }
+    parser->nesting++;
+    begin_scope(parser);
+
+    if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
+        if (check(parser, LZ_TOKEN_NEWLINE) || check(parser, LZ_TOKEN_EOF)) {
+            error_at_current(parser, "expected an expression or '{' after 'switch'");
+            goto done;
+        }
+        Expr subject = expression(parser);
+        state.has_subject = true;
+        state.subject = subject.type;
+        if (!as_expr) {
+            LzString *name = lz_vm_intern(parser->vm, "switch", 6);
+            if (name == NULL) {
+                fail(parser, lz_vm_out_of_memory(parser->vm));
+                goto done;
+            }
+            LzType any = lz_type_of_kinds(LZ_KINDS_ANY);
+            Symbol *hidden = add_symbol(parser, &switch_token, name, SYMBOL_LOCAL, false,
+                                        lz_value_nil(), &any);
+            if (hidden == NULL) {
+                goto done;
+            }
+            state.slot = hidden->slot;
+        }
+        if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            error_at_current(parser, "expected '{' after the 'switch' subject");
+            goto done;
+        }
+    }
+    advance(parser); /* the '{' */
+    depth = parser->bracket_depth;
+    skip_newlines(parser);
+
+    while (!check(parser, LZ_TOKEN_RIGHT_BRACE) && !check(parser, LZ_TOKEN_EOF) &&
+           parser->fatal == LZ_OK) {
+        bool is_else = check(parser, LZ_TOKEN_ELSE);
+        if (!is_else && !check(parser, LZ_TOKEN_CASE)) {
+            error_at_current(parser, "expected 'case' or 'else' in a 'switch'");
+            switch_recover(parser, depth);
+            goto done;
+        }
+        if (has_else) {
+            error_at_current(parser, "'else' must be the last arm");
+            switch_recover(parser, depth);
+            goto done;
+        }
+        advance(parser); /* `case` or `else` */
+        uint32_t arm_offset = parser->previous.offset;
+        size_t miss_jump = 0;
+        bool has_miss = false;
+
+        if (!is_else) {
+            state.hit_count = 0;
+            if (rule_for(parser->current.type).prefix == NULL) {
+                error_at_current(parser, "expected an expression after 'case'");
+                switch_recover(parser, depth);
+                goto done;
+            }
+            for (;;) {
+                switch_item(parser, &state);
+                if (!match(parser, LZ_TOKEN_COMMA)) {
+                    break;
+                }
+                skip_newlines(parser);
+                if (rule_for(parser->current.type).prefix == NULL) {
+                    error_at_current(parser, "expected an expression after 'case'");
+                    switch_recover(parser, depth);
+                    goto done;
+                }
+                if (!switch_add_hit(parser, &state,
+                                    emit_jump(parser, LZ_OP_JUMP_IF_TRUE, arm_offset))) {
+                    goto done;
+                }
+                emit_op_at(parser, LZ_OP_POP, arm_offset);
+            }
+            miss_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, arm_offset);
+            has_miss = true;
+            for (size_t i = 0; i < state.hit_count; i++) {
+                patch_jump(parser, state.hits[i]);
+            }
+            emit_op_at(parser, LZ_OP_POP, arm_offset);
+        }
+
+        /* The body: a block, or `=>` and one expression. */
+        if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            if (as_expr) {
+                error_at_current(parser, "an arm of a 'switch' expression must use '=>'");
+                switch_recover(parser, depth);
+                goto done;
+            }
+            block(parser);
+            all_terminate = all_terminate && parser->terminated;
+        } else if (match(parser, LZ_TOKEN_FAT_ARROW)) {
+            skip_newlines(parser);
+            if (rule_for(parser->current.type).prefix == NULL) {
+                error_at_current(parser, "expected an expression after '=>'");
+                switch_recover(parser, depth);
+                goto done;
+            }
+            Expr value = expression(parser);
+            if (as_expr) {
+                result = first_arm ? value : union_expr(result, value);
+            } else {
+                emit_op_at(parser, LZ_OP_POP, arm_offset);
+                parser->terminated = false;
+                all_terminate = false;
+            }
+        } else {
+            error_at_current(parser, "expected '{' or '=>' after the case");
+            switch_recover(parser, depth);
+            goto done;
+        }
+        first_arm = false;
+
+        if (is_else) {
+            has_else = true;
+        } else {
+            if (end_count == end_capacity) {
+                size_t capacity = end_capacity != 0 ? end_capacity * 2 : 4;
+                size_t *grown = realloc(end_jumps, capacity * sizeof *grown);
+                if (grown == NULL) {
+                    fail(parser, LZ_ERR_MEMORY);
+                    goto done;
+                }
+                end_jumps = grown;
+                end_capacity = capacity;
+            }
+            end_jumps[end_count++] = emit_jump(parser, LZ_OP_JUMP, arm_offset);
+        }
+        if (has_miss) {
+            patch_jump(parser, miss_jump);
+            emit_op_at(parser, LZ_OP_POP, arm_offset);
+        }
+        skip_newlines(parser);
+    }
+
+    if (!check(parser, LZ_TOKEN_RIGHT_BRACE)) {
+        error_at_current(parser, "expected '}' at the end of the 'switch'");
+        goto done;
+    }
+    advance(parser);
+    if (as_expr && !has_else) {
+        error_at(parser, &switch_token, "a 'switch' expression needs an 'else'");
+    }
+
+    for (size_t i = 0; i < end_count; i++) {
+        patch_jump(parser, end_jumps[i]);
+    }
+    if (as_expr && state.has_subject) {
+        /* [subject][value] -> [value]. The subject was never a local, so no symbol goes. */
+        emit_op_at(parser, LZ_OP_SWAP, offset);
+        emit_op_at(parser, LZ_OP_POP, offset);
+    }
+
+done:
+    free(end_jumps);
+    free(state.seen);
+    free(state.hits);
+    parser->nesting--;
+    end_scope(parser);
+    if (!as_expr) {
+        parser->terminated = has_else && all_terminate;
+    }
+    return as_expr ? result : any_expr();
+}
+
+static Expr switch_expression(Parser *parser) {
+    return switch_core(parser, true);
+}
+
+static void switch_statement(Parser *parser) {
+    (void)switch_core(parser, false);
+}
+
+
 /* Compile-time constants */
 
 static bool fragment_is_pure(const LzChunk *chunk, size_t start) {
@@ -4135,7 +4531,8 @@ static void step_statement(Parser *parser) {
             return;
         }
     } else if (type == LZ_TOKEN_FN || type == LZ_TOKEN_LET || type == LZ_TOKEN_CONST ||
-               type == LZ_TOKEN_IF || type == LZ_TOKEN_WHILE || type == LZ_TOKEN_FOR ||
+               type == LZ_TOKEN_IF || type == LZ_TOKEN_SWITCH || type == LZ_TOKEN_WHILE ||
+               type == LZ_TOKEN_FOR ||
                type == LZ_TOKEN_RETURN || type == LZ_TOKEN_BREAK ||
                type == LZ_TOKEN_CONTINUE || type == LZ_TOKEN_LEFT_BRACE ||
                type == LZ_TOKEN_RIGHT_BRACE || type == LZ_TOKEN_EOF ||
@@ -4587,6 +4984,7 @@ static void synchronize(Parser *parser) {
         case LZ_TOKEN_LET:
         case LZ_TOKEN_CONST:
         case LZ_TOKEN_IF:
+        case LZ_TOKEN_SWITCH:
         case LZ_TOKEN_WHILE:
         case LZ_TOKEN_FOR:
         case LZ_TOKEN_FN:
@@ -4646,6 +5044,10 @@ static void declaration(Parser *parser) {
     case LZ_TOKEN_IF:
         advance(parser);
         if_statement(parser);
+        break;
+    case LZ_TOKEN_SWITCH:
+        advance(parser);
+        switch_statement(parser);
         break;
     case LZ_TOKEN_WHILE:
         advance(parser);

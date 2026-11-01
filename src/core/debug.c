@@ -215,6 +215,7 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_RANGE_NEXT:
     case LZ_OP_IN:
     case LZ_OP_NIL_TEST:
+    case LZ_OP_DUP:
         return simple_instruction(lz_opcode_name(opcode), offset, out);
     case LZ_OP_DICT:
         return slot_instruction(chunk, offset, out);

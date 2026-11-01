@@ -1,0 +1,70 @@
+# `switch`: a statement, an expression, and a form without a subject.
+
+# 1. The name of a day (an expression: every arm is `=>`, and `else` is required).
+fn day_name(d) {
+  return switch d {
+    case 1 => "Monday"
+    case 2 => "Tuesday"
+    case 3 => "Wednesday"
+    case 4 => "Thursday"
+    case 5 => "Friday"
+    case 6, 7 => "Weekend"
+    else => "?"
+  }
+}
+for d in [1, 5, 6, 7, 9] { println(d, day_name(d)) }
+
+# 2. A grade with ranges (a statement: arms are blocks). 90..=100 includes 100; 0..60 stops at 59.
+fn grade(score) {
+  switch score {
+    case 90..=100 { return "A" }
+    case 80..90 { return "B" }
+    case 60..80 { return "C" }
+    case 0..60 { return "F" }
+    else { return "invalid" }
+  }
+}
+for s in [100, 95, 85, 61, 12, -1, 101, 79.5] { print(grade(s), " ") }
+println()
+
+# 3. A small calculator: the subject is the operator, written as a string.
+fn calc(a, op, b) {
+  return switch op {
+    case "+" => a + b
+    case "-" => a - b
+    case "*", "x" => a * b
+    case "/" => switch b { case 0 => nil else => a / b }
+    else => nil
+  }
+}
+println(calc(6, "+", 3), calc(6, "x", 3), calc(6, "/", 0) ?? "division by zero", calc(1, "^", 2) ?? "unknown operator")
+
+# 4. No subject: each case is a condition, a tidier `else if` chain.
+fn sign(n) {
+  switch {
+    case n < 0 { return "negative" }
+    case n equal 0 { return "zero" }
+    else { return "positive" }
+  }
+}
+println(sign(-4), sign(0), sign(9))
+
+# 5. `break` and `continue` belong to the loop around the switch.
+let total = 0
+for i in 0..10 {
+  switch i {
+    case 2, 4 { continue }      # skip these
+    case 7 { break }            # leave the loop, not just the switch
+    else { total += i }
+  }
+}
+println("total", total)
+
+# 6. Arms of a statement may be `=>` expressions too, on one line or several.
+for v in [1, 2, 3] {
+  switch v { case 1 => println("one") case 2 => println("two") else => println("many") }
+}
+
+# 7. In a template.
+let level = 3
+println($"level {level}: {switch level { case 1 => "low" case 2, 3 => "medium" else => "high" }}")

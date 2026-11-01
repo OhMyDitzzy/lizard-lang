@@ -95,9 +95,13 @@ typedef enum LzOpCode {
     /* `in`, `not in` and `??`. Appended last so the earlier opcodes keep their numbers. */
     LZ_OP_IN,          /* pop b, pop a, push whether a is in b: an item of an array, a key of a
                           dict, a substring of a string. Anything else on the right is an error */
-    LZ_OP_IN_RANGE,    /* u8 inclusive: pop b, pop a, pop x, push a <= x < b (a <= x <= b when
-                          inclusive). The bounds must be ints and x a number */
-    LZ_OP_NIL_TEST     /* keep x, push whether it is nil: [x] -> [x][is nil] */
+    LZ_OP_IN_RANGE,    /* u8 flags (1 inclusive, 2 lenient): pop b, pop a, pop x, push a <= x < b
+                          (a <= x <= b when inclusive). The bounds must be ints and x a number,
+                          unless lenient: then anything but a number is simply outside */
+    LZ_OP_NIL_TEST,    /* keep x, push whether it is nil: [x] -> [x][is nil] */
+
+    /* `switch`. */
+    LZ_OP_DUP          /* push a copy of the top: [x] -> [x][x] */
 } LzOpCode;
 
 #define LZ_CONSTANTS_MAX 65536

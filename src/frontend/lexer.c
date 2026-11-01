@@ -21,6 +21,7 @@ static const Keyword keywords[] = {
     {"while", LZ_TOKEN_WHILE}, {"fn", LZ_TOKEN_FN},   {"return", LZ_TOKEN_RETURN},
     {"break", LZ_TOKEN_BREAK}, {"continue", LZ_TOKEN_CONTINUE},
     {"for", LZ_TOKEN_FOR},    {"in", LZ_TOKEN_IN},     {"by", LZ_TOKEN_BY},
+    {"switch", LZ_TOKEN_SWITCH}, {"case", LZ_TOKEN_CASE},
     /* Words for symbols: `not x` is `!x`, `a equal b` is `a == b`, `a not equal b` is `a != b`. */
     {"not", LZ_TOKEN_BANG},  {"equal", LZ_TOKEN_EQUAL_EQUAL},
 };
@@ -655,6 +656,10 @@ const char *lz_token_type_name(LzTokenType type) {
         return "DOT_DOT";
     case LZ_TOKEN_DOT_DOT_EQUAL:
         return "DOT_DOT_EQUAL";
+    case LZ_TOKEN_SWITCH:
+        return "SWITCH";
+    case LZ_TOKEN_CASE:
+        return "CASE";
     case LZ_TOKEN_NOT_IN:
         return "NOT_IN";
     case LZ_TOKEN_QUESTION_QUESTION:

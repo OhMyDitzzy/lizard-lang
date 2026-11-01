@@ -294,6 +294,8 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_IN_RANGE";
     case LZ_OP_NIL_TEST:
         return "OP_NIL_TEST";
+    case LZ_OP_DUP:
+        return "OP_DUP";
     default:
         return "OP_UNKNOWN";
     }
@@ -363,6 +365,7 @@ size_t lz_opcode_length(uint8_t opcode) {
     case LZ_OP_RANGE_NEXT:
     case LZ_OP_IN:
     case LZ_OP_NIL_TEST:
+    case LZ_OP_DUP:
         return 1;
     case LZ_OP_CLOSE_UPVALUE_KEEP:
         return 3; /* the slot whose upvalue is closed */

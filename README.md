@@ -315,6 +315,73 @@ The type of `a ?? b` is the type of `a` without `nil`, joined with the type of `
 (`int? ?? int` is `int`). A left side that cannot be `nil` is allowed, with no error. In a type,
 `int??` is accepted and means `int?` (nullable twice is nullable).
 
+### `switch`
+
+`switch` picks one arm by comparing a subject with the items of each `case`. It has three
+forms, and like `if` it is a statement at the start of a statement and an expression anywhere
+else (after `=`, `(`, `,`, `return`, `=>`, an operator, inside `{}` of a template).
+
+```
+# 1. A statement: arms are blocks (or `=> expression`, mixed freely)
+switch value {
+    case 1 { println("one") }
+    case 2, 3 { println("two or three") }
+    case 4..=9 { println("small") }
+    case "a" => println("the letter a")
+    else { println("anything else") }
+}
+
+# 2. An expression: every arm is `=> expression`, and `else` is required
+let name = switch day {
+    case 1 => "Monday"
+    case 6, 7 => "Weekend"
+    else => "Weekday"
+}
+
+# 3. No subject (a `{` right after `switch`): each case is a condition, instead of `else if`
+switch {
+    case n < 0 { println("negative") }
+    case n equal 0 { println("zero") }
+    else { println("positive") }
+}
+```
+
+Arms are separated by newlines, or by nothing at all on one line, because `case` and `else`
+end the expression before them: `switch x { case 1 => "a" else => "b" }` works, in a template
+too. A dict literal as the subject must be in brackets, since `switch {` means no subject:
+`switch ({"a": 1}) { ... }`.
+
+**Evaluation.** The subject is evaluated once. Each item is an ordinary expression compared
+with `==` (the rule of `==`: arrays and dicts by value, `1 == 1.0`), so `case limit` compares
+with the variable `limit` and declares nothing. Items are tried from left to right and arms
+from top to bottom, only until one matches: the items after the one that matched are not
+evaluated, and the first arm that matches wins. There is no fallthrough and no `break` is
+needed. A statement with no match and no `else` does nothing. A range item (`4..=9`, `4..9`)
+has int bounds, each evaluated once, and no `by`; a subject that is not a number simply does not
+match it. Without a subject a case is true by the same rule as an `if` condition, a comma means
+"one of these", and a range is an error. In the expression form only the arm taken is
+evaluated, and the type of the result is the union of the types of the arms.
+
+**`break` and `continue`.** A `switch` is not a loop. `break` and `continue` inside an arm act
+on the nearest loop around the switch, and outside any loop they are errors as before. The
+locals of the arm and the hidden subject are dropped on the way out, closures that captured
+them keep working, and `return` works from anywhere in an arm. A `switch` statement ends the
+flow (so a function needs no `return` after it) only when it has an `else` and every arm ends
+in `return`, `break` or `continue`.
+
+**Mistakes the compiler reports.**
+
+| Mistake | Message |
+| --- | --- |
+| the same literal twice (`case 1 ... case 1`, also across a comma list) | `duplicate case 1` |
+| a case that can never be equal to the subject's static type (`int` and `float` match each other, `any` is never checked) | `this case can never match: the subject is string, but the case is int` |
+| an `else` that is not the last arm | `'else' must be the last arm` |
+| an expression without `else`, or with a block arm | `a 'switch' expression needs an 'else'`, `an arm of a 'switch' expression must use '=>'` |
+| a range with no subject, or with `by` | `a range cannot be used in a 'switch' without a subject`, `a range with 'by' cannot be used in a 'case'` |
+
+`switch` is not a pattern `match`: a case is compared with `==`, so it never binds a new
+variable, takes a value apart, or tests a type. Such a `match` does not exist yet.
+
 **Precedence**, from the strongest to the weakest. Binary operators are left-associative, and
 a newline after one is ignored.
 

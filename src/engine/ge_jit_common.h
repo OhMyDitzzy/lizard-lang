@@ -322,6 +322,7 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
             ok = d >= 1; /* the depth does not change */
             break;
         case LZ_OP_NIL_TEST:
+        case LZ_OP_DUP:
             ok = d >= 1;
             nd = d + 1; /* the value stays, whether it is nil goes on top */
             break;
