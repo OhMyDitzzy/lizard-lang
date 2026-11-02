@@ -28,6 +28,10 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->out = out;
     vm->err = err;
     vm->error[0] = '\0';
+    vm->error_kind = LZ_ERROR_RUNTIME;
+    vm->thrown = lz_value_nil();
+    vm->handler_count = 0;
+    vm->trace_source = NULL;
     vm->error_suggestions.count = 0;
     lz_skink_init(&vm->skink);
     vm->heap.reclaim = lz_skink_reclaim; /* before --max-heap refuses an allocation */
@@ -56,6 +60,12 @@ LzStatus lz_vm_out_of_memory(LzVM *vm) {
 }
 
 void lz_vm_reset_stack(LzVM *vm) {
+    vm->handler_count = 0;
+    if (vm->thrown.type != LZ_VAL_NIL) {
+        LzValue thrown = vm->thrown;
+        vm->thrown = lz_value_nil();
+        lz_value_release(&vm->heap, &thrown);
+    }
     lz_vm_close_upvalues(vm, 0); /* before the slots die: a closure may outlive them */
     vm->frame_count = 0;
     while (vm->stack_count > 0) {
@@ -127,5 +137,12 @@ LzStatus lz_vm_set_error(LzVM *vm, LzStatus status, const char *format, ...) {
     va_start(args, format);
     (void)vsnprintf(vm->error, sizeof vm->error, format, args);
     va_end(args);
+    vm->error_kind = (uint8_t)lz_error_classify(status, vm->error);
+    if (vm->thrown.type != LZ_VAL_NIL) {
+        /* A new failure replaces the error value that was being carried. */
+        LzValue old = vm->thrown;
+        vm->thrown = lz_value_nil();
+        lz_value_release(&vm->heap, &old);
+    }
     return status;
 }

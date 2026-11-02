@@ -1,0 +1,90 @@
+# Errors: try / catch / finally / throw, and the kinds of error.
+
+# 1. A safe division: catch only the failure you expect.
+fn safe_div(a, b) {
+  try {
+    return a / b
+  } catch ArithmeticError as _ {
+    return nil
+  }
+}
+println(safe_div(6, 3), safe_div(1, 0) ?? "cannot divide by zero")
+
+# 2. Parsing numbers: a bad text is a ValueError.
+fn parse(text) {
+  try {
+    return int(text)
+  } catch ValueError as e {
+    println("skipped:", e.message)
+    return nil
+  }
+}
+println(["10", "x", "30"].map(parse))
+
+# 3. Cleanup with finally: it runs after a return, an error, a break.
+fn work(n) {
+  try {
+    println("start", n)
+    if n > 1 { throw RangeError($"{n} is too big") }
+    return "ok"
+  } catch RangeError as e {
+    return "failed: " + e.message
+  } finally {
+    println("cleanup", n)
+  }
+}
+println(work(1))
+println(work(2))
+
+for i in 0..4 {
+  try {
+    if i equal 1 { continue }
+    if i equal 3 { break }
+    println("round", i)
+  } finally {
+    println("end of round", i)
+  }
+}
+
+# 4. The hierarchy: RuntimeError catches RangeError, ArithmeticError, ...; Error catches all.
+for action in [0, 1, 2, 3] {
+  try {
+    switch action {
+      case 0 { println([1, 2][5]) }
+      case 1 { println(1 / 0) }
+      case 2 { throw IOError("disk gone") }
+      else { println("fine") }
+    }
+  } catch RuntimeError as e {
+    println("runtime problem:", e.kind)
+  } catch e {
+    println("other:", e)
+  }
+}
+
+# 5. Throwing again: the trace stays that of the first throw.
+fn inner() { throw ValueError("deep") }
+fn outer() {
+  try {
+    inner()
+  } catch e {
+    println("outer saw", e.message, "then throws it again")
+    throw e
+  }
+}
+try {
+  outer()
+} catch e {
+  println(e.kind, e.message)
+  println(e.trace[0])
+}
+
+# 6. An error inside a callback is caught outside it.
+try {
+  println([4, 2, 0, 1].map(fn(n) => 8 / n))
+} catch e {
+  println("map failed:", e.kind)
+}
+
+# 7. The limits of the sandbox cannot be caught: nothing below would print.
+# try { while true { } } catch e { println("never") } finally { println("never") }

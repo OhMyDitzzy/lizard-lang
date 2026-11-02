@@ -1,4 +1,5 @@
 #include "lizard/value.h"
+#include "lizard/error.h"
 
 #include "lizard/array.h"
 #include "lizard/dict.h"
@@ -264,6 +265,8 @@ static bool write_object(const LzObject *object, const LzWriter *writer) {
                lz_writer_write(writer, function->name->data, function->name->length) &&
                lz_writer_write_cstr(writer, ">");
     }
+    case LZ_OBJ_ERROR:
+        return lz_error_write((const LzError *)object, writer);
     case LZ_OBJ_FUNCTION:
         return lz_writer_write_cstr(writer, "<function code>");
     case LZ_OBJ_UPVALUE:
@@ -300,6 +303,16 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
         free(dict->slots);
         lz_heap_uncharge(heap, dict->capacity * sizeof(LzDictEntry));
         lz_heap_uncharge(heap, dict->slot_capacity * sizeof(uint32_t));
+        break;
+    }
+    case LZ_OBJ_ERROR: {
+        LzError *error = (LzError *)object;
+        lz_object_release(heap, &error->message->base);
+        if (error->trace != NULL) {
+            lz_object_release(heap, &error->trace->base);
+        }
+        lz_value_release(heap, &error->cause);
+        lz_value_release(heap, &error->data);
         break;
     }
     case LZ_OBJ_FUNCTION:

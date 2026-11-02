@@ -58,6 +58,7 @@ typedef struct Symbol {
     bool captured;           /* a closure captured this local: closing its scope must close upvalues */
     bool pending;            /* a top-level `fn` seen ahead of its declaration */
     bool loop_var;           /* a `for ... in` variable: it cannot be assigned */
+    bool catch_var;          /* the variable of a `catch` block: it cannot be assigned */
     bool dict_value;         /* initialised from a dict literal: `x[k]` reads a key */
     bool array_value;        /* initialised from an array: `x[k]` needs an int index */
     const FuncSig *sig;      /* set for a declared function: calls of it are checked */
@@ -105,6 +106,37 @@ typedef struct FuncState {
 
 typedef struct LoopFrame LoopFrame;
 
+/*
+ * Where a `finally` body starts, to compile it again at every way out of its `try`.
+ * The lexer is positioned after `current`, which is the `{` of the body.
+ */
+typedef struct FinallySnapshot {
+    LzLexer lexer;
+    LzToken current;
+    LzToken previous;
+} FinallySnapshot;
+
+/*
+ * A region guarded by a handler (an open OP_TRY_BEGIN) that `return`, `break` and `continue`
+ * leave: each must close it, and run the `finally` body of a try that has one.
+ */
+typedef struct TryContext {
+    struct TryContext *enclosing;
+    FuncState *func;     /* the function the try is in */
+    LoopFrame *loop;     /* the innermost loop around it */
+    bool has_finally;
+    bool failed;         /* a copy of the finally body reported errors: no more copies */
+    size_t symbol_start; /* symbols from here on were declared inside the try */
+    FinallySnapshot snapshot;
+} TryContext;
+
+/* A finally body being compiled: it may not be left with return, break or continue. */
+typedef struct FinallyGuard {
+    bool active;
+    FuncState *func;
+    LoopFrame *loop;
+} FinallyGuard;
+
 typedef struct Parser {
     LzVM *vm;
     const LzSource *source;
@@ -134,6 +166,8 @@ typedef struct Parser {
     int no_in_depth;    /* `in` is not an operator at this bracket depth (-1: nowhere): the
                            iterable of a `for ... in` header, where `in` is part of the loop */
     LoopFrame *loop; /* innermost while being compiled, NULL outside a loop */
+    TryContext *try_ctx; /* innermost open try (or its finally region), see TryContext */
+    FinallyGuard guard;
 } Parser;
 
 /*
@@ -217,6 +251,7 @@ static LzOpCode compound_opcode(LzTokenType type);
 static Expr compound_value(Parser *parser, const LzToken *at, const Expr *target,
                            const Expr *value);
 static void variable_declaration(Parser *parser, bool is_const);
+static void emit_try_exits(Parser *parser, bool loop_only, uint32_t offset);
 static void patch_jump(Parser *parser, size_t operand_index);
 static size_t emit_jump(Parser *parser, LzOpCode op, uint32_t offset);
 
@@ -236,6 +271,13 @@ static Expr parse_precedence(Parser *parser, Precedence precedence);
 static void record_full(Parser *parser, uint32_t offset, uint32_t length, const char *message,
                         const char *label, const LzSuggestions *suggestions) {
     LzDiagnostics *diagnostics = parser->diagnostics;
+    for (size_t i = 0; i < diagnostics->count; i++) {
+        /* A finally body is compiled once per way out: the same mistake is told once. */
+        if (diagnostics->items[i].offset == offset &&
+            strcmp(diagnostics->items[i].message, message) == 0) {
+            return;
+        }
+    }
     if (diagnostics->count >= LZ_MAX_DIAGNOSTICS) {
         diagnostics->dropped++;
         return;
@@ -662,6 +704,7 @@ static Symbol *add_symbol(Parser *parser, const LzToken *token, LzString *name, 
     symbol->captured = false;
     symbol->pending = false;
     symbol->loop_var = false;
+    symbol->catch_var = false;
     symbol->sig = NULL;
     return symbol;
 }
@@ -1867,6 +1910,8 @@ static bool arrow_starts_dict(Parser *parser) {
     case LZ_TOKEN_CONST:
     case LZ_TOKEN_IF:
     case LZ_TOKEN_SWITCH:
+    case LZ_TOKEN_TRY:
+    case LZ_TOKEN_THROW:
     case LZ_TOKEN_WHILE:
     case LZ_TOKEN_FOR:
     case LZ_TOKEN_RETURN:
@@ -2107,7 +2152,8 @@ static void error_key(Parser *parser, const LzToken *at, const LzType *type) {
     char text[96];
     describe_bit_operand(type, text, sizeof text);
     char message[160];
-    (void)snprintf(message, sizeof message, "a %s cannot be a dict key", text);
+    (void)snprintf(message, sizeof message, "%s %s cannot be a dict key",
+                   strcmp(text, "error") == 0 ? "an" : "a", text);
     error_at(parser, at, message);
 }
 
@@ -2208,6 +2254,8 @@ static Expr coalesce(Parser *parser, Expr left);
 static Expr if_expression(Parser *parser);
 static Expr switch_expression(Parser *parser);
 static void switch_statement(Parser *parser);
+static void try_statement(Parser *parser);
+static void throw_statement(Parser *parser);
 
 static ParseRule rule_for(LzTokenType type) {
     switch (type) {
@@ -2753,7 +2801,25 @@ static Expr dot_call(Parser *parser, Expr receiver) {
     advance(parser);
     LzToken name = parser->previous;
     if (!check(parser, LZ_TOKEN_LEFT_PAREN)) {
-        error_at(parser, &name, "expected '(' after the method name (fields are not supported yet)");
+        /* `value.name` with no parentheses is a field. Only errors have any: message, kind, trace. */
+        if (check(parser, LZ_TOKEN_EQUAL) || is_compound(parser->current.type)) {
+            error_at_current(parser, "cannot assign to a field of an error");
+            return any_expr();
+        }
+        LzString *field = intern_token(parser, &name);
+        if (field == NULL) {
+            return any_expr();
+        }
+        emit_named(parser, LZ_OP_GET_FIELD, field, name.offset);
+        if (field->length == 7 && memcmp(field->data, "message", 7) == 0) {
+            return expr_of(lz_type_of_kinds(LZ_KIND_STRING));
+        }
+        if (field->length == 4 && memcmp(field->data, "kind", 4) == 0) {
+            return expr_of(lz_type_of_kinds(LZ_KIND_STRING));
+        }
+        if (field->length == 5 && memcmp(field->data, "trace", 5) == 0) {
+            return expr_of(lz_type_of_kinds(LZ_KIND_ARRAY));
+        }
         return any_expr();
     }
 
@@ -3686,6 +3752,15 @@ static void loop_jump_statement(Parser *parser, bool is_break) {
         return;
     }
 
+    if (parser->guard.active && parser->guard.func == parser->fs && parser->guard.loop == loop) {
+        char message[96];
+        (void)snprintf(message, sizeof message, "cannot leave a 'finally' block with '%s'",
+                       is_break ? "break" : "continue");
+        error_at_previous(parser, message);
+        end_statement(parser);
+        return;
+    }
+    emit_try_exits(parser, true, offset);
     discard_loop_locals(parser, loop, offset, !is_break);
     if (is_break) {
         add_loop_break(parser, loop, emit_jump(parser, LZ_OP_JUMP, offset));
@@ -4082,6 +4157,458 @@ static void switch_statement(Parser *parser) {
 }
 
 
+/* `try`, `catch`, `finally`, `throw` */
+
+static bool word_is(const Parser *parser, const LzToken *token, const char *word) {
+    size_t length = strlen(word);
+    return token->type == LZ_TOKEN_IDENTIFIER && token->length == length &&
+           memcmp(parser->source->text + token->offset, word, length) == 0;
+}
+
+/*
+ * One more copy of the finally body, compiled where a way out of the try runs it: the body is
+ * read again from its place in the source. Names resolve as they did where it was written, so
+ * the variables declared inside the try since then are hidden while it is compiled; locals of
+ * its own go above whatever is on the stack now.
+ */
+static void emit_finally_copy(Parser *parser, TryContext *ctx) {
+    if (ctx->failed || parser->fatal != LZ_OK || parser->panic) {
+        return;
+    }
+    size_t errors_before = parser->diagnostics->count;
+
+    size_t hidden_count = parser->symbol_count > ctx->symbol_start
+                              ? parser->symbol_count - ctx->symbol_start
+                              : 0;
+    Symbol *hidden = NULL;
+    if (hidden_count > 0) {
+        hidden = malloc(hidden_count * sizeof *hidden);
+        if (hidden == NULL) {
+            fail(parser, LZ_ERR_MEMORY);
+            return;
+        }
+        memcpy(hidden, &parser->symbols[ctx->symbol_start], hidden_count * sizeof *hidden);
+        parser->symbol_count = ctx->symbol_start;
+    }
+
+    LzLexer saved_lexer = parser->lexer;
+    LzToken saved_current = parser->current;
+    LzToken saved_previous = parser->previous;
+    int saved_bracket = parser->bracket_depth;
+    int saved_no_in = parser->no_in_depth;
+    bool saved_terminated = parser->terminated;
+    TryContext *saved_try = parser->try_ctx;
+    FinallyGuard saved_guard = parser->guard;
+
+    parser->lexer = ctx->snapshot.lexer;
+    parser->current = ctx->snapshot.current;
+    parser->previous = ctx->snapshot.previous;
+    parser->no_in_depth = -1;
+    parser->try_ctx = ctx->enclosing; /* the tries outside this one still guard its finally body */
+    parser->guard = (FinallyGuard){true, parser->fs, parser->loop};
+    block(parser);
+
+    parser->guard = saved_guard;
+    parser->try_ctx = saved_try;
+    parser->terminated = saved_terminated;
+    parser->no_in_depth = saved_no_in;
+    parser->bracket_depth = saved_bracket;
+    parser->lexer = saved_lexer;
+    parser->current = saved_current;
+    parser->previous = saved_previous;
+    if (hidden_count > 0) {
+        memcpy(&parser->symbols[ctx->symbol_start], hidden, hidden_count * sizeof *hidden);
+        parser->symbol_count = ctx->symbol_start + hidden_count;
+        free(hidden);
+    }
+    if (parser->diagnostics->count > errors_before) {
+        ctx->failed = true; /* the same mistake once is enough */
+    }
+}
+
+/*
+ * A `return`, `break` or `continue` leaves the tries around it, innermost first: each handler is
+ * closed, and a finally body runs. loop_only: only the tries inside the innermost loop.
+ */
+static void emit_try_exits(Parser *parser, bool loop_only, uint32_t offset) {
+    TryContext *start = parser->try_ctx;
+    for (TryContext *ctx = start; ctx != NULL && ctx->func == parser->fs; ctx = ctx->enclosing) {
+        if (loop_only && ctx->loop != parser->loop) {
+            break;
+        }
+        emit_op_at(parser, LZ_OP_TRY_END, offset);
+        if (ctx->has_finally) {
+            emit_finally_copy(parser, ctx);
+        }
+    }
+    parser->try_ctx = start;
+}
+
+typedef struct {
+    bool has_catch;
+    bool has_finally;
+    FinallySnapshot finally_at;
+} TryScan;
+
+/* Skips a block whose `{` is *tok; leaves *tok on the token after its `}`. */
+static bool scan_block(LzLexer *lexer, LzToken *tok) {
+    int depth = 0;
+    for (;;) {
+        if (tok->type == LZ_TOKEN_LEFT_BRACE) {
+            depth++;
+        } else if (tok->type == LZ_TOKEN_RIGHT_BRACE) {
+            depth--;
+            if (depth == 0) {
+                *tok = lz_lexer_next(lexer);
+                return true;
+            }
+        } else if (tok->type == LZ_TOKEN_EOF || tok->type == LZ_TOKEN_ERROR) {
+            return false;
+        }
+        *tok = lz_lexer_next(lexer);
+    }
+}
+
+/*
+ * Looks ahead from the `{` of the try block for its catch clauses and its finally body, so that
+ * a `return` in the try can compile the finally body before the parser has reached it.
+ */
+static TryScan scan_try(const Parser *parser) {
+    TryScan scan;
+    memset(&scan, 0, sizeof scan);
+    LzLexer lexer = parser->lexer;
+    LzToken tok = parser->current;
+    if (!scan_block(&lexer, &tok)) {
+        return scan;
+    }
+    for (;;) {
+        while (tok.type == LZ_TOKEN_NEWLINE) {
+            tok = lz_lexer_next(&lexer);
+        }
+        if (tok.type == LZ_TOKEN_CATCH) {
+            scan.has_catch = true;
+            while (tok.type != LZ_TOKEN_LEFT_BRACE) {
+                if (tok.type == LZ_TOKEN_EOF || tok.type == LZ_TOKEN_NEWLINE ||
+                    tok.type == LZ_TOKEN_ERROR) {
+                    return scan;
+                }
+                tok = lz_lexer_next(&lexer);
+            }
+            if (!scan_block(&lexer, &tok)) {
+                return scan;
+            }
+            continue;
+        }
+        if (tok.type == LZ_TOKEN_FINALLY) {
+            LzToken keyword = tok;
+            tok = lz_lexer_next(&lexer);
+            if (tok.type == LZ_TOKEN_LEFT_BRACE) {
+                scan.has_finally = true;
+                scan.finally_at.lexer = lexer;
+                scan.finally_at.current = tok;
+                scan.finally_at.previous = keyword;
+            }
+        }
+        return scan;
+    }
+}
+
+typedef struct {
+    bool typed;      /* `catch Kind as ...` */
+    LzErrorKind kind;
+    bool has_name;   /* the error is bound to a variable */
+    LzToken name;
+    LzToken kind_token;
+} CatchHeader;
+
+/* After `catch`: what it catches and what the error is called. false after a reported mistake. */
+static bool catch_header(Parser *parser, CatchHeader *header) {
+    memset(header, 0, sizeof *header);
+    if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+        return true; /* catch { } */
+    }
+    if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+        error_at_current(parser, "expected an error type, a name or '{' after 'catch'");
+        return false;
+    }
+    LzToken first = parser->current;
+    LzLexer ahead = parser->lexer;
+    LzToken after = lz_lexer_next(&ahead);
+
+    if (word_is(parser, &after, "as")) {
+        header->typed = true;
+        header->kind_token = first;
+        if (!lz_error_kind_from_name(parser->source->text + first.offset, first.length,
+                                     &header->kind)) {
+            LzSuggester suggester;
+            lz_suggester_init(&suggester, parser->source->text + first.offset, first.length);
+            for (unsigned i = 0; i < LZ_ERROR_KIND_COUNT; i++) {
+                lz_suggester_offer(&suggester, lz_error_kind_name((LzErrorKind)i));
+            }
+            error_with_name_suggest(parser, &first, "unknown error type '", "'",
+                                    "not a known error type", &suggester.found);
+            header->kind = LZ_ERROR_ERROR;
+        }
+        advance(parser); /* the type */
+        advance(parser); /* as */
+        if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+            error_at_current(parser, "expected a name after 'as'");
+            return false;
+        }
+        advance(parser);
+        header->name = parser->previous;
+        header->has_name = !word_is(parser, &header->name, "_");
+        return true;
+    }
+
+    LzErrorKind known;
+    bool is_kind = lz_error_kind_from_name(parser->source->text + first.offset, first.length,
+                                           &known);
+    if (after.type == LZ_TOKEN_LEFT_BRACE) {
+        if (is_kind) {
+            char message[300];
+            char name[48];
+            token_text(parser, &first, name, sizeof name);
+            (void)snprintf(message, sizeof message,
+                           "'catch %s { }' would call the error '%s'; to catch only that kind "
+                           "write 'catch %s as _'",
+                           name, name, name);
+            error_at(parser, &first, message);
+            return false;
+        }
+        advance(parser); /* catch e { }: the same as catch Error as e */
+        header->name = parser->previous;
+        header->has_name = true;
+        return true;
+    }
+    if (is_kind) {
+        error_at(parser, &after, "expected 'as' after the error type in 'catch'");
+    } else {
+        error_at(parser, &after, "expected '{' after the name in 'catch'");
+    }
+    return false;
+}
+
+static void try_statement(Parser *parser) {
+    uint32_t offset = parser->previous.offset;
+    LzToken try_token = parser->previous;
+    if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
+        error_at_current(parser, "expected '{' after 'try'");
+        return;
+    }
+    TryScan scan = scan_try(parser);
+    if (!scan.has_catch && !scan.has_finally) {
+        error_at(parser, &try_token, "a 'try' needs a 'catch' or a 'finally'");
+        /* Read the block anyway so that nothing else is reported for it. */
+    }
+    const size_t base = parser->local_count; /* the stack height of the statement */
+    const size_t symbols_at_start = parser->symbol_count;
+    size_t finally_jump = 0;
+    size_t catch_jump = 0;
+    TryContext finally_ctx;
+    TryContext catch_ctx;
+    memset(&finally_ctx, 0, sizeof finally_ctx);
+    memset(&catch_ctx, 0, sizeof catch_ctx);
+
+    if (scan.has_finally) {
+        finally_jump = emit_jump(parser, LZ_OP_TRY_BEGIN, offset);
+        finally_ctx = (TryContext){parser->try_ctx, parser->fs, parser->loop, true, false,
+                                   symbols_at_start, scan.finally_at};
+        parser->try_ctx = &finally_ctx;
+    }
+    if (scan.has_catch) {
+        catch_jump = emit_jump(parser, LZ_OP_TRY_BEGIN, offset);
+        catch_ctx = (TryContext){parser->try_ctx, parser->fs, parser->loop, false, false,
+                                 symbols_at_start, scan.finally_at};
+        parser->try_ctx = &catch_ctx;
+    }
+
+    block(parser); /* the body */
+
+    LzErrorKind seen[LZ_ERROR_KIND_COUNT];
+    size_t seen_count = 0;
+    size_t *clause_ends = NULL;
+    size_t clause_end_count = 0;
+    size_t clause_end_capacity = 0;
+
+    if (scan.has_catch) {
+        parser->try_ctx = catch_ctx.enclosing;
+        emit_op_at(parser, LZ_OP_TRY_END, offset);
+        size_t body_done = emit_jump(parser, LZ_OP_JUMP, offset);
+        patch_jump(parser, catch_jump); /* an error lands here with the error value on the stack */
+
+        /* The error value is a local of its own: every clause reads it. */
+        begin_scope(parser);
+        LzString *hidden_name = lz_vm_intern(parser->vm, "(error)", 7);
+        LzType error_type = lz_type_of_kinds(LZ_KIND_ERROR);
+        Symbol *hidden = hidden_name == NULL
+                             ? NULL
+                             : add_symbol(parser, &try_token, hidden_name, SYMBOL_LOCAL, false,
+                                          lz_value_nil(), &error_type);
+        uint16_t error_slot = hidden != NULL ? hidden->slot : (uint16_t)base;
+        bool catch_all = false;
+
+        for (;;) {
+            skip_newlines(parser);
+            if (!check(parser, LZ_TOKEN_CATCH)) {
+                break;
+            }
+            advance(parser);
+            LzToken catch_token = parser->previous;
+            uint32_t clause_offset = catch_token.offset;
+            if (catch_all) {
+                error_at(parser, &catch_token,
+                         "a 'catch' after a 'catch' with no error type can never run");
+            }
+            CatchHeader header;
+            bool ok = catch_header(parser, &header);
+            if (!ok) {
+                /* One mistake, one error: skip the clause. */
+                while (!check(parser, LZ_TOKEN_LEFT_BRACE) && !check(parser, LZ_TOKEN_EOF) &&
+                       !check(parser, LZ_TOKEN_NEWLINE)) {
+                    advance(parser);
+                }
+            }
+            if (ok && header.typed) {
+                for (size_t i = 0; i < seen_count; i++) {
+                    if (lz_error_kind_is(header.kind, seen[i])) {
+                        char message[200];
+                        (void)snprintf(message, sizeof message,
+                                       "unreachable catch: '%s' is already caught by '%s' above",
+                                       lz_error_kind_name(header.kind),
+                                       lz_error_kind_name(seen[i]));
+                        error_at(parser, &header.kind_token, message);
+                        break;
+                    }
+                }
+                if (seen_count < LZ_ERROR_KIND_COUNT) {
+                    seen[seen_count++] = header.kind;
+                }
+            } else if (ok) {
+                catch_all = true;
+            }
+            if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
+                if (ok) {
+                    error_at_current(parser, "expected '{' to start the 'catch' block");
+                }
+                break;
+            }
+
+            size_t next_clause = 0;
+            bool tests = ok && header.typed;
+            if (tests) {
+                slot_get(parser, error_slot, clause_offset);
+                emit_op_at(parser, LZ_OP_ERROR_IS, clause_offset);
+                emit_byte_at(parser, (uint8_t)header.kind, clause_offset);
+                next_clause = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, clause_offset);
+                emit_op_at(parser, LZ_OP_POP, clause_offset);
+            }
+            begin_scope(parser);
+            if (ok && header.has_name) {
+                LzString *name = intern_token(parser, &header.name);
+                slot_get(parser, error_slot, clause_offset);
+                Symbol *variable =
+                    name == NULL ? NULL
+                                 : add_symbol(parser, &header.name, name, SYMBOL_LOCAL, false,
+                                              lz_value_nil(), &error_type);
+                if (variable != NULL) {
+                    variable->catch_var = true;
+                } else {
+                    emit_op_at(parser, LZ_OP_POP, clause_offset);
+                }
+            }
+            block(parser);
+            end_scope(parser);
+            if (clause_end_count == clause_end_capacity) {
+                size_t capacity = clause_end_capacity != 0 ? clause_end_capacity * 2 : 4;
+                size_t *grown = realloc(clause_ends, capacity * sizeof *grown);
+                if (grown == NULL) {
+                    fail(parser, LZ_ERR_MEMORY);
+                    break;
+                }
+                clause_ends = grown;
+                clause_end_capacity = capacity;
+            }
+            clause_ends[clause_end_count++] = emit_jump(parser, LZ_OP_JUMP, clause_offset);
+            if (tests) {
+                patch_jump(parser, next_clause);
+                emit_op_at(parser, LZ_OP_POP, clause_offset);
+            }
+        }
+
+        if (!catch_all) {
+            /* No clause took it: it goes on to the tries around this one. */
+            slot_get(parser, error_slot, offset);
+            emit_op_at(parser, LZ_OP_THROW, offset);
+        }
+        for (size_t i = 0; i < clause_end_count; i++) {
+            patch_jump(parser, clause_ends[i]);
+        }
+        free(clause_ends);
+        end_scope(parser); /* the error value */
+        patch_jump(parser, body_done);
+    }
+
+    if (scan.has_finally) {
+        parser->try_ctx = finally_ctx.enclosing;
+        emit_op_at(parser, LZ_OP_TRY_END, offset);
+        skip_newlines(parser);
+        if (match(parser, LZ_TOKEN_FINALLY)) {
+            /* The way in with no error: the body, read for real. */
+            FinallyGuard saved_guard = parser->guard;
+            parser->guard = (FinallyGuard){true, parser->fs, parser->loop};
+            if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+                block(parser);
+            } else {
+                error_at_current(parser, "expected '{' after 'finally'");
+            }
+            parser->guard = saved_guard;
+        }
+        size_t normal_done = emit_jump(parser, LZ_OP_JUMP, offset);
+
+        /* The way in with an error: the body again, then the error goes on. */
+        patch_jump(parser, finally_jump);
+        begin_scope(parser);
+        LzString *hidden_name = lz_vm_intern(parser->vm, "(error)", 7);
+        LzType error_type = lz_type_of_kinds(LZ_KIND_ERROR);
+        Symbol *hidden = hidden_name == NULL
+                             ? NULL
+                             : add_symbol(parser, &try_token, hidden_name, SYMBOL_LOCAL, false,
+                                          lz_value_nil(), &error_type);
+        uint16_t error_slot = hidden != NULL ? hidden->slot : (uint16_t)base;
+        finally_ctx.symbol_start = parser->symbol_count; /* the hidden error stays visible */
+        emit_finally_copy(parser, &finally_ctx);
+        slot_get(parser, error_slot, offset);
+        emit_op_at(parser, LZ_OP_THROW, offset);
+        end_scope(parser);
+        patch_jump(parser, normal_done);
+    }
+    parser->try_ctx = scan.has_catch ? catch_ctx.enclosing : parser->try_ctx;
+    if (scan.has_finally) {
+        parser->try_ctx = finally_ctx.enclosing;
+    }
+    parser->terminated = false;
+}
+
+static void throw_statement(Parser *parser) {
+    uint32_t offset = parser->previous.offset;
+    if (check(parser, LZ_TOKEN_NEWLINE) || check(parser, LZ_TOKEN_SEMICOLON) ||
+        check(parser, LZ_TOKEN_RIGHT_BRACE) || check(parser, LZ_TOKEN_EOF)) {
+        error_at_current(parser, "expected an error to throw");
+        return;
+    }
+    LzToken start = parser->current;
+    Expr value = expression(parser);
+    LzType wide = lz_type_widen(&value.type);
+    if ((lz_type_possible_kinds(&wide) & LZ_KIND_ERROR) == 0) {
+        error_at(parser, &start, "only an error can be thrown (write RuntimeError(\"oops\"))");
+    }
+    emit_op_at(parser, LZ_OP_THROW, offset);
+    end_statement(parser);
+    parser->terminated = true;
+}
+
+
 /* Compile-time constants */
 
 static bool fragment_is_pure(const LzChunk *chunk, size_t start) {
@@ -4323,6 +4850,10 @@ static void assignment_statement(Parser *parser) {
         error_with_name(parser, &name_token, "cannot assign to the loop variable '", "'");
         return;
     }
+    if (symbol != NULL && symbol->catch_var) {
+        error_with_name(parser, &name_token, "cannot assign to the catch variable '", "'");
+        return;
+    }
     bool is_constant = symbol != NULL && (symbol->is_const || symbol->kind == SYMBOL_CONSTANT);
     if (compound && name != NULL) {
         if (symbol == NULL && lz_vm_lookup(parser->vm, name) != NULL) {
@@ -4531,7 +5062,8 @@ static void step_statement(Parser *parser) {
             return;
         }
     } else if (type == LZ_TOKEN_FN || type == LZ_TOKEN_LET || type == LZ_TOKEN_CONST ||
-               type == LZ_TOKEN_IF || type == LZ_TOKEN_SWITCH || type == LZ_TOKEN_WHILE ||
+               type == LZ_TOKEN_IF || type == LZ_TOKEN_SWITCH || type == LZ_TOKEN_TRY ||
+               type == LZ_TOKEN_THROW || type == LZ_TOKEN_WHILE ||
                type == LZ_TOKEN_FOR ||
                type == LZ_TOKEN_RETURN || type == LZ_TOKEN_BREAK ||
                type == LZ_TOKEN_CONTINUE || type == LZ_TOKEN_LEFT_BRACE ||
@@ -4913,6 +5445,9 @@ static void return_statement(Parser *parser) {
     if (fs->function == NULL) {
         error_at_previous(parser, "'return' outside of a function");
     }
+    if (parser->guard.active && parser->guard.func == parser->fs) {
+        error_at_previous(parser, "cannot leave a 'finally' block with 'return'");
+    }
 
     LzToken start = parser->current;
     Expr value = expr_of(lz_type_of_kinds(LZ_KIND_NIL));
@@ -4926,7 +5461,32 @@ static void return_statement(Parser *parser) {
         check_flow(parser, &value.type, &fs->sig->result, &start, offset, LZ_OP_CHECK_RETURN,
                    "return type mismatch: expected ");
     }
-    emit_op_at(parser, LZ_OP_RETURN, offset);
+    bool run_finally = false;
+    for (const TryContext *ctx = parser->try_ctx; ctx != NULL && ctx->func == parser->fs;
+         ctx = ctx->enclosing) {
+        run_finally = run_finally || ctx->has_finally;
+    }
+    if (run_finally) {
+        /* The value waits in a local of its own while the finally bodies run. */
+        begin_scope(parser);
+        LzString *hidden_name = lz_vm_intern(parser->vm, "(return)", 8);
+        LzType any = lz_type_of_kinds(LZ_KINDS_ANY);
+        Symbol *hidden = hidden_name == NULL
+                             ? NULL
+                             : add_symbol(parser, &parser->previous, hidden_name, SYMBOL_LOCAL, false,
+                                          lz_value_nil(), &any);
+        if (hidden != NULL) {
+            uint16_t slot = hidden->slot;
+            emit_try_exits(parser, false, offset);
+            emit_op_at(parser, LZ_OP_GET_LOCAL, offset);
+            emit_u16_at(parser, slot, offset);
+        }
+        emit_op_at(parser, LZ_OP_RETURN, offset);
+        end_scope(parser);
+    } else {
+        emit_try_exits(parser, false, offset); /* nothing to run: only closes handlers */
+        emit_op_at(parser, LZ_OP_RETURN, offset);
+    }
     end_statement(parser);
     parser->terminated = true;
 }
@@ -4985,6 +5545,8 @@ static void synchronize(Parser *parser) {
         case LZ_TOKEN_CONST:
         case LZ_TOKEN_IF:
         case LZ_TOKEN_SWITCH:
+        case LZ_TOKEN_TRY:
+        case LZ_TOKEN_THROW:
         case LZ_TOKEN_WHILE:
         case LZ_TOKEN_FOR:
         case LZ_TOKEN_FN:
@@ -5048,6 +5610,14 @@ static void declaration(Parser *parser) {
     case LZ_TOKEN_SWITCH:
         advance(parser);
         switch_statement(parser);
+        break;
+    case LZ_TOKEN_TRY:
+        advance(parser);
+        try_statement(parser);
+        break;
+    case LZ_TOKEN_THROW:
+        advance(parser);
+        throw_statement(parser);
         break;
     case LZ_TOKEN_WHILE:
         advance(parser);

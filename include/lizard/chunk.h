@@ -101,7 +101,17 @@ typedef enum LzOpCode {
     LZ_OP_NIL_TEST,    /* keep x, push whether it is nil: [x] -> [x][is nil] */
 
     /* `switch`. */
-    LZ_OP_DUP          /* push a copy of the top: [x] -> [x][x] */
+    LZ_OP_DUP,         /* push a copy of the top: [x] -> [x][x] */
+
+    /* Errors: try, catch, throw. */
+    LZ_OP_TRY_BEGIN,   /* u16 forward offset of the catch code: opens a handler that remembers the
+                          frame and the stack height. An error inside the frame (or in what it
+                          calls) cuts the stack back to that height, pushes the error value and
+                          continues at the catch code */
+    LZ_OP_TRY_END,     /* closes the innermost handler (the try ended without an error) */
+    LZ_OP_THROW,       /* pop an error value and fail with it; a thrown value keeps its trace */
+    LZ_OP_ERROR_IS,    /* u8 error kind: pop an error, push whether it is of that kind or below */
+    LZ_OP_GET_FIELD    /* u16 constant name: pop an error, push its field (message, kind, trace) */
 } LzOpCode;
 
 #define LZ_CONSTANTS_MAX 65536

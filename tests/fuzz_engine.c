@@ -223,7 +223,16 @@ static void gen_object_index(Gen *g, int array) {
 static void gen_dict_stmt(Gen *g) {
     static const char *const keys[] = {"\"a\"", "\"b\"", "\"c\""};
     const char *key = keys[below(sizeof keys / sizeof keys[0])];
-    switch (below(9)) {
+    switch (below(11)) {
+    case 8:
+        /* A caught failure, with a finally body: the same on every engine. */
+        /* In a closure: code with a try stays with the reference interpreter, and the program
+         * around it must still translate. */
+        emit(g, "{\nlet tf = fn() { try { println(d0[%s]) } catch e { println(e.kind, e.message) } finally { println(\"f\") } }\ntf()\n}\n", key);
+        break;
+    case 9:
+        emit(g, "{\nlet tg = fn() { try { println(10 / len(d0)) } catch ArithmeticError as _ { println(\"zero\") } }\ntg()\n}\n");
+        break;
     case 0:
         emit(g, "d0[%s] = ", key);
         gen_literal(g);

@@ -210,7 +210,8 @@ LzStatus lz_dict_own_key(LzVM *vm, const LzValue *key) {
     if ((kind & (LZ_KIND_STRING | LZ_KIND_INT | LZ_KIND_BOOL)) != 0) {
         return LZ_OK;
     }
-    return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "a %s cannot be a dict key", lz_kind_name(kind));
+    return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "%s %s cannot be a dict key",
+                           kind == LZ_KIND_ERROR ? "an" : "a", lz_kind_name(kind));
 }
 
 bool lz_dict_admit_key(const LzDict *dict, const LzValue *key) {

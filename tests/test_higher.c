@@ -231,7 +231,8 @@ static void test_method_errors(void) {
     }
     finish(&program);
 
-    check_compile_error("let xs = [1]\nprintln(xs.len)\n", "expected '(' after the method name");
+    /* `.name` without parentheses is a field now, and only errors have any. */
+    check_runtime_error("let xs = [1]\nprintln(xs.len)\n", LZ_ERR_TYPE, "array has no field 'len'");
     check_compile_error("let xs = [1]\nprintln(xs.)\n", "expected a method name after '.'");
 }
 

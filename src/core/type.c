@@ -26,6 +26,8 @@ uint16_t lz_kind_of(const LzValue *value) {
             return LZ_KIND_ARRAY;
         case LZ_OBJ_DICT:
             return LZ_KIND_DICT;
+        case LZ_OBJ_ERROR:
+            return LZ_KIND_ERROR;
         case LZ_OBJ_NATIVE:
         case LZ_OBJ_CLOSURE:
             return LZ_KIND_FUNCTION;
@@ -56,6 +58,8 @@ const char *lz_kind_name(uint16_t kind) {
         return "array";
     case LZ_KIND_DICT:
         return "dict";
+    case LZ_KIND_ERROR:
+        return "error";
     default:
         return "value";
     }

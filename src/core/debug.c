@@ -152,6 +152,7 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_DEFINE_GLOBAL:
     case LZ_OP_SET_GLOBAL:
     case LZ_OP_CLOSURE:
+    case LZ_OP_GET_FIELD:
         return constant_instruction(chunk, offset, out);
     case LZ_OP_GET_LOCAL:
     case LZ_OP_SET_LOCAL:
@@ -169,6 +170,7 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_JUMP:
     case LZ_OP_JUMP_IF_FALSE:
     case LZ_OP_JUMP_IF_TRUE:
+    case LZ_OP_TRY_BEGIN:
         return jump_instruction(chunk, offset, true, out);
     case LZ_OP_LOOP:
         return jump_instruction(chunk, offset, false, out);
@@ -216,6 +218,8 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_IN:
     case LZ_OP_NIL_TEST:
     case LZ_OP_DUP:
+    case LZ_OP_TRY_END:
+    case LZ_OP_THROW:
         return simple_instruction(lz_opcode_name(opcode), offset, out);
     case LZ_OP_DICT:
         return slot_instruction(chunk, offset, out);
@@ -224,6 +228,7 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_RANGE_TEST:
     case LZ_OP_RANGE_LAST:
     case LZ_OP_IN_RANGE:
+    case LZ_OP_ERROR_IS:
         return byte_instruction(chunk, offset, out);
     default:
         put(out, "unknown opcode %u\n", (unsigned)opcode);

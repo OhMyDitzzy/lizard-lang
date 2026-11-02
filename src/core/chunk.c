@@ -296,6 +296,16 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_NIL_TEST";
     case LZ_OP_DUP:
         return "OP_DUP";
+    case LZ_OP_TRY_BEGIN:
+        return "OP_TRY_BEGIN";
+    case LZ_OP_TRY_END:
+        return "OP_TRY_END";
+    case LZ_OP_THROW:
+        return "OP_THROW";
+    case LZ_OP_ERROR_IS:
+        return "OP_ERROR_IS";
+    case LZ_OP_GET_FIELD:
+        return "OP_GET_FIELD";
     default:
         return "OP_UNKNOWN";
     }
@@ -366,7 +376,14 @@ size_t lz_opcode_length(uint8_t opcode) {
     case LZ_OP_IN:
     case LZ_OP_NIL_TEST:
     case LZ_OP_DUP:
+    case LZ_OP_TRY_END:
+    case LZ_OP_THROW:
         return 1;
+    case LZ_OP_ERROR_IS:
+        return 2;
+    case LZ_OP_TRY_BEGIN:
+    case LZ_OP_GET_FIELD:
+        return 3;
     case LZ_OP_CLOSE_UPVALUE_KEEP:
         return 3; /* the slot whose upvalue is closed */
     case LZ_OP_DICT:

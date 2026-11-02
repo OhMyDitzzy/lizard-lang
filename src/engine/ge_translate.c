@@ -199,6 +199,11 @@ bool ge_translate(const LzChunk *chunk, GeProgram *program) {
         if (length == 0 || offset + length > bytes) {
             return false;
         }
+        /* A try needs the handlers of the reference interpreter, which cuts the stack and
+         * the frames back; GE and the JIT leave code that has one to it. */
+        if (chunk->code[offset] == LZ_OP_TRY_BEGIN || chunk->code[offset] == LZ_OP_TRY_END) {
+            return false;
+        }
         count++;
         offset += length;
     }
@@ -326,6 +331,9 @@ bool ge_translate(const LzChunk *chunk, GeProgram *program) {
         case LZ_OP_IN_RANGE:
         case LZ_OP_NIL_TEST:
         case LZ_OP_DUP:
+        case LZ_OP_THROW:
+        case LZ_OP_ERROR_IS:
+        case LZ_OP_GET_FIELD:
             in->op = GE_OP_DELEGATE;
             break;
         default:

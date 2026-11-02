@@ -321,6 +321,13 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
         case LZ_OP_CLOSE_UPVALUE_KEEP:
             ok = d >= 1; /* the depth does not change */
             break;
+        case LZ_OP_GET_FIELD:
+            ok = d >= 1; /* the error becomes its field */
+            break;
+        case LZ_OP_THROW:
+            ok = d >= 1;
+            nd = d - 1;
+            break;
         case LZ_OP_NIL_TEST:
         case LZ_OP_DUP:
             ok = d >= 1;

@@ -213,6 +213,9 @@ LzStatus lz_vm_call_value(LzVM *vm, const LzValue *callee, size_t argc, const Lz
             vm->trace_fixed = true;
         }
         vm->frame_count = depth;
+        while (vm->handler_count > 0 && vm->handlers[vm->handler_count - 1].frame >= depth) {
+            vm->handler_count--; /* the frames they belonged to are gone */
+        }
         lz_vm_close_upvalues(vm, base);
         while (vm->stack_count > base) {
             drop_top(vm);
@@ -378,6 +381,10 @@ LzStatus lz_vm_return(LzVM *vm) {
         return malformed(vm, "stack underflow");
     }
     LzValue result = vm->stack[--vm->stack_count];
+    /* A try left open in this frame (a `return` that skipped its end) dies with the frame. */
+    while (vm->handler_count > 0 && vm->handlers[vm->handler_count - 1].frame >= vm->frame_count - 1) {
+        vm->handler_count--;
+    }
     lz_vm_close_upvalues(vm, base);
     while (vm->stack_count > base - 1) {
         drop_top(vm); /* locals, arguments and the callee itself */

@@ -274,6 +274,7 @@ static int run_script(const char *script_path, bool heap_stats, bool trace_memor
 
     LzVM vm;
     lz_vm_init(&vm, lz_writer_from_file(stdout), lz_writer_from_file(stderr));
+    vm.trace_source = &source; /* so that the trace of a caught error names file:line:column */
     vm.heap.trace = trace_memory;
     if (has_skink) {
         vm.skink.enabled = skink;

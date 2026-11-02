@@ -2,6 +2,7 @@
 #define LIZARD_VM_H
 
 #include "lizard/chunk.h"
+#include "lizard/error.h"
 #include "lizard/common.h"
 #include "lizard/function.h"
 #include "lizard/memory.h"
@@ -38,6 +39,20 @@ typedef struct LzTraceEntry {
     uint32_t offset; /* source offset of the call (or of the failure, for the innermost) */
 } LzTraceEntry;
 
+/*
+ * A `try` that is open: where its catch code starts and what to cut the stack back to. Handlers
+ * are a stack; the one on top is the innermost. See OP_TRY_BEGIN.
+ */
+typedef struct LzHandler {
+    size_t frame;        /* index in vm->frames of the frame that holds the try */
+    size_t target;       /* byte offset in that frame's chunk where its catch code starts */
+    size_t stack_height; /* vm->stack_count when the try began */
+} LzHandler;
+
+#define LZ_HANDLERS_MAX 4096
+
+struct LzSource;
+
 struct LzVM {
     LzHeap heap;
     LzWriter out;
@@ -61,6 +76,11 @@ struct LzVM {
     size_t trace_count;
     size_t trace_total; /* frames in the whole stack, so a caller can say how many were left out */
     char error[256];
+    uint8_t error_kind; /* the LzErrorKind of the failure in vm->error (a guess from its wording until caught) */
+    LzValue thrown;     /* the error value a `throw` is carrying (retained), nil when there is none */
+    LzHandler handlers[LZ_HANDLERS_MAX];
+    size_t handler_count;
+    const struct LzSource *trace_source; /* optional: lets an error's trace say file:line:column */
     /*
      * "did you mean" names for the run-time error in vm->error, when it names a value
      * that does not exist (a dict key, usually). Empty unless it does; the CLI draws

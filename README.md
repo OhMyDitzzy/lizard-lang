@@ -382,6 +382,84 @@ in `return`, `break` or `continue`.
 `switch` is not a pattern `match`: a case is compared with `==`, so it never binds a new
 variable, takes a value apart, or tests a type. Such a `match` does not exist yet.
 
+### Errors: `try`, `catch`, `finally`, `throw`
+
+```
+try {
+    ...
+} catch RangeError as e {        # this kind, and every kind below it
+    println(e.message)
+} catch ValueError as _ {        # `_` discards the error: nothing is declared
+    println("bad value")
+} catch e {                      # the same as `catch Error as e`
+    println(e)                   # RuntimeError: ...
+} catch {                        # the same as `catch Error as _`
+    println("something failed")
+} finally {
+    println("always")
+}
+
+throw RuntimeError("message")
+throw e                          # throws an error you already have, keeping its trace
+```
+
+`try` is a statement and needs at least one `catch` or a `finally`. `catch` and `finally` follow
+the `}` before them like `else` does. The clauses are tried from the top and the first that
+matches wins; a `catch` with no type (`catch e`, `catch { }`) must be the last. These are compile
+errors: a `catch` that an earlier one already covers (`unreachable catch: 'IOError' is already
+caught by 'Error' above`), a type that does not exist (`unknown error type 'X'`, with a "did you
+mean" suggestion), and `catch NotFound { }`, which would only name the error `NotFound`, so
+write `catch NotFound as _`. The variable of a `catch` belongs to its block, shadows a variable
+of the same name outside without changing it, and cannot be assigned.
+
+**Kinds.** One chain of inheritance, only for errors:
+
+```
+Error
++- RuntimeError
+|  +- TypeError          a value of the wrong type
+|  +- ValueError         a bad value: a failed conversion, an argument out of its domain
+|  +- RangeError         an index out of range, a missing key, a shift out of range
+|  +- ArithmeticError    division by zero, overflow
+|  +- ArityError         the wrong number of arguments
++- IOError               for the input/output builtins
+```
+
+Every built-in failure has the kind that fits it (its message and behaviour are unchanged; the
+kind is new), and anything not listed is a `RuntimeError`. Each kind is a function that makes an
+error: `RangeError("message")`; the message must be a string.
+
+**Errors are values.** `e.message` and `e.kind` are strings and `e.trace` is an array of strings
+`name (file:line:column)`, innermost first, as many frames as an uncaught error reports (16).
+These fields are read only (`e.message = "x"` is `cannot assign to a field of an error`). `.name`
+without parentheses is a field; with parentheses it is a method as always. `println(e)`,
+`e.to_string()` and `{e}` in a template give `Kind: message`. Two errors are equal only if they are
+the same object, and an error cannot be a dict key. `throw` takes only an error:
+`throw "oops"` is `only an error can be thrown (write RuntimeError("oops"))`. An error that is
+thrown again keeps the trace of where it first was.
+
+**`finally`.** It runs after the `try` body, after a `catch` body, when an error that nothing
+catches goes on, and when `return`, `break` or `continue` leaves the `try` or a `catch` (a
+`return` value is kept first; with several nested, the innermost `finally` runs first). A
+`return`, `break` or `continue` in a `finally` body is an error (`cannot leave a 'finally' block
+with 'return'`), but a `throw` there is allowed and its error replaces the one in flight. The body
+is compiled again at every way out of its `try`; it sees the names visible where it is written.
+
+**Limits cannot be caught.** Running out of instructions (fuel), heap, memory, or call, stack or
+callback depth stops the program at once: no `catch` and no `finally` block runs. Only the errors a
+script can cause (all the kinds above) are caught.
+
+**An uncaught error** stops the program with the same report as before (message, caret, trace).
+The report of an error made with `throw` is titled `error: Kind: message`; the title of the
+built-in errors is unchanged.
+
+Implementation notes: an error value is made only when something catches it (or `throw` runs), so
+an uncaught failure costs nothing extra. The handlers are a stack in the VM; a failure cuts the stack, the
+frames and the open upvalues back to where the `try` began. Code that contains a `try` runs in the
+reference interpreter, also under the Gecko Engine and the JIT, which leave it alone (a `try` at the top
+level of a script keeps the whole script there); an error that a
+callee running there cannot handle reaches the `try` of the frame above it all the same.
+
 **Precedence**, from the strongest to the weakest. Binary operators are left-associative, and
 a newline after one is ignored.
 

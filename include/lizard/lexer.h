@@ -84,7 +84,12 @@ typedef enum LzTokenType {
     LZ_TOKEN_QUESTION_QUESTION, /* ?? */
 
     LZ_TOKEN_SWITCH,
-    LZ_TOKEN_CASE
+    LZ_TOKEN_CASE,
+
+    LZ_TOKEN_TRY,
+    LZ_TOKEN_CATCH,
+    LZ_TOKEN_FINALLY,
+    LZ_TOKEN_THROW
 } LzTokenType;
 
 /*

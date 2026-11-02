@@ -137,6 +137,7 @@ static bool is_node(const LzObject *object) {
         return dict_may_hold_cycles((const LzDict *)object);
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
+    case LZ_OBJ_ERROR:
     case LZ_OBJ_FUNCTION:
         break;
     }
@@ -166,6 +167,7 @@ static bool may_join_cycle(const LzValue *value) {
         return !dict_is_typed_leaf((const LzDict *)value->as.object);
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
+    case LZ_OBJ_ERROR:
     case LZ_OBJ_FUNCTION:
     case LZ_OBJ_UPVALUE:
         break;
@@ -186,6 +188,7 @@ static size_t slot_count(const LzObject *node) {
         return 1;
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
+    case LZ_OBJ_ERROR:
     case LZ_OBJ_FUNCTION:
         break;
     }
@@ -238,6 +241,7 @@ static bool each_edge(Trial *trial, LzObject *node, EdgeFn visit) {
     }
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
+    case LZ_OBJ_ERROR:
     case LZ_OBJ_FUNCTION:
         break;
     }
@@ -454,6 +458,7 @@ static void clear_edges(LzVM *vm, LzObject *node) {
     }
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
+    case LZ_OBJ_ERROR:
     case LZ_OBJ_FUNCTION:
         break;
     }

@@ -13,13 +13,14 @@ typedef enum LzKind {
     LZ_KIND_STRING = 1 << 4,
     LZ_KIND_FUNCTION = 1 << 5,
     LZ_KIND_ARRAY = 1 << 6,
-    LZ_KIND_DICT = 1 << 7
+    LZ_KIND_DICT = 1 << 7,
+    LZ_KIND_ERROR = 1 << 8
 } LzKind;
 
 #define LZ_KINDS_NUMBER (LZ_KIND_INT | LZ_KIND_FLOAT)
 #define LZ_KINDS_ANY                                                                               \
     (LZ_KIND_NIL | LZ_KIND_BOOL | LZ_KIND_INT | LZ_KIND_FLOAT | LZ_KIND_STRING | LZ_KIND_FUNCTION |   \
-     LZ_KIND_ARRAY | LZ_KIND_DICT)
+     LZ_KIND_ARRAY | LZ_KIND_DICT | LZ_KIND_ERROR)
 
 #define LZ_TYPE_MAX_LITERALS 8
 

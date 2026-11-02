@@ -4,6 +4,7 @@
 #include "lizard/array.h"
 #include "lizard/compare.h"
 #include "lizard/dict.h"
+#include "lizard/error.h"
 #include "lizard/native.h"
 
 #include <stdio.h>
@@ -594,6 +595,169 @@ static LzStatus nil_test_op(LzVM *vm) {
         return malformed(vm, "stack underflow");
     }
     return push(vm, lz_value_bool(vm->stack[vm->stack_count - 1].type == LZ_VAL_NIL));
+}
+
+/* The error value a failure is turned into when a catch takes it: the thrown one, or a new one. */
+static LzStatus error_for_failure(LzVM *vm, LzError **out) {
+    if (vm->thrown.type == LZ_VAL_OBJECT) {
+        *out = (LzError *)vm->thrown.as.object; /* the VM's reference moves to the caller */
+        vm->thrown = lz_value_nil();
+        return LZ_OK;
+    }
+    return lz_error_new(vm, (LzErrorKind)vm->error_kind, vm->error, strlen(vm->error), out);
+}
+
+/*
+ * A failure at the instruction at byte `failed_ip` of the frame on top. If a catchable failure
+ * meets a handler of a frame this loop runs (frame >= floor), cut back to the state the try began
+ * in: close the upvalues above its stack height, drop the values and frames above, push the error
+ * value and continue at the catch code. Returns false when nothing catches it (sandbox limits
+ * never are), with *status as the failure the loop must return.
+ */
+static bool unwind_to_handler(LzVM *vm, LzStatus *status, size_t floor, size_t failed_ip,
+                              const LzChunk **chunk_io, size_t *ip_io) {
+    if (!lz_status_catchable(*status) || vm->handler_count == 0 || vm->frame_count == 0) {
+        return false;
+    }
+    LzHandler handler = vm->handlers[vm->handler_count - 1];
+    if (handler.frame < floor || handler.frame >= vm->frame_count) {
+        return false;
+    }
+    const LzChunk *failing = vm->frames[vm->frame_count - 1].chunk;
+    if (vm->error_offset == LZ_NO_OFFSET && failed_ip < failing->count) {
+        vm->error_offset = failing->offsets[failed_ip];
+    }
+    if (!vm->trace_fixed) {
+        lz_vm_capture_trace(vm);
+    }
+    LzError *error = NULL;
+    LzStatus made = error_for_failure(vm, &error);
+    if (made == LZ_OK) {
+        made = lz_error_attach_trace(vm, error);
+        if (made != LZ_OK) {
+            lz_object_release(&vm->heap, &error->base);
+        }
+    }
+    if (made != LZ_OK) {
+        *status = made; /* the heap refused the error value: that is a limit, nothing to catch */
+        return false;
+    }
+
+    vm->handler_count--;
+    lz_vm_close_upvalues(vm, handler.stack_height);
+    while (vm->stack_count > handler.stack_height) {
+        vm->stack_count--;
+        lz_value_release(&vm->heap, &vm->stack[vm->stack_count]);
+    }
+    vm->frame_count = handler.frame + 1;
+    vm->trace_fixed = false;
+    vm->trace_count = 0;
+    vm->trace_total = 0;
+    vm->error_offset = LZ_NO_OFFSET;
+    vm->stack[vm->stack_count++] = lz_value_object(&error->base); /* the creation reference */
+    *chunk_io = vm->frames[handler.frame].chunk;
+    *ip_io = handler.target;
+    return true;
+}
+
+static LzStatus try_begin_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
+    uint16_t distance;
+    if (!read_u16(chunk, ip, &distance)) {
+        return malformed(vm, "truncated operand");
+    }
+    if (*ip + distance > chunk->count) {
+        return malformed(vm, "jump out of range");
+    }
+    if (vm->handler_count >= LZ_HANDLERS_MAX) {
+        return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow: too many open try blocks");
+    }
+    LzHandler *handler = &vm->handlers[vm->handler_count++];
+    handler->frame = vm->frame_count - 1;
+    handler->target = *ip + distance;
+    handler->stack_height = vm->stack_count;
+    return LZ_OK;
+}
+
+static LzStatus throw_op(LzVM *vm) {
+    if (vm->stack_count == 0) {
+        return malformed(vm, "stack underflow");
+    }
+    LzValue *top = &vm->stack[vm->stack_count - 1];
+    if (!lz_value_is_error(top)) {
+        return lz_vm_set_error(vm, LZ_ERR_TYPE,
+                               "only an error can be thrown (write RuntimeError(\"oops\"))");
+    }
+    LzError *error = (LzError *)top->as.object;
+    LzValue thrown = *top; /* the stack's reference moves to vm->thrown */
+    vm->stack_count--;
+    if (vm->thrown.type != LZ_VAL_NIL) {
+        LzValue old = vm->thrown;
+        vm->thrown = lz_value_nil();
+        lz_value_release(&vm->heap, &old);
+    }
+    vm->thrown = thrown;
+    vm->error_suggestions.count = 0;
+    (void)snprintf(vm->error, sizeof vm->error, "%s: %.*s",
+                   lz_error_kind_name((LzErrorKind)error->kind), (int)error->message->length,
+                   error->message->data);
+    vm->error_kind = error->kind;
+    return LZ_ERR_RUNTIME;
+}
+
+static LzStatus error_is_op(LzVM *vm, uint8_t kind) {
+    if (vm->stack_count == 0 || !lz_value_is_error(&vm->stack[vm->stack_count - 1])) {
+        return malformed(vm, "a catch needs an error value");
+    }
+    const LzError *error = (const LzError *)vm->stack[vm->stack_count - 1].as.object;
+    bool is = lz_error_kind_is((LzErrorKind)error->kind, (LzErrorKind)kind);
+    pop(vm);
+    return push(vm, lz_value_bool(is));
+}
+
+/* `e.message`, `e.kind`, `e.trace`: the fields of an error, read only. */
+static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
+    LzString *name = NULL;
+    LzStatus status = read_name(vm, chunk, ip, &name);
+    if (status != LZ_OK) {
+        return status;
+    }
+    if (vm->stack_count == 0) {
+        return malformed(vm, "stack underflow");
+    }
+    const LzValue *top = &vm->stack[vm->stack_count - 1];
+    if (!lz_value_is_error(top)) {
+        return lz_vm_set_error(vm, LZ_ERR_TYPE, "%s has no field '%s'",
+                               lz_kind_name(lz_kind_of(top)), name->data);
+    }
+    LzError *error = (LzError *)top->as.object;
+    LzValue field;
+    LzArray *empty = NULL;
+    if (strcmp(name->data, "message") == 0) {
+        field = lz_value_object(&error->message->base);
+    } else if (strcmp(name->data, "kind") == 0) {
+        const char *kind_name = lz_error_kind_name((LzErrorKind)error->kind);
+        LzString *interned = lz_vm_intern(vm, kind_name, strlen(kind_name));
+        if (interned == NULL) {
+            return lz_vm_out_of_memory(vm);
+        }
+        field = lz_value_object(&interned->base);
+    } else if (strcmp(name->data, "trace") == 0) {
+        if (error->trace == NULL) {
+            empty = lz_array_new(&vm->heap, 0);
+            if (empty == NULL) {
+                return lz_vm_out_of_memory(vm);
+            }
+            error->trace = empty;
+        }
+        field = lz_value_object(&error->trace->base);
+    } else {
+        return lz_vm_set_error(vm, LZ_ERR_TYPE, "error has no field '%s'", name->data);
+    }
+    lz_value_retain(&field);
+    LzValue holder = *top; /* the error: released once the field is safe on the stack */
+    vm->stack[vm->stack_count - 1] = field;
+    lz_value_release(&vm->heap, &holder);
+    return LZ_OK;
 }
 
 static LzStatus range_last_op(LzVM *vm, bool inclusive) {
@@ -1264,6 +1428,25 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
     case LZ_OP_NIL_TEST:
         status = nil_test_op(vm);
         break;
+    case LZ_OP_TRY_BEGIN:
+        status = try_begin_op(vm, chunk, &ip);
+        break;
+    case LZ_OP_TRY_END:
+        if (vm->handler_count > 0) {
+            vm->handler_count--;
+        }
+        break;
+    case LZ_OP_THROW:
+        status = throw_op(vm);
+        break;
+    case LZ_OP_ERROR_IS: {
+        uint8_t kind = ip < chunk->count ? chunk->code[ip++] : 0;
+        status = error_is_op(vm, kind);
+        break;
+    }
+    case LZ_OP_GET_FIELD:
+        status = get_field_op(vm, chunk, &ip);
+        break;
     case LZ_OP_DUP:
         if (vm->stack_count == 0) {
             status = malformed(vm, "stack underflow");
@@ -1332,8 +1515,12 @@ static LzStatus execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, 
         }
         vm->instructions++;
 
+        size_t at = ip;
         status = exec_one(vm, &chunk, &ip, true);
         if (status != LZ_OK) {
+            if (unwind_to_handler(vm, &status, 0, at, &chunk, &ip)) {
+                continue;
+            }
             return status;
         }
     }
@@ -1354,8 +1541,12 @@ LzStatus lz_vm_run_until(LzVM *vm, size_t depth, size_t *failed_at) {
             return status;
         }
         vm->instructions++;
+        size_t at = ip;
         status = exec_one(vm, &chunk, &ip, true);
         if (status != LZ_OK) {
+            if (unwind_to_handler(vm, &status, depth, at, &chunk, &ip)) {
+                continue;
+            }
             return status;
         }
     }
