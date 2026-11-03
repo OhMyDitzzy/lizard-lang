@@ -258,7 +258,7 @@ bool lz_dict_value_fits(const LzDict *dict, const LzValue *value) {
 }
 
 LzStatus lz_dict_check_store(LzVM *vm, LzDict *dict, const LzValue *value) {
-    if (lz_value_is_container(value)) {
+    if (lz_value_may_hold_container(value)) {
         uint64_t work = 0;
         int cycle = lz_containers_would_cycle(&vm->heap, value, &dict->base, &work);
         LzStatus charged = lz_vm_charge_fuel(vm, lz_array_cost((size_t)work));

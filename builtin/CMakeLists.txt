@@ -8,7 +8,6 @@ add_library(lizard_builtin STATIC
     method/number.c
     method/text.c
     convert/convert.c
-    error/error.c
     io/print.c)
 
 target_include_directories(lizard_builtin

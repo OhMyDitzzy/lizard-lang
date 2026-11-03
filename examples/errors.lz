@@ -86,5 +86,49 @@ try {
   println("map failed:", e.kind)
 }
 
-# 7. The limits of the sandbox cannot be caught: nothing below would print.
+# 7. Your own kinds: `error Name : Parent` (Error when there is no parent). The declaration is
+# hoisted: a kind can be used above the line that declares it.
+try {
+  throw NotFound("config.lz is missing")
+} catch IOError as e {
+  println("io problem:", e.kind, e.message)   # NotFound is an IOError
+}
+error NotFound : IOError
+error ParseError : ValueError
+error AppError                                  # its parent is Error
+
+# 8. `cause` keeps the error that led to this one, `data` carries anything you want to hand on.
+fn load(path) {
+  throw NotFound(path + " is missing")
+}
+fn parse_config(path) {
+  try {
+    load(path)
+  } catch NotFound as e {
+    throw ParseError("cannot read the configuration", cause: e, data: {"path": path, "line": 3})
+  }
+}
+try {
+  parse_config("config.lz")
+} catch ParseError as e {
+  println(e.kind, e.message)
+  println("caused by", e.cause.kind, e.cause.message)
+  println("data", e.data["path"], e.data["line"])
+  println(e.cause.cause, AppError("plain").data)    # nil nil: no cause and no data
+}
+
+# 9. A kind is a function: build the error first, then throw it.  `throw NotFound` is a mistake.
+let make = [NotFound, ParseError, AppError]
+for kind in make {
+  try { throw kind("made by a variable") } catch e { println(e.kind) }
+}
+
+# 10. An error that nobody catches prints its causes under the report:
+#
+#   error: ParseError: cannot read the configuration
+#     = caused by: NotFound: config.lz is missing
+#
+# parse_config("config.lz")
+
+# 11. The limits of the sandbox cannot be caught: nothing below would print.
 # try { while true { } } catch e { println("never") } finally { println("never") }

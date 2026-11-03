@@ -45,6 +45,9 @@ typedef struct LzReport {
     const LzReportFrame *frames; /* a stack trace, innermost first */
     size_t frame_count;
     size_t frames_omitted;
+    const char *const *causes; /* "Kind: message" of each cause, nearest first: "= caused by:" lines */
+    size_t cause_count;
+    bool causes_truncated; /* the chain goes on beyond the ones given: a "..." line */
 } LzReport;
 
 /* Writes one report followed by a blank line. color adds ANSI escape sequences. */

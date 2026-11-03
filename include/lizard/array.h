@@ -29,9 +29,16 @@ static inline void lz_array_drop_holder(const LzValue *item) {
 void lz_note_container_store(LzHeap *heap, const LzValue *value);
 void lz_drop_container_holder(const LzValue *value);
 
+/* A container, or an error: the values the cycle check has to look into (an error carries data). */
+static inline bool lz_value_may_hold_container(const LzValue *value) {
+    return value->type == LZ_VAL_OBJECT &&
+           (value->as.object->type == LZ_OBJ_ARRAY || value->as.object->type == LZ_OBJ_DICT ||
+            value->as.object->type == LZ_OBJ_ERROR);
+}
+
 /*
  * Would storing `value` in the container `target` create a reference cycle? 1 yes,
- * 0 no, -1 out of memory. Walks arrays and dicts, *work counts the items visited.
+ * 0 no, -1 out of memory. Walks arrays, dicts and errors (cause and data), *work counts the items visited.
  */
 int lz_containers_would_cycle(LzHeap *heap, const LzValue *value, const LzObject *target,
                               uint64_t *work);

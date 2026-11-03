@@ -51,6 +51,12 @@ typedef struct LzHandler {
 
 #define LZ_HANDLERS_MAX 4096
 
+/* A kind of error declared with `error Name : Parent`; its kind number is LZ_ERROR_KIND_COUNT + index. */
+typedef struct LzErrorType {
+    LzString *name; /* interned: the intern table owns it */
+    uint8_t parent;
+} LzErrorType;
+
 struct LzSource;
 
 struct LzVM {
@@ -78,6 +84,9 @@ struct LzVM {
     char error[256];
     uint8_t error_kind; /* the LzErrorKind of the failure in vm->error (a guess from its wording until caught) */
     LzValue thrown;     /* the error value a `throw` is carrying (retained), nil when there is none */
+    LzValue last_thrown; /* the error that stopped the last run, kept for the report (retained) */
+    LzErrorType error_types[LZ_ERROR_TYPES_MAX - LZ_ERROR_KIND_COUNT]; /* the declared kinds */
+    size_t error_type_count;
     LzHandler handlers[LZ_HANDLERS_MAX];
     size_t handler_count;
     const struct LzSource *trace_source; /* optional: lets an error's trace say file:line:column */

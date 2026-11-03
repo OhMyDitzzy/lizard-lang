@@ -429,6 +429,47 @@ Every built-in failure has the kind that fits it (its message and behaviour are 
 kind is new), and anything not listed is a `RuntimeError`. Each kind is a function that makes an
 error: `RangeError("message")`; the message must be a string.
 
+**Your own kinds.** `error` declares a kind, with a parent that is a kind already known (a built-in
+one, or one declared above it in the file); without a parent it is a child of `Error`:
+
+```
+error NotFound : IOError
+error ParseError : ValueError
+error AppError                      # a child of Error
+```
+
+`error` is a keyword only at the start of a statement at the top level, followed by a name; anywhere
+else it is a name like any other (`let error = 1`, `error = 2` and `error + 1` still work, `x = error`
+too). Mistakes are compile errors: a declaration inside a function, block or loop (`an 'error'
+declaration is only allowed at the top level`), a name that is already a kind (`duplicate error type
+'X'`), a name that a top-level variable or function has (`'X' is already used by a variable or
+function`), an unknown parent (`unknown error type 'X'`, with a "did you mean" suggestion), and more
+than 256 kinds in all. There is one parent, no body and no fields, and a kind below `Error` only;
+the limits of the sandbox are no kind and cannot be caught.
+
+**Hoisting.** All the declarations of a file are found and made before any statement runs, in the
+order they are written, so a kind can be caught and called above its declaration (and tools can read
+the kinds without running the script). A parent has to be written above its child. A kind is a
+function that makes an error, so its name may not be a variable or function of the file either, and
+`throw NotFound` is a compile error (`an error type must be called to make an error:
+NotFound("message")`).
+
+**`cause` and `data`.** Every kind, built-in or yours, is made as `Kind(message)`, with two optional
+named arguments:
+
+```
+throw ParseError("line 3 is broken", cause: e, data: {"line": 3})
+```
+
+`cause` is an error or `nil` (anything else is a `TypeError`); `data` is any value. `cause = e` is
+written the same way as the named arguments of other functions and works too. Another named argument,
+or a second positional one, is an error (`unexpected named argument` at compile time, or an
+`ArityError` when the call goes through a variable). The fields are `e.cause` (an error or `nil`) and
+`e.data` (`nil` when none was given), read only like the others; a container in `data` is shared, not
+copied. An error and what it carries follow the rule of arrays and dicts: a store that would make a
+cycle through an error, such as putting the error in the dict that is its `data`, is refused
+(`cannot store a dict inside itself (reference cycles are not supported)`, a `ValueError`).
+
 **Errors are values.** `e.message` and `e.kind` are strings and `e.trace` is an array of strings
 `name (file:line:column)`, innermost first, as many frames as an uncaught error reports (16).
 These fields are read only (`e.message = "x"` is `cannot assign to a field of an error`). `.name`
@@ -451,7 +492,16 @@ script can cause (all the kinds above) are caught.
 
 **An uncaught error** stops the program with the same report as before (message, caret, trace).
 The report of an error made with `throw` is titled `error: Kind: message`; the title of the
-built-in errors is unchanged.
+built-in errors is unchanged. When the error has a `cause`, the report ends with one line for each
+error of the chain, nearest first, at most 8 and then `...`:
+
+```
+error: ParseError: cannot read the configuration
+ --> app.lz:14:5
+   ...
+  = caused by: NotFound: config.lz is missing
+  = caused by: IOError: permission denied
+```
 
 Implementation notes: an error value is made only when something catches it (or `throw` runs), so
 an uncaught failure costs nothing extra. The handlers are a stack in the VM; a failure cuts the stack, the

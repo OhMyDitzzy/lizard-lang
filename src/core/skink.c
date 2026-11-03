@@ -125,6 +125,18 @@ static bool dict_may_hold_cycles(const LzDict *dict) {
     return dict->count != 0 && !dict_is_typed_leaf(dict);
 }
 
+/*
+ * An error leads to its cause and its data. Not told apart any further (the check is not
+ * recursive, a chain of errors can be long): an error with either is a node, one with neither
+ * a leaf. Calling a leaf a node costs a visit, calling a node a leaf could miss a cycle.
+ */
+static bool error_may_hold_cycles(const LzError *error) {
+    bool data = error->data.type == LZ_VAL_OBJECT && error->data.as.object->type != LZ_OBJ_STRING &&
+                error->data.as.object->type != LZ_OBJ_NATIVE &&
+                error->data.as.object->type != LZ_OBJ_FUNCTION;
+    return data || error->cause.type == LZ_VAL_OBJECT;
+}
+
 /* Objects that can take part in a cycle. Strings, natives and functions are leaves. */
 static bool is_node(const LzObject *object) {
     switch (object->type) {
@@ -135,9 +147,10 @@ static bool is_node(const LzObject *object) {
         return array_may_hold_cycles((const LzArray *)object);
     case LZ_OBJ_DICT:
         return dict_may_hold_cycles((const LzDict *)object);
+    case LZ_OBJ_ERROR:
+        return error_may_hold_cycles((const LzError *)object);
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
-    case LZ_OBJ_ERROR:
     case LZ_OBJ_FUNCTION:
         break;
     }
@@ -165,9 +178,10 @@ static bool may_join_cycle(const LzValue *value) {
         return !array_is_typed_leaf((const LzArray *)value->as.object);
     case LZ_OBJ_DICT:
         return !dict_is_typed_leaf((const LzDict *)value->as.object);
+    case LZ_OBJ_ERROR:
+        return error_may_hold_cycles((const LzError *)value->as.object);
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
-    case LZ_OBJ_ERROR:
     case LZ_OBJ_FUNCTION:
     case LZ_OBJ_UPVALUE:
         break;
@@ -186,9 +200,10 @@ static size_t slot_count(const LzObject *node) {
         return ((const LzDict *)node)->count;
     case LZ_OBJ_UPVALUE:
         return 1;
+    case LZ_OBJ_ERROR:
+        return 2; /* cause and data */
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
-    case LZ_OBJ_ERROR:
     case LZ_OBJ_FUNCTION:
         break;
     }
@@ -239,9 +254,18 @@ static bool each_edge(Trial *trial, LzObject *node, EdgeFn visit) {
         }
         return true;
     }
+    case LZ_OBJ_ERROR: {
+        const LzError *error = (const LzError *)node;
+        if (is_graph_value(&error->cause) && !visit(trial, error->cause.as.object)) {
+            return false;
+        }
+        if (is_graph_value(&error->data) && !visit(trial, error->data.as.object)) {
+            return false;
+        }
+        return true;
+    }
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
-    case LZ_OBJ_ERROR:
     case LZ_OBJ_FUNCTION:
         break;
     }
@@ -456,9 +480,19 @@ static void clear_edges(LzVM *vm, LzObject *node) {
         }
         break;
     }
+    case LZ_OBJ_ERROR: {
+        LzError *error = (LzError *)node;
+        LzValue cause = error->cause;
+        LzValue data = error->data;
+        error->cause = lz_value_nil();
+        error->data = lz_value_nil();
+        lz_drop_container_holder(&data);
+        lz_value_release(&vm->heap, &cause);
+        lz_value_release(&vm->heap, &data);
+        break;
+    }
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
-    case LZ_OBJ_ERROR:
     case LZ_OBJ_FUNCTION:
         break;
     }

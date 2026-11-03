@@ -137,6 +137,28 @@ typedef struct FinallyGuard {
     LoopFrame *loop;
 } FinallyGuard;
 
+/*
+ * An `error Name : Parent` declaration found by the prescan, which declares every one of them
+ * in the VM before the first statement is compiled (see prescan_errors). The mistakes it met are
+ * kept here and told when the parser reaches the declaration, so they come in source order.
+ */
+typedef enum ErrorProblem {
+    ERROR_DECL_OK,
+    ERROR_DECL_DUPLICATE,      /* a kind of that name exists */
+    ERROR_DECL_COLLISION,      /* a variable or function has the name */
+    ERROR_DECL_UNKNOWN_PARENT, /* the parent is not a kind, or is declared further down */
+    ERROR_DECL_LIMIT           /* too many kinds */
+} ErrorProblem;
+
+typedef struct ErrorDecl {
+    uint32_t name_offset;
+    uint32_t name_length;
+    bool has_parent;
+    uint32_t parent_offset;
+    uint32_t parent_length;
+    ErrorProblem problem;
+} ErrorDecl;
+
 typedef struct Parser {
     LzVM *vm;
     const LzSource *source;
@@ -168,6 +190,9 @@ typedef struct Parser {
     LoopFrame *loop; /* innermost while being compiled, NULL outside a loop */
     TryContext *try_ctx; /* innermost open try (or its finally region), see TryContext */
     FinallyGuard guard;
+    ErrorDecl *error_decls; /* the `error` declarations of the file, in order, see prescan_errors */
+    size_t error_decl_count;
+    size_t error_decl_capacity;
 } Parser;
 
 /*
@@ -2506,7 +2531,7 @@ static bool is_any_type(const LzType *type) {
 }
 
 /* Is the argument list that starts at the current token one with `*spread` or `name = value`? */
-static bool call_has_special_args(const Parser *parser) {
+static bool call_has_special_args(const Parser *parser, bool colon_names) {
     LzLexer ahead = parser->lexer;
     LzToken token = parser->current;
     int depth = 0;
@@ -2525,7 +2550,8 @@ static bool call_has_special_args(const Parser *parser) {
                 }
                 if (token.type == LZ_TOKEN_IDENTIFIER) {
                     LzLexer peek = ahead;
-                    if (lz_lexer_next(&peek).type == LZ_TOKEN_EQUAL) {
+                    LzTokenType after = lz_lexer_next(&peek).type;
+                    if (after == LZ_TOKEN_EQUAL || (colon_names && after == LZ_TOKEN_COLON)) {
                         return true;
                     }
                 }
@@ -2612,6 +2638,7 @@ static Expr call_result(Expr callee) {
 static Expr call_special(Parser *parser, Expr callee, const LzToken *paren, bool receiver) {
     uint32_t offset = paren->offset;
     const FuncSig *sig = callee.sig;
+    bool makes_error = callee.native != NULL && !receiver && lz_native_error_kind(callee.native, NULL);
     emit_op_at(parser, LZ_OP_ARRAY_NEW, offset);
     if (receiver) {
         /* [callee][receiver][array] -> [callee][array][receiver] -> [callee][array] */
@@ -2643,18 +2670,33 @@ static Expr call_special(Parser *parser, Expr callee, const LzToken *paren, bool
                 }
                 emit_op_at(parser, LZ_OP_ARRAY_EXTEND, offset);
                 spread = true;
-            } else if (check(parser, LZ_TOKEN_IDENTIFIER) && next_token_type(parser) == LZ_TOKEN_EQUAL) {
+            } else if (check(parser, LZ_TOKEN_IDENTIFIER) &&
+                       (next_token_type(parser) == LZ_TOKEN_EQUAL ||
+                        (makes_error && next_token_type(parser) == LZ_TOKEN_COLON))) {
                 advance(parser);
                 LzToken name_token = parser->previous;
                 LzString *name = intern_token(parser, &name_token);
-                advance(parser); /* the '=' */
+                advance(parser); /* the '=' or ':' */
                 skip_newlines(parser);
                 for (size_t i = 0; name != NULL && i < named; i++) {
                     if (seen[i] == name) {
                         error_with_name(parser, &name_token, "argument '", "' is given twice");
                     }
                 }
-                if (callee.native != NULL) {
+                if (makes_error) {
+                    bool known = name != NULL && ((name->length == 5 && memcmp(name->data, "cause", 5) == 0) ||
+                                                  (name->length == 4 && memcmp(name->data, "data", 4) == 0));
+                    if (!known) {
+                        LzSuggester suggester;
+                        lz_suggester_init(&suggester, parser->source->text + name_token.offset,
+                                          name_token.length);
+                        lz_suggester_offer(&suggester, "cause");
+                        lz_suggester_offer(&suggester, "data");
+                        error_with_name_suggest(parser, &name_token, "unexpected named argument '",
+                                                "'", "an error takes only cause and data",
+                                                &suggester.found);
+                    }
+                } else if (callee.native != NULL) {
                     error_at(parser, &name_token, "builtin functions do not take named arguments");
                 } else if (sig != NULL && name != NULL) {
                     size_t index = 0;
@@ -2756,7 +2798,9 @@ static Expr call_args(Parser *parser, Expr callee, bool receiver) {
             error_types(parser, &paren, "cannot call a value of type ", &callee.type, "", NULL);
         }
     }
-    if (call_has_special_args(parser)) {
+    /* The function that makes errors also takes `cause: e` and `data: d`. */
+    bool makes_error = callee.native != NULL && !receiver && lz_native_error_kind(callee.native, NULL);
+    if (call_has_special_args(parser, makes_error)) {
         return call_special(parser, callee, &paren, receiver);
     }
 
@@ -2801,7 +2845,7 @@ static Expr dot_call(Parser *parser, Expr receiver) {
     advance(parser);
     LzToken name = parser->previous;
     if (!check(parser, LZ_TOKEN_LEFT_PAREN)) {
-        /* `value.name` with no parentheses is a field. Only errors have any: message, kind, trace. */
+        /* `value.name` with no parentheses is a field. Only errors have any: message, kind, trace, cause, data. */
         if (check(parser, LZ_TOKEN_EQUAL) || is_compound(parser->current.type)) {
             error_at_current(parser, "cannot assign to a field of an error");
             return any_expr();
@@ -2820,7 +2864,10 @@ static Expr dot_call(Parser *parser, Expr receiver) {
         if (field->length == 5 && memcmp(field->data, "trace", 5) == 0) {
             return expr_of(lz_type_of_kinds(LZ_KIND_ARRAY));
         }
-        return any_expr();
+        if (field->length == 5 && memcmp(field->data, "cause", 5) == 0) {
+            return expr_of(lz_type_of_kinds(LZ_KIND_ERROR | LZ_KIND_NIL));
+        }
+        return any_expr(); /* data, or a field an error does not have */
     }
 
     /*
@@ -4315,7 +4362,7 @@ static TryScan scan_try(const Parser *parser) {
 
 typedef struct {
     bool typed;      /* `catch Kind as ...` */
-    LzErrorKind kind;
+    uint8_t kind;    /* an LzErrorKind, or the number of a declared kind */
     bool has_name;   /* the error is bound to a variable */
     LzToken name;
     LzToken kind_token;
@@ -4338,12 +4385,13 @@ static bool catch_header(Parser *parser, CatchHeader *header) {
     if (word_is(parser, &after, "as")) {
         header->typed = true;
         header->kind_token = first;
-        if (!lz_error_kind_from_name(parser->source->text + first.offset, first.length,
-                                     &header->kind)) {
+        if (!lz_vm_error_kind_from_name(parser->vm, parser->source->text + first.offset, first.length,
+                                        &header->kind)) {
             LzSuggester suggester;
             lz_suggester_init(&suggester, parser->source->text + first.offset, first.length);
-            for (unsigned i = 0; i < LZ_ERROR_KIND_COUNT; i++) {
-                lz_suggester_offer(&suggester, lz_error_kind_name((LzErrorKind)i));
+            size_t kind_count = lz_vm_error_kind_count(parser->vm);
+            for (size_t i = 0; i < kind_count; i++) {
+                lz_suggester_offer(&suggester, lz_vm_error_kind_name(parser->vm, (unsigned)i));
             }
             error_with_name_suggest(parser, &first, "unknown error type '", "'",
                                     "not a known error type", &suggester.found);
@@ -4361,9 +4409,9 @@ static bool catch_header(Parser *parser, CatchHeader *header) {
         return true;
     }
 
-    LzErrorKind known;
-    bool is_kind = lz_error_kind_from_name(parser->source->text + first.offset, first.length,
-                                           &known);
+    uint8_t known;
+    bool is_kind = lz_vm_error_kind_from_name(parser->vm, parser->source->text + first.offset,
+                                              first.length, &known);
     if (after.type == LZ_TOKEN_LEFT_BRACE) {
         if (is_kind) {
             char message[300];
@@ -4425,7 +4473,7 @@ static void try_statement(Parser *parser) {
 
     block(parser); /* the body */
 
-    LzErrorKind seen[LZ_ERROR_KIND_COUNT];
+    uint8_t seen[LZ_ERROR_TYPES_MAX];
     size_t seen_count = 0;
     size_t *clause_ends = NULL;
     size_t clause_end_count = 0;
@@ -4471,17 +4519,17 @@ static void try_statement(Parser *parser) {
             }
             if (ok && header.typed) {
                 for (size_t i = 0; i < seen_count; i++) {
-                    if (lz_error_kind_is(header.kind, seen[i])) {
+                    if (lz_vm_error_kind_is(parser->vm, header.kind, seen[i])) {
                         char message[200];
                         (void)snprintf(message, sizeof message,
                                        "unreachable catch: '%s' is already caught by '%s' above",
-                                       lz_error_kind_name(header.kind),
-                                       lz_error_kind_name(seen[i]));
+                                       lz_vm_error_kind_name(parser->vm, header.kind),
+                                       lz_vm_error_kind_name(parser->vm, seen[i]));
                         error_at(parser, &header.kind_token, message);
                         break;
                     }
                 }
-                if (seen_count < LZ_ERROR_KIND_COUNT) {
+                if (seen_count < LZ_ERROR_TYPES_MAX) {
                     seen[seen_count++] = header.kind;
                 }
             } else if (ok) {
@@ -4600,7 +4648,14 @@ static void throw_statement(Parser *parser) {
     LzToken start = parser->current;
     Expr value = expression(parser);
     LzType wide = lz_type_widen(&value.type);
-    if ((lz_type_possible_kinds(&wide) & LZ_KIND_ERROR) == 0) {
+    if (value.native != NULL && !value.is_call && lz_native_error_kind(value.native, NULL)) {
+        /* `throw NotFound`: the kind is a function that makes the error, it is not one. */
+        char message[160];
+        (void)snprintf(message, sizeof message,
+                       "an error type must be called to make an error: %s(\"message\")",
+                       value.native->name->data);
+        error_at(parser, &start, message);
+    } else if ((lz_type_possible_kinds(&wide) & LZ_KIND_ERROR) == 0) {
         error_at(parser, &start, "only an error can be thrown (write RuntimeError(\"oops\"))");
     }
     emit_op_at(parser, LZ_OP_THROW, offset);
@@ -5496,6 +5551,269 @@ static void return_statement(Parser *parser) {
  * each other whatever their order. Only the names are declared here; the function
  * itself exists once its declaration has run.
  */
+/* Error kinds: `error Name : Parent` */
+
+typedef struct TopName {
+    uint32_t offset;
+    uint32_t length;
+} TopName;
+
+/* Does the text of this name match one of the top-level `let`, `const` and `fn` names? */
+static bool top_name_used(const Parser *parser, const TopName *names, size_t count, uint32_t offset,
+                          uint32_t length) {
+    for (size_t i = 0; i < count; i++) {
+        if (names[i].length == length &&
+            memcmp(parser->source->text + names[i].offset, parser->source->text + offset,
+                   length) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Declares the kind of one declaration in the VM, and remembers what went wrong in decl->problem.
+ * A kind with an unknown parent is still declared (under Error), so the mistake is told once and
+ * later uses of the name do not add to it. A kind that is a duplicate or collides is not.
+ */
+static void declare_error_kind(Parser *parser, ErrorDecl *decl, bool collides) {
+    const char *text = parser->source->text;
+    LzVM *vm = parser->vm;
+    uint8_t existing;
+    decl->problem = ERROR_DECL_OK;
+    if (lz_vm_error_kind_from_name(vm, text + decl->name_offset, decl->name_length, &existing)) {
+        decl->problem = ERROR_DECL_DUPLICATE;
+        return;
+    }
+    LzString *name = lz_vm_intern(vm, text + decl->name_offset, decl->name_length);
+    if (name == NULL) {
+        fail(parser, lz_vm_out_of_memory(vm));
+        return;
+    }
+    if (collides || lz_vm_lookup(vm, name) != NULL) {
+        decl->problem = ERROR_DECL_COLLISION;
+        return;
+    }
+    uint8_t parent = LZ_ERROR_ERROR;
+    if (decl->has_parent &&
+        !lz_vm_error_kind_from_name(vm, text + decl->parent_offset, decl->parent_length, &parent)) {
+        parent = LZ_ERROR_ERROR;
+        decl->problem = ERROR_DECL_UNKNOWN_PARENT;
+    }
+    uint8_t kind;
+    LzStatus status = lz_vm_error_declare(vm, name, parent, &kind);
+    if (status == LZ_ERR_RUNTIME) {
+        decl->problem = ERROR_DECL_LIMIT; /* vm->error says how many */
+    } else if (status != LZ_OK) {
+        fail(parser, status);
+    }
+}
+
+static ErrorDecl *add_error_decl(Parser *parser, const ErrorDecl *decl) {
+    if (parser->error_decl_count == parser->error_decl_capacity) {
+        size_t capacity = parser->error_decl_capacity != 0 ? parser->error_decl_capacity * 2 : 8;
+        ErrorDecl *grown = realloc(parser->error_decls, capacity * sizeof *grown);
+        if (grown == NULL) {
+            fail(parser, LZ_ERR_MEMORY);
+            return NULL;
+        }
+        parser->error_decls = grown;
+        parser->error_decl_capacity = capacity;
+    }
+    parser->error_decls[parser->error_decl_count] = *decl;
+    return &parser->error_decls[parser->error_decl_count++];
+}
+
+/*
+ * Hoisting. Every `error` declaration at the top level of the file is found and declared in the
+ * VM before the first statement is compiled, in the order they are written: a kind can be used
+ * (caught, called) above its declaration, and the kinds are known without running the script.
+ * Only declarations at the start of a statement outside every bracket count, which is what the
+ * parser accepts (a declaration anywhere else is reported when the parser meets it).
+ */
+static void prescan_errors(Parser *parser) {
+    LzLexer lexer;
+    lz_lexer_init(&lexer, parser->source);
+    TopName *names = NULL;
+    size_t name_count = 0;
+    size_t name_capacity = 0;
+    ErrorDecl *found = NULL;
+    size_t found_count = 0;
+    size_t found_capacity = 0;
+    bool at_start = true;
+    bool ok = true;
+
+    for (;;) {
+        LzToken token = lz_lexer_next(&lexer);
+        if (token.type == LZ_TOKEN_EOF) {
+            break;
+        }
+        bool starts = at_start;
+        at_start = token.type == LZ_TOKEN_NEWLINE || token.type == LZ_TOKEN_SEMICOLON ||
+                   (token.type == LZ_TOKEN_RIGHT_BRACE && lexer.nesting == 0);
+        if (!starts || lexer.nesting != 0 || !ok) {
+            continue;
+        }
+        LzLexer peek = lexer;
+        LzToken name = lz_lexer_next(&peek);
+        if (name.type != LZ_TOKEN_IDENTIFIER) {
+            continue;
+        }
+        if (token.type == LZ_TOKEN_LET || token.type == LZ_TOKEN_CONST || token.type == LZ_TOKEN_FN) {
+            if (name_count == name_capacity) {
+                size_t capacity = name_capacity != 0 ? name_capacity * 2 : 16;
+                TopName *grown = realloc(names, capacity * sizeof *grown);
+                if (grown == NULL) {
+                    ok = false;
+                    continue;
+                }
+                names = grown;
+                name_capacity = capacity;
+            }
+            names[name_count++] = (TopName){(uint32_t)name.offset, (uint32_t)name.length};
+        } else if (word_is(parser, &token, "error")) {
+            ErrorDecl decl;
+            memset(&decl, 0, sizeof decl);
+            decl.name_offset = (uint32_t)name.offset;
+            decl.name_length = (uint32_t)name.length;
+            LzToken colon = lz_lexer_next(&peek);
+            if (colon.type == LZ_TOKEN_COLON) {
+                LzToken parent = lz_lexer_next(&peek);
+                if (parent.type == LZ_TOKEN_IDENTIFIER) {
+                    decl.has_parent = true;
+                    decl.parent_offset = (uint32_t)parent.offset;
+                    decl.parent_length = (uint32_t)parent.length;
+                }
+            }
+            if (found_count == found_capacity) {
+                size_t capacity = found_capacity != 0 ? found_capacity * 2 : 8;
+                ErrorDecl *grown = realloc(found, capacity * sizeof *grown);
+                if (grown == NULL) {
+                    ok = false;
+                    continue;
+                }
+                found = grown;
+                found_capacity = capacity;
+            }
+            found[found_count++] = decl;
+        }
+    }
+
+    if (!ok) {
+        fail(parser, LZ_ERR_MEMORY);
+    }
+    for (size_t i = 0; i < found_count && parser->fatal == LZ_OK; i++) {
+        bool collides = top_name_used(parser, names, name_count, found[i].name_offset,
+                                      found[i].name_length);
+        if (!collides) {
+            LzString *name = lz_vm_intern(parser->vm, parser->source->text + found[i].name_offset,
+                                          found[i].name_length);
+            collides = name != NULL && find_symbol(parser, name) != NULL;
+        }
+        declare_error_kind(parser, &found[i], collides);
+        if (add_error_decl(parser, &found[i]) == NULL) {
+            break;
+        }
+    }
+    free(names);
+    free(found);
+}
+
+static const ErrorDecl *find_error_decl(const Parser *parser, uint32_t name_offset) {
+    for (size_t i = 0; i < parser->error_decl_count; i++) {
+        if (parser->error_decls[i].name_offset == name_offset) {
+            return &parser->error_decls[i];
+        }
+    }
+    return NULL;
+}
+
+/* A word that is `error`, at the start of a statement, with a name after it: a declaration. */
+static bool at_error_declaration(const Parser *parser) {
+    return word_is(parser, &parser->current, "error") &&
+           next_token_type(parser) == LZ_TOKEN_IDENTIFIER;
+}
+
+/*
+ * error Name [: Parent]. The kind is already declared by the prescan; here the declaration is
+ * checked for where it stands and its mistakes are told. `error` is a keyword here and nowhere
+ * else: anywhere but the start of a statement it is a name like any other.
+ */
+static void error_declaration(Parser *parser) {
+    LzToken keyword = parser->current;
+    bool nested = parser->bracket_depth != 0 || parser->fs->enclosing != NULL;
+    advance(parser); /* error */
+    advance(parser); /* the name */
+    LzToken name_token = parser->previous;
+    LzToken parent_token;
+    memset(&parent_token, 0, sizeof parent_token);
+    bool has_parent = false;
+    if (match(parser, LZ_TOKEN_COLON)) {
+        if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+            error_at_current(parser, "expected the name of a parent error type after ':'");
+            return;
+        }
+        advance(parser);
+        parent_token = parser->previous;
+        has_parent = true;
+    }
+    if (nested) {
+        error_at(parser, &keyword, "an 'error' declaration is only allowed at the top level");
+        return;
+    }
+
+    const ErrorDecl *decl = find_error_decl(parser, name_token.offset);
+    ErrorDecl late;
+    if (decl == NULL) {
+        /* The prescan did not see it (an odd layout): declare it now. */
+        memset(&late, 0, sizeof late);
+        late.name_offset = (uint32_t)name_token.offset;
+        late.name_length = (uint32_t)name_token.length;
+        late.has_parent = has_parent;
+        late.parent_offset = (uint32_t)parent_token.offset;
+        late.parent_length = (uint32_t)parent_token.length;
+        declare_error_kind(parser, &late, false);
+        decl = &late;
+    }
+
+    switch (decl->problem) {
+    case ERROR_DECL_OK:
+        break;
+    case ERROR_DECL_DUPLICATE:
+        error_with_name(parser, &name_token, "duplicate error type '", "'");
+        return;
+    case ERROR_DECL_COLLISION:
+        error_with_name(parser, &name_token, "'", "' is already used by a variable or function");
+        return;
+    case ERROR_DECL_UNKNOWN_PARENT: {
+        LzSuggester suggester;
+        lz_suggester_init(&suggester, parser->source->text + parent_token.offset,
+                          parent_token.length);
+        size_t count = lz_vm_error_kind_count(parser->vm);
+        for (size_t i = 0; i < count; i++) {
+            const char *kind_name = lz_vm_error_kind_name(parser->vm, (unsigned)i);
+            /* The kind being declared is not a parent it could have meant. */
+            if (strlen(kind_name) == name_token.length &&
+                memcmp(kind_name, parser->source->text + name_token.offset, name_token.length) == 0) {
+                continue;
+            }
+            lz_suggester_offer(&suggester, kind_name);
+        }
+        error_with_name_suggest(parser, &parent_token, "unknown error type '", "'",
+                                "not a known error type", &suggester.found);
+        return;
+    }
+    case ERROR_DECL_LIMIT: {
+        char message[96];
+        (void)snprintf(message, sizeof message, "too many error types (limit %d)",
+                       LZ_ERROR_TYPES_MAX);
+        error_at(parser, &name_token, message);
+        return;
+    }
+    }
+    end_statement(parser);
+}
+
 static void prescan_functions(Parser *parser) {
     LzLexer lexer;
     lz_lexer_init(&lexer, parser->source);
@@ -5634,7 +5952,9 @@ static void declaration(Parser *parser) {
         error_at_current(parser, "unexpected '}'");
         break;
     case LZ_TOKEN_IDENTIFIER:
-        if (is_type_keyword(parser) && next_token_type(parser) == LZ_TOKEN_IDENTIFIER) {
+        if (at_error_declaration(parser)) {
+            error_declaration(parser);
+        } else if (is_type_keyword(parser) && next_token_type(parser) == LZ_TOKEN_IDENTIFIER) {
             advance(parser);
             type_declaration(parser);
         } else if (next_token_type(parser) == LZ_TOKEN_EQUAL ||
@@ -5667,6 +5987,7 @@ static LzStatus compile_into(Parser *parser) {
     script.self_symbol = SIZE_MAX;
     parser->fs = &script;
     prescan_functions(parser);
+    prescan_errors(parser);
     advance(parser);
     while (!check(parser, LZ_TOKEN_EOF) && parser->fatal == LZ_OK) {
         declaration(parser);
@@ -5713,6 +6034,7 @@ LzStatus lz_compile(LzVM *vm, const LzSource *source, LzChunk *chunk, LzDiagnost
         parser->sigs = next;
     }
     free(parser->constants.slots);
+    free(parser->error_decls);
     free(parser);
     return status;
 }

@@ -308,10 +308,12 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
     case LZ_OBJ_ERROR: {
         LzError *error = (LzError *)object;
         lz_object_release(heap, &error->message->base);
+        lz_object_release(heap, &error->kind_name->base);
         if (error->trace != NULL) {
             lz_object_release(heap, &error->trace->base);
         }
         lz_value_release(heap, &error->cause);
+        lz_drop_container_holder(&error->data);
         lz_value_release(heap, &error->data);
         break;
     }

@@ -315,6 +315,20 @@ void lz_report_write(const LzSource *source, const LzReport *report, bool color,
             raw(&out, " more frames\n", 13);
         }
     }
+    for (size_t i = 0; report->causes != NULL && i < report->cause_count; i++) {
+        spaces(&out, width + 1);
+        styled_cstr(&out, C_BLUE, "=");
+        raw(&out, " ", 1);
+        styled_cstr(&out, C_CYAN, "caused by");
+        styled(&out, C_BOLD, ": ", 2);
+        raw(&out, report->causes[i], strlen(report->causes[i]));
+        raw(&out, "\n", 1);
+    }
+    if (report->causes_truncated) {
+        spaces(&out, width + 1);
+        styled_cstr(&out, C_BLUE, "=");
+        raw(&out, " ...\n", 5);
+    }
 
     raw(&out, "\n", 1);
 }

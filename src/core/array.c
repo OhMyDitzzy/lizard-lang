@@ -78,6 +78,8 @@ void lz_array_note_store(LzArray *array, const LzValue *value) {
     } else if (lz_value_is_dict(value)) {
         array->has_arrays = true; /* the walk has to visit it too */
         lz_value_as_dict(value)->holders++;
+    } else if (lz_value_is_error(value)) {
+        array->has_arrays = true; /* an error leads to its data, which the walk has to visit */
     }
 }
 
@@ -195,21 +197,83 @@ static const LzValue *container_item_at(const LzObject *object, size_t index) {
                                       : &((const LzDict *)object)->entries[index].value;
 }
 
+/* The state of one walk: what it looks for, the stamp of its visits, the containers still to open. */
+typedef struct CycleWalk {
+    const LzObject *target;
+    uint32_t epoch;
+    const LzObject **stack;
+    size_t depth;
+    size_t capacity;
+    int result; /* 0 so far, 1 found, -1 out of memory */
+} CycleWalk;
+
+static bool walk_push(CycleWalk *walk, const LzObject *container) {
+    if (walk->depth == walk->capacity) {
+        const LzObject **grown = realloc(walk->stack, walk->capacity * 2 * sizeof *grown);
+        if (grown == NULL) {
+            walk->result = -1;
+            return false;
+        }
+        walk->stack = grown;
+        walk->capacity *= 2;
+    }
+    walk->stack[walk->depth++] = container;
+    return true;
+}
+
+/*
+ * Looks at one value met on the way: a container is the target, or is opened later (once per
+ * walk); an error leads to its cause and its data, a chain of errors one after the other.
+ * The causes of an error were made before it, so that chain ends; the containers it leads to
+ * are stamped, so none is opened twice.
+ */
+static void walk_value(CycleWalk *walk, const LzValue *value, uint64_t *work) {
+    while (lz_value_is_error(value)) {
+        const LzError *error = (const LzError *)value->as.object;
+        (*work)++;
+        walk_value(walk, &error->data, work);
+        if (walk->result != 0) {
+            return;
+        }
+        value = &error->cause;
+    }
+    if (!lz_value_is_container(value)) {
+        return;
+    }
+    LzObject *inner = value->as.object;
+    if (inner == walk->target) {
+        walk->result = 1;
+        return;
+    }
+    uint32_t *mark = container_is_array(inner) ? &((LzArray *)inner)->mark
+                                               : &((LzDict *)inner)->mark;
+    if (*mark == walk->epoch || !container_may_open(inner)) {
+        return;
+    }
+    *mark = walk->epoch;
+    (void)walk_push(walk, inner);
+}
+
 int lz_containers_would_cycle(LzHeap *heap, const LzValue *value, const LzObject *target,
                               uint64_t *work) {
-    if (!lz_value_is_container(value)) {
+    if (!lz_value_may_hold_container(value)) {
         return 0;
     }
-    LzObject *root = value->as.object;
-    if (root == target) {
-        return 1;
-    }
-    (*work)++;
-    /*
-     * A container that nothing holds cannot be inside `value` (reaching one would need a
-     * holder), so the common store of a freshly built structure costs nothing.
-     */
-    if (!container_may_open(root) || target == NULL) {
+    if (lz_value_is_container(value)) {
+        LzObject *root = value->as.object;
+        if (root == target) {
+            return 1;
+        }
+        (*work)++;
+        /*
+         * A container that nothing holds cannot be inside `value` (reaching one would need a
+         * holder), so the common store of a freshly built structure costs nothing. An error
+         * that carries a container as its data counts as a holder of it.
+         */
+        if (!container_may_open(root) || target == NULL) {
+            return 0;
+        }
+    } else if (target == NULL) {
         return 0;
     }
     if (target->type == LZ_OBJ_ARRAY ? ((const LzArray *)target)->holders == 0
@@ -217,55 +281,32 @@ int lz_containers_would_cycle(LzHeap *heap, const LzValue *value, const LzObject
         return 0;
     }
 
-    uint32_t epoch = lz_heap_next_epoch(heap);
-    size_t capacity = 16;
-    size_t depth = 0;
-    const LzObject **stack = malloc(capacity * sizeof *stack);
-    if (stack == NULL) {
+    CycleWalk walk = {target, lz_heap_next_epoch(heap), NULL, 0, 16, 0};
+    walk.stack = malloc(walk.capacity * sizeof *walk.stack);
+    if (walk.stack == NULL) {
         return -1;
     }
-    if (container_is_array(root)) {
-        ((LzArray *)root)->mark = epoch;
+    if (lz_value_is_container(value)) {
+        if (container_is_array(value->as.object)) {
+            ((LzArray *)value->as.object)->mark = walk.epoch;
+        } else {
+            ((LzDict *)value->as.object)->mark = walk.epoch;
+        }
+        (void)walk_push(&walk, value->as.object);
     } else {
-        ((LzDict *)root)->mark = epoch;
+        walk_value(&walk, value, work); /* an error: its causes and data are the roots */
     }
-    stack[depth++] = root;
 
-    int result = 0;
-    while (depth > 0 && result == 0) {
-        LzObject *container = (LzObject *)stack[--depth];
+    while (walk.depth > 0 && walk.result == 0) {
+        LzObject *container = (LzObject *)walk.stack[--walk.depth];
         size_t count = container_items(container);
         *work += count;
-        for (size_t i = 0; i < count; i++) {
-            const LzValue *item = container_item_at(container, i);
-            if (!lz_value_is_container(item)) {
-                continue;
-            }
-            LzObject *inner = item->as.object;
-            if (inner == target) {
-                result = 1;
-                break;
-            }
-            uint32_t *mark = container_is_array(inner) ? &((LzArray *)inner)->mark
-                                                       : &((LzDict *)inner)->mark;
-            if (*mark == epoch || !container_may_open(inner)) {
-                continue;
-            }
-            *mark = epoch;
-            if (depth == capacity) {
-                const LzObject **grown = realloc(stack, capacity * 2 * sizeof *stack);
-                if (grown == NULL) {
-                    result = -1;
-                    break;
-                }
-                stack = grown;
-                capacity *= 2;
-            }
-            stack[depth++] = inner;
+        for (size_t i = 0; i < count && walk.result == 0; i++) {
+            walk_value(&walk, container_item_at(container, i), work);
         }
     }
-    free(stack);
-    return result;
+    free(walk.stack);
+    return walk.result;
 }
 
 static LzStatus store_type_error(LzVM *vm, const LzArray *array, const LzValue *value) {
@@ -288,7 +329,7 @@ static LzStatus store_type_error(LzVM *vm, const LzArray *array, const LzValue *
 }
 
 LzStatus lz_array_check_store(LzVM *vm, LzArray *array, const LzValue *value) {
-    if (lz_value_is_container(value)) {
+    if (lz_value_may_hold_container(value)) {
         uint64_t work = 0;
         int cycle = lz_containers_would_cycle(&vm->heap, value, &array->base, &work);
         LzStatus charged = lz_vm_charge_fuel(vm, lz_array_cost((size_t)work));

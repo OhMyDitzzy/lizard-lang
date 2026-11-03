@@ -30,6 +30,8 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->error[0] = '\0';
     vm->error_kind = LZ_ERROR_RUNTIME;
     vm->thrown = lz_value_nil();
+    vm->last_thrown = lz_value_nil();
+    vm->error_type_count = 0;
     vm->handler_count = 0;
     vm->trace_source = NULL;
     vm->error_suggestions.count = 0;
@@ -62,9 +64,11 @@ LzStatus lz_vm_out_of_memory(LzVM *vm) {
 void lz_vm_reset_stack(LzVM *vm) {
     vm->handler_count = 0;
     if (vm->thrown.type != LZ_VAL_NIL) {
-        LzValue thrown = vm->thrown;
+        /* The run failed with this error: keep it, a report wants its causes. */
+        LzValue old = vm->last_thrown;
+        vm->last_thrown = vm->thrown;
         vm->thrown = lz_value_nil();
-        lz_value_release(&vm->heap, &thrown);
+        lz_value_release(&vm->heap, &old);
     }
     lz_vm_close_upvalues(vm, 0); /* before the slots die: a closure may outlive them */
     vm->frame_count = 0;
@@ -77,6 +81,12 @@ void lz_vm_reset_stack(LzVM *vm) {
 
 void lz_vm_release_roots(LzVM *vm) {
     lz_vm_reset_stack(vm);
+    if (vm->last_thrown.type != LZ_VAL_NIL) {
+        LzValue last = vm->last_thrown;
+        vm->last_thrown = lz_value_nil();
+        lz_value_release(&vm->heap, &last);
+    }
+    vm->error_type_count = 0; /* the names go with the intern table below */
     lz_table_free(&vm->heap, &vm->methods);
     lz_table_free(&vm->heap, &vm->builtins);
     lz_table_free(&vm->heap, &vm->globals);

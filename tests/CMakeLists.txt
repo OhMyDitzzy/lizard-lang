@@ -54,6 +54,7 @@ lz_add_test(test_for)
 lz_add_test(test_in)
 lz_add_test(test_switch)
 lz_add_test(test_try)
+lz_add_test(test_error_types)
 lz_add_test(test_if_expr)
 lz_add_test(test_skink)
 lz_add_test(fuzz_compile)
@@ -85,6 +86,7 @@ lz_add_ge_variant(test_for)
 lz_add_ge_variant(test_in)
 lz_add_ge_variant(test_switch)
 lz_add_ge_variant(test_try)
+lz_add_ge_variant(test_error_types)
 lz_add_ge_variant(test_if_expr)
 lz_add_ge_variant(test_compiler)
 lz_add_ge_variant(fuzz_run)
@@ -94,7 +96,7 @@ lz_add_ge_variant(fuzz_compile)
 # to machine code on first sight (LZ_JIT=eager). Without a JIT on the platform these are
 # plain GE runs.
 foreach(name test_engine fuzz_engine test_bits_ge test_run_ge test_limits_ge test_array_ge test_compiler_ge
-        test_loops_ge test_for_ge test_in_ge test_switch_ge test_try_ge test_if_expr_ge fuzz_run_ge fuzz_compile_ge test_skink_ge)
+        test_loops_ge test_for_ge test_in_ge test_switch_ge test_try_ge test_error_types_ge test_if_expr_ge fuzz_run_ge fuzz_compile_ge test_skink_ge)
     add_test(NAME ${name}_jit COMMAND ${name})
     set_tests_properties(${name}_jit PROPERTIES ENVIRONMENT "LZ_JIT=eager")
 endforeach()
@@ -105,6 +107,11 @@ if(UNIX)
     # when the JIT did not run).
     add_test(NAME skink_cli
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/skink_check.sh $<TARGET_FILE:lizard>)
+
+    # Declared error kinds from the command line: the report of an uncaught chain ("= caused by:",
+    # with and without color) and examples/errors.lz in every engine mode.
+    add_test(NAME error_types_cli
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/error_types_check.sh $<TARGET_FILE:lizard>)
 
     # `lizard --version`: the version, the kind of build, the channel, all consistent with BUILDINFO.
     add_test(NAME version_cli

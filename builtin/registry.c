@@ -3,7 +3,6 @@
 #include "array/array.h"
 #include "array/higher.h"
 #include "convert/convert.h"
-#include "error/error.h"
 #include "io/io.h"
 #include "lizard/builtin.h"
 #include "method/method.h"
@@ -39,14 +38,14 @@ static const LzBuiltin builtins[] = {
     {"any", lz_builtin_any, 2, 2, LZ_KIND_BOOL},
     {"all", lz_builtin_all, 2, 2, LZ_KIND_BOOL},
     /* The kinds of error: each makes an error value from a message. */
-    {"Error", lz_builtin_Error, 1, 1, LZ_KIND_ERROR},
-    {"RuntimeError", lz_builtin_RuntimeError, 1, 1, LZ_KIND_ERROR},
-    {"TypeError", lz_builtin_TypeError, 1, 1, LZ_KIND_ERROR},
-    {"ValueError", lz_builtin_ValueError, 1, 1, LZ_KIND_ERROR},
-    {"RangeError", lz_builtin_RangeError, 1, 1, LZ_KIND_ERROR},
-    {"ArithmeticError", lz_builtin_ArithmeticError, 1, 1, LZ_KIND_ERROR},
-    {"ArityError", lz_builtin_ArityError, 1, 1, LZ_KIND_ERROR},
-    {"IOError", lz_builtin_IOError, 1, 1, LZ_KIND_ERROR},
+    {"Error", lz_error_type_native, 1, 1, LZ_KIND_ERROR},
+    {"RuntimeError", lz_error_type_native, 1, 1, LZ_KIND_ERROR},
+    {"TypeError", lz_error_type_native, 1, 1, LZ_KIND_ERROR},
+    {"ValueError", lz_error_type_native, 1, 1, LZ_KIND_ERROR},
+    {"RangeError", lz_error_type_native, 1, 1, LZ_KIND_ERROR},
+    {"ArithmeticError", lz_error_type_native, 1, 1, LZ_KIND_ERROR},
+    {"ArityError", lz_error_type_native, 1, 1, LZ_KIND_ERROR},
+    {"IOError", lz_error_type_native, 1, 1, LZ_KIND_ERROR},
 };
 
 #define BUILTIN_COUNT (sizeof builtins / sizeof builtins[0])
@@ -81,6 +80,11 @@ LzStatus lz_builtin_install(LzVM *vm) {
         }
 
         native->result_kinds = builtin->result_kinds;
+        uint8_t error_kind;
+        if (builtin->fn == lz_error_type_native &&
+            lz_vm_error_kind_from_name(vm, builtin->name, strlen(builtin->name), &error_kind)) {
+            native->data = (const void *)(uintptr_t)error_kind; /* the kind this function makes */
+        }
         bool defined = lz_vm_define_builtin(vm, name, lz_value_object(&native->base));
         lz_object_release(&vm->heap, &native->base);
         if (!defined) {

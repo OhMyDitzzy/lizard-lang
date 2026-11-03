@@ -698,7 +698,7 @@ static LzStatus throw_op(LzVM *vm) {
     vm->thrown = thrown;
     vm->error_suggestions.count = 0;
     (void)snprintf(vm->error, sizeof vm->error, "%s: %.*s",
-                   lz_error_kind_name((LzErrorKind)error->kind), (int)error->message->length,
+                   error->kind_name->data, (int)error->message->length,
                    error->message->data);
     vm->error_kind = error->kind;
     return LZ_ERR_RUNTIME;
@@ -709,12 +709,12 @@ static LzStatus error_is_op(LzVM *vm, uint8_t kind) {
         return malformed(vm, "a catch needs an error value");
     }
     const LzError *error = (const LzError *)vm->stack[vm->stack_count - 1].as.object;
-    bool is = lz_error_kind_is((LzErrorKind)error->kind, (LzErrorKind)kind);
+    bool is = lz_vm_error_kind_is(vm, error->kind, kind);
     pop(vm);
     return push(vm, lz_value_bool(is));
 }
 
-/* `e.message`, `e.kind`, `e.trace`: the fields of an error, read only. */
+/* `e.message`, `e.kind`, `e.trace`, `e.cause`, `e.data`: the fields of an error, read only. */
 static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     LzString *name = NULL;
     LzStatus status = read_name(vm, chunk, ip, &name);
@@ -735,12 +735,11 @@ static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     if (strcmp(name->data, "message") == 0) {
         field = lz_value_object(&error->message->base);
     } else if (strcmp(name->data, "kind") == 0) {
-        const char *kind_name = lz_error_kind_name((LzErrorKind)error->kind);
-        LzString *interned = lz_vm_intern(vm, kind_name, strlen(kind_name));
-        if (interned == NULL) {
-            return lz_vm_out_of_memory(vm);
-        }
-        field = lz_value_object(&interned->base);
+        field = lz_value_object(&error->kind_name->base); /* interned when the error was made */
+    } else if (strcmp(name->data, "cause") == 0) {
+        field = error->cause;
+    } else if (strcmp(name->data, "data") == 0) {
+        field = error->data;
     } else if (strcmp(name->data, "trace") == 0) {
         if (error->trace == NULL) {
             empty = lz_array_new(&vm->heap, 0);

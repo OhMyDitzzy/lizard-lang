@@ -272,7 +272,9 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
     if (!native && !lz_value_is_closure(callee)) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "can only call functions");
     }
-    if (native && named_count > 0) {
+    uint8_t error_kind = 0;
+    bool makes_error = native && lz_native_error_kind((const LzNative *)callee->as.object, &error_kind);
+    if (native && named_count > 0 && !makes_error) {
         return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): builtin functions do not take named arguments",
                                ((const LzNative *)callee->as.object)->name->data);
     }
@@ -307,6 +309,23 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
 
     if (named_count == 0) {
         return lz_vm_call(vm, count, resume_ip, call_offset, entered);
+    }
+
+    if (makes_error) {
+        /* `Kind("message", cause: e, data: d)`: the named values are what the error keeps. */
+        vm->native_call_offset = call_offset;
+        LzValue made = lz_value_nil();
+        status = lz_error_construct_named(vm, error_kind, count, &vm->stack[callee_index + 1],
+                                          named_count, names->data, names->length, named, &made);
+        drop_values(vm, named, named_count);
+        if (status != LZ_OK) {
+            return status;
+        }
+        for (size_t i = 0; i < count + 1; i++) {
+            drop_top(vm);
+        }
+        vm->stack[vm->stack_count++] = made;
+        return LZ_OK;
     }
 
     /* Named arguments: find each one's parameter. */

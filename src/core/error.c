@@ -1,6 +1,9 @@
 #include "lizard/error.h"
 
+#include "lizard/dict.h"
+#include "lizard/native.h"
 #include "lizard/source.h"
+#include "lizard/suggest.h"
 #include "lizard/vm.h"
 
 #include <stdio.h>
@@ -136,13 +139,120 @@ LzErrorKind lz_error_classify(LzStatus status, const char *message) {
 }
 
 bool lz_error_write(const LzError *error, const LzWriter *writer) {
-    return lz_writer_write_cstr(writer, lz_error_kind_name((LzErrorKind)error->kind)) &&
+    return lz_writer_write(writer, error->kind_name->data, error->kind_name->length) &&
            lz_writer_write_cstr(writer, ": ") &&
            lz_writer_write(writer, error->message->data, error->message->length);
 }
 
-LzStatus lz_error_new(LzVM *vm, LzErrorKind kind, const char *message, size_t length,
+/* The kinds of one VM */
+
+size_t lz_vm_error_kind_count(const LzVM *vm) {
+    return LZ_ERROR_KIND_COUNT + vm->error_type_count;
+}
+
+const char *lz_vm_error_kind_name(const LzVM *vm, unsigned kind) {
+    if (kind < LZ_ERROR_KIND_COUNT) {
+        return kinds[kind].name;
+    }
+    unsigned index = kind - LZ_ERROR_KIND_COUNT;
+    return index < vm->error_type_count ? vm->error_types[index].name->data : "Error";
+}
+
+bool lz_vm_error_kind_from_name(const LzVM *vm, const char *name, size_t length, uint8_t *out) {
+    LzErrorKind builtin;
+    if (lz_error_kind_from_name(name, length, &builtin)) {
+        *out = (uint8_t)builtin;
+        return true;
+    }
+    for (size_t i = 0; i < vm->error_type_count; i++) {
+        const LzString *declared = vm->error_types[i].name;
+        if (declared->length == length && memcmp(declared->data, name, length) == 0) {
+            *out = (uint8_t)(LZ_ERROR_KIND_COUNT + i);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool lz_vm_error_kind_parent(const LzVM *vm, unsigned kind, uint8_t *parent) {
+    if (kind < LZ_ERROR_KIND_COUNT) {
+        LzErrorKind up;
+        if (!lz_error_kind_parent((LzErrorKind)kind, &up)) {
+            return false;
+        }
+        *parent = (uint8_t)up;
+        return true;
+    }
+    unsigned index = kind - LZ_ERROR_KIND_COUNT;
+    if (index >= vm->error_type_count) {
+        return false;
+    }
+    *parent = vm->error_types[index].parent;
+    return true;
+}
+
+bool lz_vm_error_kind_is(const LzVM *vm, unsigned kind, unsigned ancestor) {
+    /* Every parent was declared before its child, so each step goes to a smaller number. */
+    for (;;) {
+        if (kind == ancestor) {
+            return true;
+        }
+        uint8_t parent;
+        if (!lz_vm_error_kind_parent(vm, kind, &parent)) {
+            return false;
+        }
+        kind = parent;
+    }
+}
+
+bool lz_native_error_kind(const LzNative *native, uint8_t *kind) {
+    if (native->fn != lz_error_type_native) {
+        return false;
+    }
+    if (kind != NULL) {
+        *kind = (uint8_t)(uintptr_t)native->data;
+    }
+    return true;
+}
+
+LzStatus lz_vm_error_define_constructor(LzVM *vm, LzString *name, uint8_t kind) {
+    LzNative *native = lz_native_new(&vm->heap, name, lz_error_type_native, 1, 1);
+    if (native == NULL) {
+        return lz_vm_out_of_memory(vm);
+    }
+    native->result_kinds = LZ_KIND_ERROR;
+    native->data = (const void *)(uintptr_t)kind;
+    bool defined = lz_vm_define_builtin(vm, name, lz_value_object(&native->base));
+    lz_object_release(&vm->heap, &native->base);
+    return defined ? LZ_OK : lz_vm_out_of_memory(vm);
+}
+
+LzStatus lz_vm_error_declare(LzVM *vm, LzString *name, uint8_t parent, uint8_t *out) {
+    if (vm->error_type_count >= LZ_ERROR_TYPES_MAX - LZ_ERROR_KIND_COUNT) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "too many error types (limit %d)",
+                               LZ_ERROR_TYPES_MAX);
+    }
+    uint8_t kind = (uint8_t)(LZ_ERROR_KIND_COUNT + vm->error_type_count);
+    LzStatus status = lz_vm_error_define_constructor(vm, name, kind);
+    if (status != LZ_OK) {
+        return status;
+    }
+    vm->error_types[vm->error_type_count].name = name;
+    vm->error_types[vm->error_type_count].parent = parent;
+    vm->error_type_count++;
+    *out = kind;
+    return LZ_OK;
+}
+
+/* Values of an error */
+
+LzStatus lz_error_new(LzVM *vm, unsigned kind, const char *message, size_t length,
                       LzError **out) {
+    const char *kind_text = lz_vm_error_kind_name(vm, kind);
+    LzString *kind_name = lz_vm_intern(vm, kind_text, strlen(kind_text));
+    if (kind_name == NULL) {
+        return lz_vm_out_of_memory(vm);
+    }
     LzString *text = lz_string_new(&vm->heap, message, length);
     if (text == NULL) {
         return lz_vm_out_of_memory(vm);
@@ -153,12 +263,22 @@ LzStatus lz_error_new(LzVM *vm, LzErrorKind kind, const char *message, size_t le
         return lz_vm_out_of_memory(vm);
     }
     error->kind = (uint8_t)kind;
+    lz_object_retain(&kind_name->base);
+    error->kind_name = kind_name;
     error->message = text; /* the string's creation reference moves into the error */
     error->trace = NULL;
     error->cause = lz_value_nil();
     error->data = lz_value_nil();
     *out = error;
     return LZ_OK;
+}
+
+void lz_error_set_extra(LzVM *vm, LzError *error, const LzValue *cause, const LzValue *data) {
+    lz_value_retain(cause);
+    error->cause = *cause;
+    lz_value_retain(data);
+    error->data = *data;
+    lz_note_container_store(&vm->heap, &error->data);
 }
 
 LzStatus lz_error_attach_trace(LzVM *vm, LzError *error) {
@@ -194,4 +314,84 @@ LzStatus lz_error_attach_trace(LzVM *vm, LzError *error) {
     }
     error->trace = trace;
     return LZ_OK;
+}
+
+/* Constructors */
+
+static bool is_string(const LzValue *value) {
+    return value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_STRING;
+}
+
+/* Checks the arguments and makes the error; the creation reference moves to *result. */
+static LzStatus construct(LzVM *vm, uint8_t kind, const LzValue *message, const LzValue *cause,
+                          const LzValue *data, LzValue *result) {
+    if (!is_string(message)) {
+        return lz_vm_set_error(vm, LZ_ERR_TYPE, "the message of an error must be a string");
+    }
+    if (cause->type != LZ_VAL_NIL && !lz_value_is_error(cause)) {
+        return lz_vm_set_error(vm, LZ_ERR_TYPE, "the cause of an error must be an error or nil");
+    }
+    const LzString *text = (const LzString *)message->as.object;
+    LzError *error = NULL;
+    LzStatus status = lz_error_new(vm, kind, text->data, text->length, &error);
+    if (status != LZ_OK) {
+        return status;
+    }
+    lz_error_set_extra(vm, error, cause, data);
+    *result = lz_value_object(&error->base);
+    return LZ_OK;
+}
+
+LzStatus lz_error_type_native(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
+    /* current_native is valid at the entry only: read it before anything else runs. */
+    uint8_t kind = (uint8_t)(uintptr_t)vm->current_native->data;
+    (void)argc; /* lz_native_call has checked that there is exactly one */
+    LzValue nil = lz_value_nil();
+    return construct(vm, kind, &argv[0], &nil, &nil, result);
+}
+
+/* The index of the name [name, name + length) among the names the call can take, or -1. */
+static int named_slot(const char *name, size_t length) {
+    if (length == 5 && memcmp(name, "cause", 5) == 0) {
+        return 0;
+    }
+    if (length == 4 && memcmp(name, "data", 4) == 0) {
+        return 1;
+    }
+    return -1;
+}
+
+LzStatus lz_error_construct_named(LzVM *vm, uint8_t kind, size_t positional, const LzValue *argv,
+                                  size_t named_count, const char *names, size_t names_length,
+                                  const LzValue *named, LzValue *result) {
+    const char *kind_name = lz_vm_error_kind_name(vm, kind);
+    if (positional != 1) {
+        return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): wrong number of arguments (%zu given)",
+                               kind_name, positional);
+    }
+    LzValue given[2] = {lz_value_nil(), lz_value_nil()};
+    bool seen[2] = {false, false};
+    size_t position = 0;
+    for (size_t k = 0; k < named_count; k++) {
+        if (position > names_length) {
+            return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "malformed code: missing argument name");
+        }
+        size_t end = position;
+        while (end < names_length && names[end] != '\0') {
+            end++;
+        }
+        int slot = named_slot(names + position, end - position);
+        if (slot < 0) {
+            return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): unexpected named argument '%.*s' (an error takes cause and data)",
+                                   kind_name, (int)(end - position), names + position);
+        }
+        if (seen[slot]) {
+            return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): got multiple values for argument '%s'",
+                                   kind_name, slot == 0 ? "cause" : "data");
+        }
+        seen[slot] = true;
+        given[slot] = named[k];
+        position = end + 1;
+    }
+    return construct(vm, kind, &argv[0], &given[0], &given[1], result);
 }

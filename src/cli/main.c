@@ -257,6 +257,35 @@ static void report_runtime_error(const LzVM *vm, const LzSource *source,
         }
     }
 
+    /*
+     * The causes of the error that stopped the run. last_thrown is only trusted when it is the
+     * error this report is about: its "Kind: message" is the text of the failure.
+     */
+    enum { CAUSES_MAX = 8, CAUSE_TEXT = 256 };
+    char cause_text[CAUSES_MAX][CAUSE_TEXT];
+    const char *causes[CAUSES_MAX];
+    if (lz_value_is_error(&vm->last_thrown)) {
+        const LzError *top = (const LzError *)vm->last_thrown.as.object;
+        char head[CAUSE_TEXT];
+        int n = snprintf(head, sizeof head, "%s: %s", top->kind_name->data, top->message->data);
+        if (n > 0 && strcmp(head, vm->error) == 0) {
+            const LzValue *link = &top->cause;
+            while (lz_value_is_error(link)) {
+                if (report.cause_count == CAUSES_MAX) {
+                    report.causes_truncated = true;
+                    break;
+                }
+                const LzError *cause = (const LzError *)link->as.object;
+                (void)snprintf(cause_text[report.cause_count], CAUSE_TEXT, "%s: %s",
+                               cause->kind_name->data, cause->message->data);
+                causes[report.cause_count] = cause_text[report.cause_count];
+                report.cause_count++;
+                link = &cause->cause;
+            }
+            report.causes = causes;
+        }
+    }
+
     lz_report_write(source, &report, color, &err);
 }
 
