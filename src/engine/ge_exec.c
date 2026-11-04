@@ -835,6 +835,21 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 }
                 goto enter_callee;
             }
+            if (callee_object->type == LZ_OBJ_BOUND || callee_object->type == LZ_OBJ_CLASS) {
+                /* A method tied to its receiver enters a frame (like a closure); a class builds its object. */
+                bool entered = false;
+                SYNC_OUT();
+                status = lz_vm_call(vm, argc, pc + 1, ins->offset, &entered);
+                SYNC_IN();
+                if (status != LZ_OK) {
+                    goto fail;
+                }
+                if (entered) {
+                    goto enter_callee;
+                }
+                pc++;
+                break;
+            }
             if (GE_UNLIKELY(callee_object->type != LZ_OBJ_NATIVE)) {
                 goto run_plain;
             }

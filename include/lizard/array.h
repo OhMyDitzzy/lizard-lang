@@ -19,9 +19,14 @@ static inline LzArray *lz_value_as_array(const LzValue *value) {
  * A container held by another one records who holds it; see lz_containers_would_cycle.
  * Only arrays count their holders, so only dropping one of them is cheap here.
  */
+/* Defined with the instances (class.c): one container fewer holds this instance. */
+void lz_instance_drop_holder(const LzValue *item);
+
 static inline void lz_array_drop_holder(const LzValue *item) {
     if (lz_value_is_array(item)) {
         lz_value_as_array(item)->holders--;
+    } else if (item->type == LZ_VAL_OBJECT && item->as.object->type == LZ_OBJ_INSTANCE) {
+        lz_instance_drop_holder(item);
     }
 }
 
@@ -33,7 +38,7 @@ void lz_drop_container_holder(const LzValue *value);
 static inline bool lz_value_may_hold_container(const LzValue *value) {
     return value->type == LZ_VAL_OBJECT &&
            (value->as.object->type == LZ_OBJ_ARRAY || value->as.object->type == LZ_OBJ_DICT ||
-            value->as.object->type == LZ_OBJ_ERROR);
+            value->as.object->type == LZ_OBJ_ERROR || value->as.object->type == LZ_OBJ_INSTANCE);
 }
 
 /*

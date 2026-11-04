@@ -14,6 +14,7 @@ static const LzBuiltin builtins[] = {
     {"float", lz_builtin_float, 1, 1, LZ_KIND_FLOAT},
     {"string", lz_builtin_string, 1, 1, LZ_KIND_STRING},
     {"bool", lz_builtin_bool, 1, 1, LZ_KIND_BOOL},
+    {"identical", lz_builtin_identical, 2, 2, LZ_KIND_BOOL},
     {"len", lz_builtin_len, 1, 1, LZ_KIND_INT},
     {"push", lz_builtin_push, 2, 2, LZ_KIND_NIL},
     {"pop", lz_builtin_pop, 1, 1, LZ_KINDS_ANY},

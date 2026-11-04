@@ -111,7 +111,16 @@ typedef enum LzOpCode {
     LZ_OP_TRY_END,     /* closes the innermost handler (the try ended without an error) */
     LZ_OP_THROW,       /* pop an error value and fail with it; a thrown value keeps its trace */
     LZ_OP_ERROR_IS,    /* u8 error kind: pop an error, push whether it is of that kind or below */
-    LZ_OP_GET_FIELD    /* u16 constant name: pop an error, push its field (message, kind, trace) */
+    LZ_OP_GET_FIELD,   /* u16 constant name: pop an error or an object, push its field (message, kind, trace) */
+    /* Classes. Appended last so the earlier opcodes keep their numbers. */
+    LZ_OP_GET_FIELD_KEEP, /* u16 constant name: keep the object, push its field: [o] -> [o][field] */
+    LZ_OP_SET_FIELD,   /* u16 constant name: pop value, pop object: object.name = value */
+    LZ_OP_METHOD_LOOKUP, /* u16 name, u8 mode: [receiver][fallback] -> [receiver][callee]. An object
+                            answers with its class's member; anything else keeps the fallback (mode 0)
+                            or finds a function of that name (mode 1: [receiver][nil]) */
+    LZ_OP_GET_FIELD_W, /* u16 constant name: like GET_FIELD, for a value that is about to be changed in place
+                          (`o.items[i] = v`): a read-only field of another class is refused */
+    LZ_OP_CLASS_INIT   /* u16 constant (a class): run the initialisers of its constants, once */
 } LzOpCode;
 
 #define LZ_CONSTANTS_MAX 65536

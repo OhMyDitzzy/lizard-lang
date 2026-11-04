@@ -45,6 +45,7 @@ typedef struct LzFunction {
     LzUpvalueDesc *upvalues;
     LzString **param_names; /* param_count entries, plus the rest parameter's name when has_rest */
     uint32_t offset;        /* source offset of the definition, for diagnostics */
+    LzString *owner;        /* the class whose body this was compiled in (retained), or NULL */
     /*
      * Opaque per-function data owned by an execution engine (the Gecko Engine keeps
      * its translated program here). Released through engine_cache_free.

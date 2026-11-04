@@ -16,11 +16,11 @@ static LzStatus want_array_and_function(LzVM *vm, const char *name, const LzValu
                                         LzArray **array) {
     if (!lz_value_is_array(&argv[0])) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "%s(): expected an array, got %s", name,
-                               lz_kind_name(lz_kind_of(&argv[0])));
+                               lz_value_kind_name(&argv[0]));
     }
     if ((lz_kind_of(&argv[1]) & LZ_KIND_FUNCTION) == 0) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "%s(): expected a function, got %s", name,
-                               lz_kind_name(lz_kind_of(&argv[1])));
+                               lz_value_kind_name(&argv[1]));
     }
     *array = lz_value_as_array(&argv[0]);
     return lz_vm_charge_fuel(vm, lz_array_cost((*array)->count));

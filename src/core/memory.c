@@ -1,6 +1,7 @@
 #include "lizard/memory.h"
 
 #include "lizard/array.h"
+#include "lizard/class.h"
 #include "lizard/dict.h"
 #include "lizard/function.h"
 
@@ -145,6 +146,8 @@ uint32_t lz_heap_next_epoch(LzHeap *heap) {
                 lz_array_clear_mark(object);
             } else if (object->type == LZ_OBJ_DICT) {
                 lz_dict_clear_mark(object);
+            } else if (object->type == LZ_OBJ_INSTANCE) {
+                ((LzInstance *)object)->mark = 0;
             }
         }
         heap->epoch = 0;

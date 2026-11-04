@@ -29,7 +29,7 @@ LzStatus lz_method_format(LzVM *vm, int argc, const LzValue *argv, LzValue *resu
     (void)argc;
     if (argv[1].type != LZ_VAL_OBJECT || argv[1].as.object->type != LZ_OBJ_STRING) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "format(): the spec must be a string, got %s",
-                               lz_kind_name(lz_kind_of(&argv[1])));
+                               lz_value_kind_name(&argv[1]));
     }
     const LzString *spec_text = (const LzString *)argv[1].as.object;
     LzFormatSpec spec;
@@ -47,6 +47,10 @@ LzStatus lz_method_format(LzVM *vm, int argc, const LzValue *argv, LzValue *resu
     }
     if (done != LZ_FORMAT_OK) {
         lz_buffer_free(&text);
+        LzStatus text_status = LZ_OK;
+        if (lz_vm_take_text_status(vm, &text_status)) {
+            return text_status;
+        }
         return lz_vm_out_of_memory(vm);
     }
     return string_result(vm, &text, result);
@@ -59,6 +63,10 @@ LzStatus lz_method_to_debug(LzVM *vm, int argc, const LzValue *argv, LzValue *re
     LzWriter writer = lz_writer_from_buffer(&text);
     if (!lz_value_write_debug(&argv[0], &writer)) {
         lz_buffer_free(&text);
+        LzStatus text_status = LZ_OK;
+        if (lz_vm_take_text_status(vm, &text_status)) {
+            return text_status;
+        }
         return lz_vm_out_of_memory(vm);
     }
     return string_result(vm, &text, result);
@@ -80,7 +88,7 @@ LzStatus lz_method_is_empty(LzVM *vm, int argc, const LzValue *argv, LzValue *re
 static LzStatus end_item(LzVM *vm, const char *name, const LzValue *argv, bool last, LzValue *result) {
     if (!lz_value_is_array(&argv[0])) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "%s(): expected an array, got %s", name,
-                               lz_kind_name(lz_kind_of(&argv[0])));
+                               lz_value_kind_name(&argv[0]));
     }
     const LzArray *array = lz_value_as_array(&argv[0]);
     if (array->count == 0) {

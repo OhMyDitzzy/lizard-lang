@@ -14,13 +14,14 @@ typedef enum LzKind {
     LZ_KIND_FUNCTION = 1 << 5,
     LZ_KIND_ARRAY = 1 << 6,
     LZ_KIND_DICT = 1 << 7,
-    LZ_KIND_ERROR = 1 << 8
+    LZ_KIND_ERROR = 1 << 8,
+    LZ_KIND_INSTANCE = 1 << 9 /* an object made by a class; its kind name is the class name */
 } LzKind;
 
 #define LZ_KINDS_NUMBER (LZ_KIND_INT | LZ_KIND_FLOAT)
 #define LZ_KINDS_ANY                                                                               \
     (LZ_KIND_NIL | LZ_KIND_BOOL | LZ_KIND_INT | LZ_KIND_FLOAT | LZ_KIND_STRING | LZ_KIND_FUNCTION |   \
-     LZ_KIND_ARRAY | LZ_KIND_DICT | LZ_KIND_ERROR)
+     LZ_KIND_ARRAY | LZ_KIND_DICT | LZ_KIND_ERROR | LZ_KIND_INSTANCE)
 
 #define LZ_TYPE_MAX_LITERALS 8
 
@@ -54,6 +55,11 @@ typedef struct LzType {
      */
     const struct LzType *element;
     const struct LzType *value_element;
+    /*
+     * Only meaningful when kinds has LZ_KIND_INSTANCE: the interned name of the class the value
+     * must be an instance of, or NULL for an instance of any class (what `any` accepts).
+     */
+    const LzString *class_name;
 } LzType;
 
 typedef enum LzAssign {
@@ -64,6 +70,8 @@ typedef enum LzAssign {
 
 uint16_t lz_kind_of(const LzValue *value);
 const char *lz_kind_name(uint16_t kind);
+/* The name of a value's kind in messages: the class name for an instance, else lz_kind_name. */
+const char *lz_value_kind_name(const LzValue *value);
 
 LzType lz_type_of_kinds(uint16_t kinds);
 

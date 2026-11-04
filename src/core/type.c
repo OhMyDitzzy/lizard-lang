@@ -1,6 +1,7 @@
 #include "lizard/type.h"
 
 #include "lizard/array.h"
+#include "lizard/class.h"
 #include "lizard/dict.h"
 
 #include <stdio.h>
@@ -30,7 +31,11 @@ uint16_t lz_kind_of(const LzValue *value) {
             return LZ_KIND_ERROR;
         case LZ_OBJ_NATIVE:
         case LZ_OBJ_CLOSURE:
+        case LZ_OBJ_CLASS:
+        case LZ_OBJ_BOUND:
             return LZ_KIND_FUNCTION;
+        case LZ_OBJ_INSTANCE:
+            return LZ_KIND_INSTANCE;
         case LZ_OBJ_FUNCTION:
         case LZ_OBJ_UPVALUE:
             return 0; /* internal objects are never values a script can hold */
@@ -60,9 +65,18 @@ const char *lz_kind_name(uint16_t kind) {
         return "dict";
     case LZ_KIND_ERROR:
         return "error";
+    case LZ_KIND_INSTANCE:
+        return "object";
     default:
         return "value";
     }
+}
+
+const char *lz_value_kind_name(const LzValue *value) {
+    if (lz_value_is_instance(value)) {
+        return lz_value_as_instance(value)->cls->name->data;
+    }
+    return lz_kind_name(lz_kind_of(value));
 }
 
 LzType lz_type_of_kinds(uint16_t kinds) {
@@ -151,6 +165,8 @@ LzType lz_type_of_value(const LzValue *value) {
         } else if (lz_value_is_dict(value)) {
             type.element = lz_value_as_dict(value)->key_type;
             type.value_element = lz_value_as_dict(value)->value_type;
+        } else if (lz_value_is_instance(value)) {
+            type.class_name = lz_value_as_instance(value)->cls->name;
         }
     }
     return type;
@@ -168,6 +184,7 @@ LzType lz_type_widen(const LzType *type) {
     LzType widened = lz_type_of_kinds(lz_type_possible_kinds(type));
     widened.element = type->element;
     widened.value_element = type->value_element;
+    widened.class_name = type->class_name;
     return widened;
 }
 
@@ -216,6 +233,13 @@ bool lz_type_union(LzType *out, const LzType *a, const LzType *b) {
         result.element = b->element;
         result.value_element = b->value_element;
     }
+    if ((a->kinds & LZ_KIND_INSTANCE) != 0 && (b->kinds & LZ_KIND_INSTANCE) != 0) {
+        result.class_name = a->class_name == b->class_name ? a->class_name : NULL; /* any object */
+    } else if ((a->kinds & LZ_KIND_INSTANCE) != 0) {
+        result.class_name = a->class_name;
+    } else if ((b->kinds & LZ_KIND_INSTANCE) != 0) {
+        result.class_name = b->class_name;
+    }
     for (size_t i = 0; i < a->literal_count; i++) {
         if (!lz_type_add_literal(&result, &a->literals[i])) {
             return false;
@@ -239,6 +263,9 @@ bool lz_type_equal(const LzType *a, const LzType *b) {
     }
     if ((a->kinds & LZ_KIND_DICT) != 0 &&
         (a->element != b->element || a->value_element != b->value_element)) {
+        return false;
+    }
+    if ((a->kinds & LZ_KIND_INSTANCE) != 0 && a->class_name != b->class_name) {
         return false;
     }
     for (size_t i = 0; i < a->literal_count; i++) {
@@ -267,6 +294,9 @@ uint32_t lz_type_hash(const LzType *type) {
         hash ^= mix((uint64_t)(uintptr_t)type->element ^ 0x7777u);
         hash ^= mix((uint64_t)(uintptr_t)type->value_element ^ 0x8888u);
     }
+    if ((type->kinds & LZ_KIND_INSTANCE) != 0) {
+        hash ^= mix((uint64_t)(uintptr_t)type->class_name ^ 0x9999u);
+    }
     for (size_t i = 0; i < type->literal_count; i++) {
         const LzLiteral *literal = &type->literals[i];
         uint32_t part;
@@ -285,6 +315,12 @@ uint32_t lz_type_hash(const LzType *type) {
     }
     return hash;
 }
+
+#if defined(__GNUC__) || defined(__clang__)
+#define INSTANCE_KIND_UNLIKELY(kind) __builtin_expect((kind) == LZ_KIND_INSTANCE, 0)
+#else
+#define INSTANCE_KIND_UNLIKELY(kind) ((kind) == LZ_KIND_INSTANCE)
+#endif
 
 bool lz_type_matches(const LzType *type, const LzValue *value) {
     if (lz_value_is_array(value)) {
@@ -316,7 +352,12 @@ bool lz_type_matches(const LzType *type, const LzValue *value) {
         }
         return lz_dict_conform((LzDict *)dict, type->element, type->value_element);
     }
-    if ((lz_kind_of(value) & type->kinds) != 0) {
+    uint16_t value_kind = lz_kind_of(value);
+    if (INSTANCE_KIND_UNLIKELY(value_kind)) {
+        return (type->kinds & LZ_KIND_INSTANCE) != 0 &&
+               (type->class_name == NULL || type->class_name == lz_value_as_instance(value)->cls->name);
+    }
+    if ((value_kind & type->kinds) != 0) {
         return true;
     }
     for (size_t i = 0; i < type->literal_count; i++) {
@@ -340,9 +381,22 @@ static LzAssign element_assignable(const LzType *from, const LzType *to) {
 }
 
 LzAssign lz_type_assignable(const LzType *from, const LzType *to) {
-    uint16_t scalar = (uint16_t)~(LZ_KIND_ARRAY | LZ_KIND_DICT);
+    uint16_t scalar = (uint16_t)~(LZ_KIND_ARRAY | LZ_KIND_DICT | LZ_KIND_INSTANCE);
     bool always = (from->kinds & ~to->kinds & LZ_KINDS_ANY & scalar) == 0;
     bool overlap = (from->kinds & to->kinds & scalar) != 0;
+
+    if ((from->kinds & LZ_KIND_INSTANCE) != 0) {
+        if ((to->kinds & LZ_KIND_INSTANCE) == 0) {
+            always = false;
+        } else if (to->class_name == NULL || to->class_name == from->class_name) {
+            overlap = true;
+        } else if (from->class_name == NULL) {
+            always = false; /* some object, maybe of that class */
+            overlap = true;
+        } else {
+            always = false; /* stage 2: a subclass of to->class_name would overlap here */
+        }
+    }
 
     if ((from->kinds & LZ_KIND_ARRAY) != 0) {
         if ((to->kinds & LZ_KIND_ARRAY) == 0) {
@@ -532,6 +586,9 @@ void lz_type_describe(const LzType *type, const LzWriter *out) {
             lz_buffer_free(&item);
         }
     }
+    if ((kinds & LZ_KIND_INSTANCE) != 0 && type->class_name != NULL) {
+        PART(type->class_name->data); /* "any object" stays implied, like errors */
+    }
     if ((kinds & LZ_KIND_DICT) != 0) {
         if (!first) {
             write_text(out, " | ");
@@ -566,6 +623,8 @@ void lz_value_describe(const LzValue *value, const LzWriter *out) {
             write_text(out, "array");
         } else if (lz_value_is_dict(value)) {
             write_text(out, "dict");
+        } else if (lz_value_is_instance(value)) {
+            write_text(out, lz_value_as_instance(value)->cls->name->data);
         } else {
             write_text(out, "function");
         }

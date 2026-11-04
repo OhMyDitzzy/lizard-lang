@@ -548,6 +548,35 @@ println(1 << 4, -8 >> 1, n & 1 == 1)                      # 16 -4 true when n is
 - In a type, `|` is still a union (`let x: int | string = a | b` works: the first is a type, the
   second an expression).
 
+### Classes
+
+A class is your own kind of value. No `new`: call it like a function. `pub` fields are the
+arguments of the constructor; anything without `pub` is private.
+
+```lizard
+class Account {
+    pub read owner: string          # readable from outside, written only inside
+    pub read balance: int = 0
+    count: int = 0                  # private
+
+    pub fn deposit(self, amount: int) {
+        if amount <= 0 { throw ValueError("amount must be positive") }
+        self.balance += amount
+        self.count += 1
+    }
+    pub get deposits(self) => self.count
+}
+
+let a = Account("Sari")
+a.deposit(100)
+println(a)             # Account(owner: "Sari", balance: 100, count: 1)
+println(a.deposits)    # 1
+```
+
+Fields, methods, static functions, `get` properties, class constants, `init`, `to_string`,
+`==`, `identical`, `copy` and `with`: see [docs/CLASSES.md](docs/CLASSES.md) and
+`examples/classes.lz`.
+
 ### Strings
 
 One literal form covers plain, raw, multi-line and template strings: `[$][r]` + quotes.

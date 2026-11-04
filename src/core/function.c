@@ -20,6 +20,7 @@ LzFunction *lz_function_new(LzHeap *heap, LzString *name) {
     function->upvalues = NULL;
     function->param_names = NULL;
     function->offset = LZ_NO_OFFSET;
+    function->owner = NULL;
     function->engine_cache = NULL;
     function->engine_cache_free = NULL;
     return function;
@@ -103,6 +104,9 @@ void lz_function_free_storage(LzHeap *heap, LzFunction *function, bool release_r
         lz_chunk_free(heap, &function->chunk);
         if (function->name != NULL) {
             lz_object_release(heap, &function->name->base);
+        }
+        if (function->owner != NULL) {
+            lz_object_release(heap, &function->owner->base);
         }
         size_t slots = lz_function_slots(function);
         for (size_t i = 0; function->param_names != NULL && i < slots; i++) {

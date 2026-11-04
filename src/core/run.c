@@ -2,6 +2,7 @@
 
 #include "lizard/arith.h"
 #include "lizard/array.h"
+#include "lizard/class.h"
 #include "lizard/compare.h"
 #include "lizard/dict.h"
 #include "lizard/error.h"
@@ -94,11 +95,24 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
     } else if (type->literal_count > 0) {
         lz_value_describe(value, &actual_out);
     } else {
-        (void)lz_writer_write_cstr(&actual_out, lz_kind_name(lz_kind_of(value)));
+        (void)lz_writer_write_cstr(&actual_out, lz_value_kind_name(value));
     }
 
     char what[160];
     describe_subject(vm, subject, slot, what, sizeof what);
+    if (subject == CHECK_PARAM && slot == 0 && (type->kinds & LZ_KIND_INSTANCE) != 0 && type->class_name != NULL) {
+        const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
+        if (frame->closure != NULL && frame->closure->function->owner == type->class_name &&
+            frame->closure->function->param_count > 0 &&
+            strcmp(frame->closure->function->param_names[0]->data, "self") == 0) {
+            LzStatus own = lz_vm_set_error(vm, LZ_ERR_TYPE, "%s() needs a %s as its first argument, got %s",
+                                           lz_function_display_name(frame->closure->function),
+                                           type->class_name->data, actual.data != NULL ? actual.data : "?");
+            lz_buffer_free(&expected);
+            lz_buffer_free(&actual);
+            return own;
+        }
+    }
     LzStatus status = lz_vm_set_error(vm, LZ_ERR_TYPE, "type error: %s%sexpected %s, got %s", what,
                                       what[0] != '\0' ? ": " : "",
                                       expected.data != NULL ? expected.data : "?",
@@ -181,7 +195,7 @@ static LzStatus array_push(LzVM *vm) {
 
 static LzStatus not_indexable(LzVM *vm, const LzValue *value) {
     return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot index a value of type %s",
-                           lz_kind_name(lz_kind_of(value)));
+                           lz_value_kind_name(value));
 }
 
 /*
@@ -273,7 +287,7 @@ static LzStatus iter_length_op(LzVM *vm) {
         length = (int64_t)lz_value_as_dict(value)->count;
     } else {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
-                               lz_kind_name(lz_kind_of(value)));
+                               lz_value_kind_name(value));
     }
     pop(vm);
     return push(vm, lz_value_int(length));
@@ -319,7 +333,7 @@ static LzStatus iter_next_op(LzVM *vm) {
         item = dict->entries[at].key; /* `for k in d` walks the keys */
     } else {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
-                               lz_kind_name(lz_kind_of(container)));
+                               lz_value_kind_name(container));
     }
 
     /*
@@ -384,7 +398,7 @@ static LzStatus iter_pair_op(LzVM *vm) {
         second = array->items[at];
     } else {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
-                               lz_kind_name(lz_kind_of(container)));
+                               lz_value_kind_name(container));
     }
 
     lz_value_retain(&first);
@@ -437,7 +451,7 @@ static bool range_bounds_int(LzVM *vm, const LzValue *start, const LzValue *end,
         return true;
     }
     (void)lz_vm_set_error(vm, LZ_ERR_TYPE, "range bounds must be ints, got %s",
-                          lz_kind_name(lz_kind_of(offending)));
+                          lz_value_kind_name(offending));
     return false;
 }
 
@@ -532,7 +546,7 @@ static LzStatus in_op(LzVM *vm) {
             return lz_vm_set_error(vm, LZ_ERR_TYPE,
                                    "the left side of 'in' must be a string when the right side "
                                    "is a string, got %s",
-                                   lz_kind_name(lz_kind_of(left)));
+                                   lz_value_kind_name(left));
         }
         uint64_t width = needle->length < 64 ? needle->length / 8 + 1 : 9;
         LzStatus charged = lz_vm_charge_fuel(vm, ((uint64_t)hay->length / 64 + 1) * width);
@@ -542,7 +556,7 @@ static LzStatus in_op(LzVM *vm) {
         found = bytes_contain(hay, needle);
     } else {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot use 'in' with %s",
-                               lz_kind_name(lz_kind_of(right)));
+                               lz_value_kind_name(right));
     }
 
     pop(vm);
@@ -570,7 +584,7 @@ static LzStatus in_range_op(LzVM *vm, bool inclusive, bool lenient) {
         }
         return lz_vm_set_error(vm, LZ_ERR_TYPE,
                                "the value tested with a range must be a number, got %s",
-                               lz_kind_name(lz_kind_of(value)));
+                               lz_value_kind_name(value));
     }
     LzValue above;
     LzValue below;
@@ -697,6 +711,7 @@ static LzStatus throw_op(LzVM *vm) {
     }
     vm->thrown = thrown;
     vm->error_suggestions.count = 0;
+    vm->error_help[0] = '\0';
     (void)snprintf(vm->error, sizeof vm->error, "%s: %.*s",
                    error->kind_name->data, (int)error->message->length,
                    error->message->data);
@@ -714,8 +729,91 @@ static LzStatus error_is_op(LzVM *vm, uint8_t kind) {
     return push(vm, lz_value_bool(is));
 }
 
+static const LzString *current_owner(const LzVM *vm) {
+    const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
+    return frame->closure != NULL ? frame->closure->function->owner : NULL;
+}
+
+/* GET_FIELD_KEEP and the object case of GET_FIELD. */
+static LzStatus member_get_op(LzVM *vm, const LzString *name, bool keep, bool for_write) {
+    LzValue target = vm->stack[vm->stack_count - 1];
+    LzValue found = lz_value_nil();
+    lz_value_retain(&target); /* a getter runs script code that may use the stack */
+    LzStatus status = lz_vm_member_get(vm, current_owner(vm), &target, name, &found, for_write);
+    if (status != LZ_OK) {
+        lz_value_release(&vm->heap, &target);
+        return status;
+    }
+    if (keep) {
+        if (vm->stack_count >= LZ_STACK_MAX) {
+            lz_value_release(&vm->heap, &found);
+            lz_value_release(&vm->heap, &target);
+            return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow");
+        }
+        vm->stack[vm->stack_count++] = found;
+    } else {
+        LzValue old = vm->stack[vm->stack_count - 1];
+        vm->stack[vm->stack_count - 1] = found;
+        lz_value_release(&vm->heap, &old);
+    }
+    lz_value_release(&vm->heap, &target);
+    return LZ_OK;
+}
+
+static LzStatus set_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
+    LzString *name = NULL;
+    LzStatus status = read_name(vm, chunk, ip, &name);
+    if (status != LZ_OK) {
+        return status;
+    }
+    if (vm->stack_count < 2) {
+        return malformed(vm, "stack underflow");
+    }
+    LzValue value = vm->stack[vm->stack_count - 1];
+    LzValue target = vm->stack[vm->stack_count - 2];
+    if (!lz_value_is_instance(&target) && !lz_value_is_class(&target)) {
+        return lz_vm_set_error(vm, LZ_ERR_TYPE, "cannot assign to field '%s' of %s", name->data,
+                               lz_value_kind_name(&target));
+    }
+    status = lz_vm_member_set(vm, current_owner(vm), &target, name, &value);
+    if (status != LZ_OK) {
+        return status;
+    }
+    pop(vm);
+    pop(vm);
+    return LZ_OK;
+}
+
+static LzStatus method_lookup_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
+    LzString *name = NULL;
+    LzStatus status = read_name(vm, chunk, ip, &name);
+    if (status != LZ_OK) {
+        return status;
+    }
+    if (*ip >= chunk->count) {
+        return malformed(vm, "truncated operand");
+    }
+    int mode = chunk->code[(*ip)++];
+    if (vm->stack_count < 2) {
+        return malformed(vm, "stack underflow");
+    }
+    return lz_vm_method_lookup(vm, current_owner(vm), name, mode, vm->stack_count - 2);
+}
+
+static LzStatus class_init_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
+    const LzValue *constant = NULL;
+    LzStatus status = read_constant(vm, chunk, ip, &constant);
+    if (status != LZ_OK) {
+        return status;
+    }
+    if (!lz_value_is_class(constant)) {
+        return malformed(vm, "class expected");
+    }
+    return lz_class_run_consts(vm, lz_value_as_class(constant));
+}
+
 /* `e.message`, `e.kind`, `e.trace`, `e.cause`, `e.data`: the fields of an error, read only. */
-static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
+static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool write_check) {
     LzString *name = NULL;
     LzStatus status = read_name(vm, chunk, ip, &name);
     if (status != LZ_OK) {
@@ -725,9 +823,12 @@ static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
         return malformed(vm, "stack underflow");
     }
     const LzValue *top = &vm->stack[vm->stack_count - 1];
+    if (lz_value_is_instance(top) || lz_value_is_class(top)) {
+        return member_get_op(vm, name, false, write_check);
+    }
     if (!lz_value_is_error(top)) {
         return lz_vm_set_error(vm, LZ_ERR_TYPE, "%s has no field '%s'",
-                               lz_kind_name(lz_kind_of(top)), name->data);
+                               lz_value_kind_name(top), name->data);
     }
     LzError *error = (LzError *)top->as.object;
     LzValue field;
@@ -924,7 +1025,7 @@ static LzStatus array_extend(LzVM *vm) {
     }
     if (!lz_value_is_array(source)) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot spread a value of type %s",
-                               lz_kind_name(lz_kind_of(source)));
+                               lz_value_kind_name(source));
     }
     const LzArray *items = lz_value_as_array(source);
     LzStatus status = lz_vm_charge_fuel(vm, lz_array_cost(items->count));
@@ -1444,7 +1545,35 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         break;
     }
     case LZ_OP_GET_FIELD:
-        status = get_field_op(vm, chunk, &ip);
+        status = get_field_op(vm, chunk, &ip, false);
+        break;
+    case LZ_OP_GET_FIELD_W:
+        status = get_field_op(vm, chunk, &ip, true);
+        break;
+    case LZ_OP_GET_FIELD_KEEP: {
+        LzString *name = NULL;
+        status = read_name(vm, chunk, &ip, &name);
+        if (status == LZ_OK) {
+            if (vm->stack_count == 0) {
+                status = malformed(vm, "stack underflow");
+            } else if (!lz_value_is_instance(&vm->stack[vm->stack_count - 1]) &&
+                       !lz_value_is_class(&vm->stack[vm->stack_count - 1])) {
+                status = lz_vm_set_error(vm, LZ_ERR_TYPE, "%s has no field '%s'",
+                                         lz_value_kind_name(&vm->stack[vm->stack_count - 1]), name->data);
+            } else {
+                status = member_get_op(vm, name, true, false);
+            }
+        }
+        break;
+    }
+    case LZ_OP_SET_FIELD:
+        status = set_field_op(vm, chunk, &ip);
+        break;
+    case LZ_OP_METHOD_LOOKUP:
+        status = method_lookup_op(vm, chunk, &ip);
+        break;
+    case LZ_OP_CLASS_INIT:
+        status = class_init_op(vm, chunk, &ip);
         break;
     case LZ_OP_DUP:
         if (vm->stack_count == 0) {

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "lizard/array.h"
+#include "lizard/class.h"
 #include "lizard/dict.h"
 #include "lizard/format.h"
 #include "lizard/function.h"
@@ -102,6 +103,7 @@ typedef struct FuncState {
     ConstantIndex saved_constants;
     size_t saved_local_count;
     bool saved_terminated;
+    bool static_member;   /* a function without `self` in a class body: `self` is not available */
 } FuncState;
 
 typedef struct LoopFrame LoopFrame;
@@ -193,6 +195,13 @@ typedef struct Parser {
     ErrorDecl *error_decls; /* the `error` declarations of the file, in order, see prescan_errors */
     size_t error_decl_count;
     size_t error_decl_capacity;
+    /* Classes. */
+    LzString *class_name;     /* the class whose body is being compiled, or NULL */
+    bool member_pending;      /* the next compile_function is a member of that class */
+    bool member_static;       /* ...and it has no `self` */
+    bool in_default;          /* compiling a field default or a constant initialiser */
+    LzString *classes[64];    /* the classes declared so far: valid names in a type */
+    size_t class_count;
 } Parser;
 
 /*
@@ -249,6 +258,9 @@ typedef struct Expr {
     bool is_call;   /* the expression ends in a call: nothing is left on the stack */
     bool dict_value; /* `any` in type, but known to hold a dict */
     bool array_value; /* `any` in type, but known to hold an array */
+    bool base_member; /* ...an index whose container came from a member: base_pos is that GET_FIELD */
+    size_t base_pos;
+    bool is_member; /* the expression is `a.name`: its last instruction is a GET_FIELD at op_pos */
     LzToken start;  /* the first token of the expression, for an error about the whole of it */
 } Expr;
 
@@ -268,6 +280,7 @@ static void assignment_statement(Parser *parser);
 static void store_variable(Parser *parser, LzString *name, const Symbol *symbol,
                            const LzToken *at);
 static void step_statement(Parser *parser);
+static bool member_assignment(Parser *parser, const Expr *target, bool finish);
 static void declare_variable(Parser *parser, const LzToken *name_token, LzString *name,
                              bool is_const, const LzType *type);
 static void patch_continues(Parser *parser, LoopFrame *loop);
@@ -823,6 +836,9 @@ static Expr expr_of(LzType type) {
     expr.dict_value = false;
     expr.array_value = false;
     expr.is_call = false;
+    expr.is_member = false;
+    expr.base_member = false;
+    expr.base_pos = 0;
     memset(&expr.start, 0, sizeof expr.start);
     return expr;
 }
@@ -1176,6 +1192,13 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
         }
         const Alias *alias = find_alias(parser, id);
         if (alias == NULL) {
+            for (size_t i = 0; i < parser->class_count; i++) {
+                if (parser->classes[i] == id) {
+                    *out = lz_type_of_kinds(LZ_KIND_INSTANCE);
+                    out->class_name = id; /* stage 2: a subclass will match too */
+                    return true;
+                }
+            }
             LzSuggestions close = suggest_types(parser, &token);
             error_with_name_suggest(parser, &token, "unknown type '", "'", "not a known type",
                                     &close);
@@ -1687,6 +1710,20 @@ static Expr variable_at(Parser *parser, const LzToken *token) {
         found.dict_value = symbol->dict_value;
         found.array_value = symbol->array_value;
         return found;
+    }
+
+    if (name->length == 4 && memcmp(name->data, "self", 4) == 0) {
+        if (parser->in_default) {
+            error_at(parser, token, "a field default cannot use 'self'; set it in init() instead");
+            return any_expr();
+        }
+        for (const FuncState *f = parser->fs; f != NULL; f = f->enclosing) {
+            if (f->static_member) {
+                error_at(parser, token,
+                         "undefined name 'self' (static functions have no self; add 'self' as the first parameter)");
+                return any_expr();
+            }
+        }
     }
 
     const LzValue *defined = lz_vm_lookup(parser->vm, name);
@@ -2255,6 +2292,8 @@ static Expr subscript(Parser *parser, Expr left) {
     result.dict_value = dict;
     result.array_value = !dict && array && left.type.element != NULL;
     result.is_index = true;
+    result.base_member = left.is_member;
+    result.base_pos = left.op_pos;
     result.op_pos = parser->chunk->count;
     /*
      * `a[i] op= v` needs the array and the index under the item, so that OP_SET_INDEX
@@ -2672,7 +2711,7 @@ static Expr call_special(Parser *parser, Expr callee, const LzToken *paren, bool
                 spread = true;
             } else if (check(parser, LZ_TOKEN_IDENTIFIER) &&
                        (next_token_type(parser) == LZ_TOKEN_EQUAL ||
-                        (makes_error && next_token_type(parser) == LZ_TOKEN_COLON))) {
+                        ((makes_error || parser->vm->has_classes) && next_token_type(parser) == LZ_TOKEN_COLON))) {
                 advance(parser);
                 LzToken name_token = parser->previous;
                 LzString *name = intern_token(parser, &name_token);
@@ -2800,7 +2839,7 @@ static Expr call_args(Parser *parser, Expr callee, bool receiver) {
     }
     /* The function that makes errors also takes `cause: e` and `data: d`. */
     bool makes_error = callee.native != NULL && !receiver && lz_native_error_kind(callee.native, NULL);
-    if (call_has_special_args(parser, makes_error)) {
+    if (call_has_special_args(parser, makes_error || parser->vm->has_classes)) {
         return call_special(parser, callee, &paren, receiver);
     }
 
@@ -2845,14 +2884,27 @@ static Expr dot_call(Parser *parser, Expr receiver) {
     advance(parser);
     LzToken name = parser->previous;
     if (!check(parser, LZ_TOKEN_LEFT_PAREN)) {
-        /* `value.name` with no parentheses is a field. Only errors have any: message, kind, trace, cause, data. */
-        if (check(parser, LZ_TOKEN_EQUAL) || is_compound(parser->current.type)) {
+        /* `value.name` with no parentheses is a field of an error, or of an object. */
+        bool classes = parser->vm->has_classes;
+        if (!classes && (check(parser, LZ_TOKEN_EQUAL) || is_compound(parser->current.type))) {
             error_at_current(parser, "cannot assign to a field of an error");
             return any_expr();
         }
         LzString *field = intern_token(parser, &name);
         if (field == NULL) {
             return any_expr();
+        }
+        if (classes) {
+            Expr member = any_expr();
+            member.is_member = true;
+            if (is_compound(parser->current.type)) {
+                emit_named(parser, LZ_OP_GET_FIELD_KEEP, field, name.offset);
+                member.op_pos = parser->chunk->count - 3;
+            } else {
+                member.op_pos = parser->chunk->count;
+                emit_named(parser, LZ_OP_GET_FIELD, field, name.offset);
+            }
+            return member;
         }
         emit_named(parser, LZ_OP_GET_FIELD, field, name.offset);
         if (field->length == 7 && memcmp(field->data, "message", 7) == 0) {
@@ -2881,14 +2933,32 @@ static Expr dot_call(Parser *parser, Expr receiver) {
         method = lz_table_get(&parser->vm->methods, interned);
     }
     Expr callee;
+    bool classes = parser->vm->has_classes;
+    int lookup_mode = 0;
     if (method != NULL) {
         (void)emit_constant(parser, *method);
         callee = expr_of(lz_type_of_kinds(LZ_KIND_FUNCTION));
         callee.native = (const LzNative *)method->as.object;
+    } else if (classes && interned != NULL && find_symbol(parser, interned) == NULL &&
+               lz_vm_lookup(parser->vm, interned) == NULL) {
+        /* No function of that name is known: an object's own method may answer, else the lookup
+         * fails at run time like an undefined name does. */
+        record_name_hint(parser, &name, true, false, true);
+        emit_op_at(parser, LZ_OP_NIL, name.offset);
+        callee = any_expr();
+        lookup_mode = 1;
     } else {
         parser->method_name = true;
         callee = variable(parser);
         parser->method_name = false;
+    }
+    if (classes && interned != NULL) {
+        /* The receiver may be an object or a class: its own member beats the callee above. */
+        emit_op_at(parser, LZ_OP_METHOD_LOOKUP, name.offset);
+        emit_u16_at(parser, make_constant(parser, lz_value_object(&interned->base)), name.offset);
+        emit_byte_at(parser, (uint8_t)lookup_mode, name.offset);
+        callee.sig = NULL;
+        callee.native = NULL;
     }
     emit_op_at(parser, LZ_OP_SWAP, name.offset);
     advance(parser); /* the '(' */
@@ -2897,6 +2967,12 @@ static Expr dot_call(Parser *parser, Expr receiver) {
     bool dict_receiver = receiver.dict_value ||
                          lz_type_possible_kinds(&receiver.type) == LZ_KIND_DICT;
     Expr result = call_args(parser, callee, true);
+    if (classes) {
+        bool is_call = result.is_call;
+        result = any_expr(); /* the receiver's own method may return anything */
+        result.is_call = is_call;
+        return result;
+    }
     result.dict_value = dict_receiver && callee.native != NULL &&
                         (callee.native->result_kinds & LZ_KIND_DICT) != 0;
     return result;
@@ -5129,6 +5205,9 @@ static void step_statement(Parser *parser) {
     }
     LzToken start = parser->current;
     Expr expr = expression(parser);
+    if (member_assignment(parser, &expr, false)) {
+        return;
+    }
     if (!expr.is_call) {
         error_at(parser, &start, "expected an assignment or a call in the loop step");
         return;
@@ -5146,6 +5225,9 @@ static void expression_statement(Parser *parser) {
     if ((plain || compound) && target.is_index && parser->fatal == LZ_OK &&
         parser->chunk->count == target.op_pos + 1) {
         uint32_t index_offset = parser->chunk->offsets[target.op_pos];
+        if (target.base_member && parser->chunk->code[target.base_pos] == LZ_OP_GET_FIELD) {
+            parser->chunk->code[target.base_pos] = LZ_OP_GET_FIELD_W; /* the container is changed in place */
+        }
         LzToken op_token = parser->current;
         LzTokenType assign = op_token.type;
         advance(parser);
@@ -5176,6 +5258,10 @@ static void expression_statement(Parser *parser) {
         }
         emit_op_at(parser, LZ_OP_SET_INDEX, index_offset);
         end_statement(parser);
+        return;
+    }
+
+    if (member_assignment(parser, &target, true)) {
         return;
     }
 
@@ -5230,8 +5316,16 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
         return result;
     }
     function->offset = offset;
+    bool is_member = parser->member_pending;
+    bool is_static_member = parser->member_pending && parser->member_static;
+    parser->member_pending = false;
+    if (parser->class_name != NULL) {
+        function->owner = parser->class_name; /* closures inside inherit it: "inside the class" is lexical */
+        lz_object_retain(&function->owner->base);
+    }
 
     FuncState fs;
+    fs.static_member = is_static_member;
     fs.enclosing = parser->fs;
     fs.function = function;
     fs.first_symbol = parser->symbol_count;
@@ -5280,6 +5374,13 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
                 break;
             }
             LzType declared = lz_type_of_kinds(LZ_KINDS_ANY);
+            bool is_self = is_member && param->length == 4 && memcmp(param->data, "self", 4) == 0;
+            if (is_self && param_count != 0) {
+                error_at(parser, &param_token, "'self' must be the first parameter of a method");
+            } else if (is_self && !rest) {
+                declared = lz_type_of_kinds(LZ_KIND_INSTANCE); /* Point.sum(x) checks x is a Point */
+                declared.class_name = parser->class_name;
+            }
             if (match(parser, LZ_TOKEN_COLON)) {
                 (void)parse_type_union(parser, &declared);
             }
@@ -5432,6 +5533,9 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
     (void)fs.saved_terminated;
 
     /* In the enclosing function: build the value. A function that captures nothing is made once. */
+    if (fs.upvalue_count != 0 && is_member) {
+        error_at_previous(parser, "a class member cannot use variables of an enclosing function");
+    }
     if (fs.upvalue_count == 0) {
         LzClosure *closure = lz_closure_new(heap, function);
         if (closure == NULL) {
@@ -5451,6 +5555,429 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
 
     result.sig = sig;
     return result;
+}
+
+
+/* ---- Classes ---- */
+
+static LzToken peek_token(const Parser *parser, int count) {
+    LzLexer ahead = parser->lexer;
+    LzToken token = lz_lexer_next(&ahead);
+    for (int i = 1; i < count; i++) {
+        token = lz_lexer_next(&ahead);
+    }
+    return token;
+}
+
+/* A function of no parameters that evaluates one expression: a field default or a constant. */
+static bool compile_thunk(Parser *parser, LzString *name, uint32_t offset, LzValue *out) {
+    LzHeap *heap = &parser->vm->heap;
+    LzFunction *function = lz_function_new(heap, name);
+    FuncSig *sig = function != NULL ? new_sig(parser, name) : NULL;
+    if (function == NULL || sig == NULL) {
+        if (function != NULL) {
+            lz_object_release(heap, &function->base);
+        } else {
+            fail(parser, lz_vm_out_of_memory(parser->vm));
+        }
+        return false;
+    }
+    function->offset = offset;
+    function->owner = parser->class_name;
+    lz_object_retain(&function->owner->base);
+
+    FuncState fs;
+    memset(&fs, 0, sizeof fs);
+    fs.enclosing = parser->fs;
+    fs.function = function;
+    fs.first_symbol = parser->symbol_count;
+    fs.self_symbol = SIZE_MAX;
+    fs.sig = sig;
+    fs.saved_chunk = parser->chunk;
+    fs.saved_constants = parser->constants;
+    fs.saved_local_count = parser->local_count;
+    fs.saved_terminated = parser->terminated;
+    parser->chunk = &function->chunk;
+    memset(&parser->constants, 0, sizeof parser->constants);
+    parser->local_count = 0;
+    parser->fs = &fs;
+    parser->nesting++;
+    begin_scope(parser);
+    bool was_default = parser->in_default;
+    parser->in_default = true;
+
+    uint32_t at = parser->current.offset;
+    (void)expression(parser);
+    emit_op_at(parser, LZ_OP_RETURN, at);
+
+    parser->in_default = was_default;
+    while (parser->symbol_count > fs.first_symbol) {
+        Symbol *symbol = &parser->symbols[--parser->symbol_count];
+        if (symbol->kind == SYMBOL_CONSTANT) {
+            lz_value_release(heap, &symbol->value);
+        }
+    }
+    parser->scope_depth--;
+    parser->nesting--;
+    if (!lz_function_set_params(function, NULL, 0, 0, false) ||
+        !lz_function_set_upvalues(function, fs.upvalues, fs.upvalue_count)) {
+        fail(parser, LZ_ERR_MEMORY);
+    }
+    free(parser->constants.slots);
+    parser->chunk = fs.saved_chunk;
+    parser->constants = fs.saved_constants;
+    parser->local_count = fs.saved_local_count;
+    parser->fs = fs.enclosing;
+    parser->terminated = false;
+
+    bool ok = false;
+    LzClosure *closure = lz_closure_new(heap, function);
+    if (closure == NULL) {
+        fail(parser, lz_vm_out_of_memory(parser->vm));
+    } else {
+        *out = lz_value_object(&closure->base); /* the creation reference moves to the caller */
+        ok = true;
+    }
+    lz_object_release(heap, &function->base);
+    return ok;
+}
+
+static const char *const unsupported_member_words[] = {"override", "operator", "trait", "extend", "super"};
+
+static bool is_unsupported_word(const Parser *parser, const LzToken *token) {
+    for (size_t i = 0; i < sizeof unsupported_member_words / sizeof *unsupported_member_words; i++) {
+        if (word_is(parser, token, unsupported_member_words[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Makes the closure the function just compiled became (the one constant it left in the code). */
+static bool take_member_closure(Parser *parser, LzValue *out) {
+    LzChunk *chunk = parser->chunk;
+    if (parser->panic || parser->fatal != LZ_OK) {
+        return false;
+    }
+    if (chunk->count < 3 || chunk->code[chunk->count - 3] != LZ_OP_CONSTANT) {
+        return false;
+    }
+    uint16_t index = (uint16_t)((chunk->code[chunk->count - 2] << 8) | chunk->code[chunk->count - 1]);
+    if (index >= chunk->constant_count || !lz_value_is_closure(&chunk->constants[index])) {
+        return false;
+    }
+    *out = chunk->constants[index];
+    lz_value_retain(out);
+    lz_chunk_truncate(&parser->vm->heap, chunk, chunk->count - 3, chunk->constant_count);
+    return true;
+}
+
+static LzString *qualified_name(Parser *parser, const LzString *cls, const LzString *member) {
+    char text[200];
+    int n = snprintf(text, sizeof text, "%s.%s", cls->data, member->data);
+    if (n < 0) {
+        return NULL;
+    }
+    return lz_vm_intern(parser->vm, text, (size_t)n < sizeof text ? (size_t)n : sizeof text - 1);
+}
+
+static void class_member(Parser *parser, LzClass *cls) {
+    LzToken first = parser->current;
+    LzVisibility vis = LZ_VIS_PRIVATE;
+    bool read_only = false;
+    bool has_pub = false;
+
+    if (is_unsupported_word(parser, &first)) {
+        LzTokenType after = next_token_type(parser);
+        if (after != LZ_TOKEN_COLON && after != LZ_TOKEN_EQUAL && after != LZ_TOKEN_NEWLINE &&
+            after != LZ_TOKEN_RIGHT_BRACE) {
+            char word[32];
+            char message[80];
+            token_text(parser, &first, word, sizeof word);
+            (void)snprintf(message, sizeof message, "'%s' is not supported yet", word);
+            error_at(parser, &first, message);
+            return;
+        }
+    }
+    if (word_is(parser, &first, "pub")) {
+        LzTokenType after = next_token_type(parser);
+        if (after != LZ_TOKEN_COLON && after != LZ_TOKEN_EQUAL && after != LZ_TOKEN_NEWLINE) {
+            advance(parser);
+            has_pub = true;
+            vis = LZ_VIS_PUB;
+            LzToken word = parser->current;
+            if (word_is(parser, &word, "read")) {
+                LzTokenType next = next_token_type(parser);
+                if (next == LZ_TOKEN_IDENTIFIER) {
+                    advance(parser);
+                    vis = LZ_VIS_PUB_READ;
+                    read_only = true;
+                }
+            }
+        }
+    }
+
+    LzToken head = parser->current;
+    LzMemberKind kind = LZ_MEMBER_FIELD;
+    if (head.type == LZ_TOKEN_FN && next_token_type(parser) == LZ_TOKEN_IDENTIFIER) {
+        kind = LZ_MEMBER_METHOD;
+        advance(parser);
+    } else if (head.type == LZ_TOKEN_CONST) {
+        kind = LZ_MEMBER_CONST;
+        advance(parser);
+    } else if (word_is(parser, &head, "get") && next_token_type(parser) == LZ_TOKEN_IDENTIFIER &&
+               peek_token(parser, 2).type == LZ_TOKEN_LEFT_PAREN) {
+        kind = LZ_MEMBER_GETTER;
+        advance(parser);
+    } else if (head.type != LZ_TOKEN_IDENTIFIER) {
+        error_at(parser, &head, "only fields, functions, properties and constants can appear in a class body");
+        return;
+    } else if (next_token_type(parser) != LZ_TOKEN_COLON && next_token_type(parser) != LZ_TOKEN_EQUAL &&
+               next_token_type(parser) != LZ_TOKEN_NEWLINE && next_token_type(parser) != LZ_TOKEN_RIGHT_BRACE &&
+               next_token_type(parser) != LZ_TOKEN_SEMICOLON) {
+        error_at(parser, &head, "only fields, functions, properties and constants can appear in a class body");
+        return;
+    }
+    if (read_only && kind != LZ_MEMBER_FIELD) {
+        error_at(parser, &first, "'read' only applies to fields");
+        return;
+    }
+    (void)has_pub;
+
+    if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+        error_at_current(parser, kind == LZ_MEMBER_FIELD ? "expected a field name" : "expected a name");
+        return;
+    }
+    advance(parser);
+    LzToken name_token = parser->previous;
+    LzString *name = intern_token(parser, &name_token);
+    if (name == NULL) {
+        return;
+    }
+    if (lz_class_find(cls, name) != NULL) {
+        char message[128];
+        char text[48];
+        token_text(parser, &name_token, text, sizeof text);
+        (void)snprintf(message, sizeof message, "'%s' is declared twice in %s", text, cls->name->data);
+        parser->panic = true;
+        record_full(parser, name_token.offset, name_token.length, message, "declared again here", NULL);
+        return;
+    }
+
+    LzMember *member = NULL;
+    LzHeap *heap = &parser->vm->heap;
+    (void)heap;
+    if (kind == LZ_MEMBER_FIELD) {
+        if (cls->field_count >= LZ_CLASS_FIELDS_MAX) {
+            error_at(parser, &name_token, "a class can have at most 64 fields");
+            return;
+        }
+        if (!lz_class_add_member(cls, name, kind, vis, name_token.offset, &member)) {
+            fail(parser, lz_vm_out_of_memory(parser->vm));
+            return;
+        }
+        size_t index = cls->member_count - 1;
+        if (match(parser, LZ_TOKEN_COLON)) {
+            LzType declared;
+            if (parse_type_union(parser, &declared)) {
+                cls->members[index].type = declared;
+            }
+        }
+        if (match(parser, LZ_TOKEN_EQUAL)) {
+            skip_newlines(parser);
+            LzString *thunk_name = qualified_name(parser, cls->name, name);
+            LzValue thunk = lz_value_nil();
+            if (thunk_name != NULL && compile_thunk(parser, thunk_name, name_token.offset, &thunk)) {
+                cls->members[index].thunk = thunk;
+            }
+        }
+        end_statement(parser);
+        return;
+    }
+    if (kind == LZ_MEMBER_CONST) {
+        if (!lz_class_add_member(cls, name, kind, vis, name_token.offset, &member)) {
+            fail(parser, lz_vm_out_of_memory(parser->vm));
+            return;
+        }
+        size_t index = cls->member_count - 1;
+        consume(parser, LZ_TOKEN_EQUAL, "expected '=' after the constant name");
+        skip_newlines(parser);
+        LzString *thunk_name = qualified_name(parser, cls->name, name);
+        LzValue thunk = lz_value_nil();
+        if (!parser->panic && thunk_name != NULL && compile_thunk(parser, thunk_name, name_token.offset, &thunk)) {
+            cls->members[index].thunk = thunk;
+        }
+        end_statement(parser);
+        return;
+    }
+
+    /* A method, a static function or a property: a function. `self` first makes it a method. */
+    bool has_self = false;
+    if (check(parser, LZ_TOKEN_LEFT_PAREN)) {
+        LzToken param = peek_token(parser, 1);
+        has_self = word_is(parser, &param, "self");
+    }
+    if (kind == LZ_MEMBER_GETTER) {
+        if (!has_self) {
+            error_at(parser, &name_token, "a 'get' property takes only 'self'");
+            return;
+        }
+    } else if (!has_self) {
+        kind = LZ_MEMBER_STATIC;
+    }
+    if (!lz_class_add_member(cls, name, kind, vis, name_token.offset, &member)) {
+        fail(parser, lz_vm_out_of_memory(parser->vm));
+        return;
+    }
+    size_t index = cls->member_count - 1;
+    LzString *full = qualified_name(parser, cls->name, name);
+    parser->member_pending = true;
+    parser->member_static = !has_self;
+    (void)compile_function(parser, full, SIZE_MAX, name_token.offset);
+    parser->member_pending = false;
+    LzValue closure = lz_value_nil();
+    if (take_member_closure(parser, &closure)) {
+        cls->members[index].value = closure;
+        const LzFunction *function = lz_value_as_closure(&closure)->function;
+        if (kind == LZ_MEMBER_GETTER && function->param_count != 1) {
+            error_at(parser, &name_token, "a 'get' property takes only 'self'");
+        } else if (kind == LZ_MEMBER_METHOD && strcmp(name->data, "init") == 0 && function->param_count != 1) {
+            error_at(parser, &name_token, "init() takes only 'self'");
+        }
+    }
+    end_statement(parser);
+}
+
+/* After a mistake in the head of a class: skip to its `{` and past the matching `}`. */
+static void skip_class_body(Parser *parser) {
+    while (!check(parser, LZ_TOKEN_EOF) && !check(parser, LZ_TOKEN_LEFT_BRACE) && !check(parser, LZ_TOKEN_NEWLINE)) {
+        advance(parser);
+    }
+    if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
+        return;
+    }
+    int target = parser->bracket_depth;
+    advance(parser);
+    while (parser->fatal == LZ_OK && !check(parser, LZ_TOKEN_EOF) && parser->bracket_depth > target) {
+        advance(parser);
+    }
+}
+
+static void class_declaration(Parser *parser) {
+    LzToken class_token = parser->current;
+    advance(parser); /* class */
+    if (parser->fs->function != NULL || parser->scope_depth != 0) {
+        error_at(parser, &class_token, "classes can only be declared at the top level");
+        skip_class_body(parser);
+        return;
+    }
+    advance(parser); /* the name */
+    LzToken name_token = parser->previous;
+    LzString *name = intern_token(parser, &name_token);
+    if (name == NULL) {
+        return;
+    }
+    LzType ignored;
+    char text[48];
+    token_text(parser, &name_token, text, sizeof text);
+    if (builtin_type(text, &ignored)) {
+        error_with_name(parser, &name_token, "cannot redefine builtin type '", "'");
+        return;
+    }
+    if (check(parser, LZ_TOKEN_COLON)) {
+        error_at_current(parser, "inheritance is not supported yet");
+        skip_class_body(parser);
+        return;
+    }
+    if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
+        error_at_current(parser, "expected '{' before the class body");
+        return;
+    }
+    LzType type = lz_type_of_kinds(LZ_KIND_FUNCTION);
+    Symbol *symbol = add_symbol(parser, &name_token, name, SYMBOL_GLOBAL, true, lz_value_nil(), &type);
+    if (symbol == NULL) {
+        return;
+    }
+    if (parser->class_count >= 64) {
+        error_at(parser, &name_token, "too many classes in one file");
+        return;
+    }
+    parser->classes[parser->class_count++] = name;
+    parser->vm->has_classes = true;
+
+    LzClass *cls = lz_class_new(parser->vm, name, name_token.offset);
+    if (cls == NULL) {
+        fail(parser, lz_vm_out_of_memory(parser->vm));
+        return;
+    }
+    LzString *saved_class = parser->class_name;
+    parser->class_name = name;
+
+    advance(parser); /* { */
+    int body_depth = parser->bracket_depth - 1; /* the depth once the closing brace is read */
+    skip_newlines(parser);
+    while (!check(parser, LZ_TOKEN_RIGHT_BRACE) && !check(parser, LZ_TOKEN_EOF) && parser->fatal == LZ_OK &&
+           !parser->panic) {
+        class_member(parser, cls);
+        while (match(parser, LZ_TOKEN_NEWLINE) || match(parser, LZ_TOKEN_SEMICOLON)) {
+        }
+    }
+    parser->class_name = saved_class;
+    if (!parser->panic) {
+        consume(parser, LZ_TOKEN_RIGHT_BRACE, "expected '}' after the class body");
+    }
+    if (parser->panic || parser->fatal != LZ_OK) {
+        /* One mistake in the body is one error: skip the rest of the body. */
+        while (parser->fatal == LZ_OK && !check(parser, LZ_TOKEN_EOF) && parser->bracket_depth > body_depth) {
+            advance(parser);
+        }
+        lz_object_release(&parser->vm->heap, &cls->base);
+        return;
+    }
+    lz_class_seal(cls);
+    uint16_t index = add_constant(parser, lz_value_object(&cls->base), true);
+    lz_object_release(&parser->vm->heap, &cls->base);
+    emit_op_at(parser, LZ_OP_CONSTANT, name_token.offset);
+    emit_u16_at(parser, index, name_token.offset);
+    emit_named(parser, LZ_OP_DEFINE_GLOBAL, name, name_token.offset);
+    emit_op_at(parser, LZ_OP_CLASS_INIT, name_token.offset);
+    emit_u16_at(parser, index, name_token.offset);
+    end_statement(parser);
+}
+
+/*
+ * `a.b = v`, `a.b += v` and `a.b.c = v`: the expression just compiled ends in a GET_FIELD (or
+ * GET_FIELD_KEEP for a compound assignment), which becomes the SET_FIELD of the assignment.
+ */
+static bool member_assignment(Parser *parser, const Expr *target, bool finish) {
+    bool plain = check(parser, LZ_TOKEN_EQUAL);
+    bool compound = is_compound(parser->current.type);
+    LzChunk *chunk = parser->chunk;
+    if ((!plain && !compound) || !target->is_member || parser->fatal != LZ_OK ||
+        chunk->count != target->op_pos + 3) {
+        return false;
+    }
+    uint16_t name_index = (uint16_t)((chunk->code[target->op_pos + 1] << 8) | chunk->code[target->op_pos + 2]);
+    uint32_t offset = chunk->offsets[target->op_pos];
+    LzToken op_token = parser->current;
+    LzTokenType assign = op_token.type;
+    advance(parser);
+    skip_newlines(parser);
+    if (compound) {
+        Expr value = expression(parser);
+        Expr current = any_expr();
+        (void)compound_value(parser, &op_token, &current, &value);
+        emit_op_at(parser, compound_opcode(compound_operator(assign)), offset);
+    } else {
+        lz_chunk_truncate(&parser->vm->heap, chunk, target->op_pos, chunk->constant_count);
+        (void)expression(parser);
+    }
+    emit_op_at(parser, LZ_OP_SET_FIELD, offset);
+    emit_u16_at(parser, name_index, offset);
+    if (finish) {
+        end_statement(parser);
+    }
+    return true;
 }
 
 /* fn(params) { ... } as an expression. */
@@ -5952,7 +6479,16 @@ static void declaration(Parser *parser) {
         error_at_current(parser, "unexpected '}'");
         break;
     case LZ_TOKEN_IDENTIFIER:
-        if (at_error_declaration(parser)) {
+        if (word_is(parser, &parser->current, "class") && next_token_type(parser) == LZ_TOKEN_IDENTIFIER) {
+            class_declaration(parser);
+        } else if (word_is(parser, &parser->current, "pub") && next_token_type(parser) == LZ_TOKEN_IDENTIFIER &&
+                   word_is(parser, &(LzToken){.type = LZ_TOKEN_IDENTIFIER, .offset = peek_token(parser, 1).offset,
+                                              .length = peek_token(parser, 1).length}, "class")) {
+            error_at_current(parser, "'pub' on a class needs modules, which are not available yet");
+            advance(parser); /* pub */
+            advance(parser); /* class */
+            skip_class_body(parser);
+        } else if (at_error_declaration(parser)) {
             error_declaration(parser);
         } else if (is_type_keyword(parser) && next_token_type(parser) == LZ_TOKEN_IDENTIFIER) {
             advance(parser);
@@ -5981,6 +6517,31 @@ static void declaration(Parser *parser) {
 
 /* Entry points */
 
+
+/* Does the file declare a class? Then every method call must look at its receiver's class. */
+static void prescan_classes(Parser *parser) {
+    LzLexer lexer;
+    lz_lexer_init(&lexer, parser->source);
+    bool at_start = true;
+    for (;;) {
+        LzToken token = lz_lexer_next(&lexer);
+        if (token.type == LZ_TOKEN_EOF) {
+            return;
+        }
+        bool starts = at_start;
+        at_start = token.type == LZ_TOKEN_NEWLINE || token.type == LZ_TOKEN_SEMICOLON ||
+                   (token.type == LZ_TOKEN_RIGHT_BRACE && lexer.nesting == 0);
+        if (starts && lexer.nesting == 0 && word_is(parser, &token, "class")) {
+            LzLexer peek = lexer;
+            LzToken name = lz_lexer_next(&peek);
+            if (name.type == LZ_TOKEN_IDENTIFIER) {
+                parser->vm->has_classes = true;
+                return;
+            }
+        }
+    }
+}
+
 static LzStatus compile_into(Parser *parser) {
     FuncState script;
     memset(&script, 0, sizeof script);
@@ -5988,6 +6549,7 @@ static LzStatus compile_into(Parser *parser) {
     parser->fs = &script;
     prescan_functions(parser);
     prescan_errors(parser);
+    prescan_classes(parser);
     advance(parser);
     while (!check(parser, LZ_TOKEN_EOF) && parser->fatal == LZ_OK) {
         declaration(parser);

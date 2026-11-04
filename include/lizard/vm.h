@@ -100,6 +100,12 @@ struct LzVM {
     unsigned native_depth;       /* callbacks nested inside natives right now, see lz_vm_call_value */
     const struct LzNative *current_native; /* the native lz_native_call is about to run; valid at its entry only */
     bool trace_fixed;            /* a failed callback already recorded the trace and its frames are gone */
+    /* Classes (see class.h). */
+    char error_help[192];        /* "help:" line for the run-time error in vm->error, or empty */
+    LzStatus text_status;        /* a script to_string/to_debug that failed while a value was being written */
+    bool has_classes;            /* some class was declared: method calls must look at the receiver's class */
+    LzObject *native_with;       /* the natives behind x.with(...) and x.copy() of an instance (retained, lazy) */
+    LzObject *native_copy;
     LzSkink skink; /* cycle collector, see skink.h; last so the JIT's field offsets stay put */
 };
 
@@ -257,6 +263,8 @@ const LzValue *lz_vm_lookup(const LzVM *vm, const LzString *name);
 LzStatus lz_vm_out_of_memory(LzVM *vm);
 
 /* Records a message in vm->error and returns status so callers can `return` it directly. */
+/* A script to_string/to_debug failed while a value was written: takes that status (once). */
+bool lz_vm_take_text_status(LzVM *vm, LzStatus *status);
 LzStatus lz_vm_set_error(LzVM *vm, LzStatus status, const char *format, ...) LZ_PRINTF_FORMAT(3, 4);
 
 /*

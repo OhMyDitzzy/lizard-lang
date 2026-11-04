@@ -1,4 +1,5 @@
 #include "lizard/vm.h"
+#include "lizard/class.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -35,6 +36,11 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->handler_count = 0;
     vm->trace_source = NULL;
     vm->error_suggestions.count = 0;
+    vm->error_help[0] = '\0';
+    vm->text_status = LZ_OK;
+    vm->has_classes = false;
+    vm->native_with = NULL;
+    vm->native_copy = NULL;
     lz_skink_init(&vm->skink);
     vm->heap.reclaim = lz_skink_reclaim; /* before --max-heap refuses an allocation */
     vm->heap.reclaim_context = vm;
@@ -91,6 +97,15 @@ void lz_vm_release_roots(LzVM *vm) {
     lz_table_free(&vm->heap, &vm->builtins);
     lz_table_free(&vm->heap, &vm->globals);
     lz_table_free(&vm->heap, &vm->strings);
+    lz_vm_release_class_constants(vm); /* a constant may be an instance of its own class */
+    if (vm->native_with != NULL) {
+        lz_object_release(&vm->heap, vm->native_with);
+        vm->native_with = NULL;
+    }
+    if (vm->native_copy != NULL) {
+        lz_object_release(&vm->heap, vm->native_copy);
+        vm->native_copy = NULL;
+    }
     lz_skink_sweep(vm); /* cycles that were only waiting for their last holder; arrays still read their types */
     for (size_t i = 0; i < vm->array_type_count; i++) {
         free(vm->array_types[i]);
@@ -141,9 +156,19 @@ const LzValue *lz_vm_lookup(const LzVM *vm, const LzString *name) {
     return value != NULL ? value : lz_table_get(&vm->builtins, name);
 }
 
+bool lz_vm_take_text_status(LzVM *vm, LzStatus *status) {
+    if (vm->text_status == LZ_OK) {
+        return false;
+    }
+    *status = vm->text_status;
+    vm->text_status = LZ_OK;
+    return true;
+}
+
 LzStatus lz_vm_set_error(LzVM *vm, LzStatus status, const char *format, ...) {
     va_list args;
     vm->error_suggestions.count = 0;
+    vm->error_help[0] = '\0';
     va_start(args, format);
     (void)vsnprintf(vm->error, sizeof vm->error, format, args);
     va_end(args);

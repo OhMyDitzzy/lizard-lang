@@ -46,10 +46,11 @@ static inline LzDict *lz_value_as_dict(const LzValue *value) {
     return (LzDict *)value->as.object;
 }
 
-/* An array or a dict: the values reference cycles can run through. */
+/* An array, a dict or an instance: the values reference cycles can run through. */
 static inline bool lz_value_is_container(const LzValue *value) {
     return value->type == LZ_VAL_OBJECT &&
-           (value->as.object->type == LZ_OBJ_ARRAY || value->as.object->type == LZ_OBJ_DICT);
+           (value->as.object->type == LZ_OBJ_ARRAY || value->as.object->type == LZ_OBJ_DICT ||
+            value->as.object->type == LZ_OBJ_INSTANCE);
 }
 
 /* Used by the heap when a stamp counter wraps. */

@@ -23,6 +23,10 @@ static LzStatus write_arguments(LzVM *vm, int argc, const LzValue *argv) {
             return lz_vm_set_error(vm, LZ_ERR_IO, "failed to write to output");
         }
         if (!lz_value_write(&argv[i], &vm->out)) {
+            LzStatus text_status = LZ_OK;
+            if (lz_vm_take_text_status(vm, &text_status)) {
+                return text_status;
+            }
             return lz_vm_set_error(vm, LZ_ERR_IO, "failed to write to output");
         }
     }

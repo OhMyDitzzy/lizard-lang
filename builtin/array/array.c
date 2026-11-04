@@ -8,7 +8,7 @@
 #include "lizard/dict.h"
 
 static const char *kind_of(const LzValue *value) {
-    return lz_kind_name(lz_kind_of(value));
+    return lz_value_kind_name(value);
 }
 
 static bool is_string(const LzValue *value) {
@@ -378,6 +378,10 @@ LzStatus lz_builtin_join(LzVM *vm, int argc, const LzValue *argv, LzValue *resul
     }
     if (!ok) {
         lz_buffer_free(&text);
+        LzStatus text_status = LZ_OK;
+        if (lz_vm_take_text_status(vm, &text_status)) {
+            return text_status;
+        }
         return lz_vm_out_of_memory(vm);
     }
     status = lz_vm_charge_fuel(vm, text.length / 64);

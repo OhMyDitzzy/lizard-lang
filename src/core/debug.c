@@ -153,7 +153,15 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_SET_GLOBAL:
     case LZ_OP_CLOSURE:
     case LZ_OP_GET_FIELD:
+    case LZ_OP_GET_FIELD_KEEP:
+    case LZ_OP_GET_FIELD_W:
+    case LZ_OP_SET_FIELD:
+    case LZ_OP_CLASS_INIT:
         return constant_instruction(chunk, offset, out);
+    case LZ_OP_METHOD_LOOKUP: {
+        size_t next = constant_instruction(chunk, offset, out);
+        return next + 1; /* the mode byte */
+    }
     case LZ_OP_GET_LOCAL:
     case LZ_OP_SET_LOCAL:
     case LZ_OP_GET_UPVALUE:

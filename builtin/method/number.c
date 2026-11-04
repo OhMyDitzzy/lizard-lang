@@ -16,7 +16,7 @@ static double as_double(const LzValue *value) {
 static LzStatus want_number(LzVM *vm, const char *name, const LzValue *value) {
     if (!is_number(value)) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "%s(): expected a number, got %s", name,
-                               lz_kind_name(lz_kind_of(value)));
+                               lz_value_kind_name(value));
     }
     return LZ_OK;
 }
@@ -179,7 +179,7 @@ LzStatus lz_method_max(LzVM *vm, int argc, const LzValue *argv, LzValue *result)
 static LzStatus want_int(LzVM *vm, const char *name, const LzValue *value) {
     if (value->type != LZ_VAL_INT) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "%s(): expected an int, got %s", name,
-                               lz_kind_name(lz_kind_of(value)));
+                               lz_value_kind_name(value));
     }
     return LZ_OK;
 }

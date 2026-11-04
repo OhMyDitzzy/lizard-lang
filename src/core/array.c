@@ -1,4 +1,5 @@
 #include "lizard/array.h"
+#include "lizard/class.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -60,6 +61,8 @@ void lz_note_container_store(LzHeap *heap, const LzValue *value) {
         lz_value_as_array(value)->holders++;
     } else if (lz_value_is_dict(value)) {
         lz_value_as_dict(value)->holders++;
+    } else if (lz_value_is_instance(value)) {
+        lz_value_as_instance(value)->holders++;
     }
 }
 
@@ -68,6 +71,8 @@ void lz_drop_container_holder(const LzValue *value) {
         lz_value_as_array(value)->holders--;
     } else if (lz_value_is_dict(value)) {
         lz_value_as_dict(value)->holders--;
+    } else if (lz_value_is_instance(value)) {
+        lz_value_as_instance(value)->holders--;
     }
 }
 
@@ -78,6 +83,9 @@ void lz_array_note_store(LzArray *array, const LzValue *value) {
     } else if (lz_value_is_dict(value)) {
         array->has_arrays = true; /* the walk has to visit it too */
         lz_value_as_dict(value)->holders++;
+    } else if (lz_value_is_instance(value)) {
+        array->has_arrays = true; /* the walk has to visit its fields */
+        lz_value_as_instance(value)->holders++;
     } else if (lz_value_is_error(value)) {
         array->has_arrays = true; /* an error leads to its data, which the walk has to visit */
     }
@@ -175,7 +183,7 @@ bool lz_array_admit(const LzArray *container, const LzValue *value) {
     return lz_type_matches(wanted, value);
 }
 
-/* The containers a value leads to, one at a time: an array's items, a dict's values. */
+/* The containers a value leads to, one at a time: an array's items, a dict's values, an instance's fields. */
 static bool container_is_array(const LzObject *object) {
     return object->type == LZ_OBJ_ARRAY;
 }
@@ -184,17 +192,41 @@ static bool container_may_open(const LzObject *object) {
     if (container_is_array(object)) {
         return ((const LzArray *)object)->has_arrays;
     }
+    if (object->type == LZ_OBJ_INSTANCE) {
+        return ((const LzInstance *)object)->cls->field_count != 0;
+    }
     return ((const LzDict *)object)->count != 0;
 }
 
 static size_t container_items(const LzObject *object) {
+    if (object->type == LZ_OBJ_INSTANCE) {
+        return ((const LzInstance *)object)->cls->field_count;
+    }
     return container_is_array(object) ? ((const LzArray *)object)->count
                                       : ((const LzDict *)object)->count;
 }
 
 static const LzValue *container_item_at(const LzObject *object, size_t index) {
+    if (object->type == LZ_OBJ_INSTANCE) {
+        return &((const LzInstance *)object)->fields[index];
+    }
     return container_is_array(object) ? &((const LzArray *)object)->items[index]
                                       : &((const LzDict *)object)->entries[index].value;
+}
+
+static uint32_t *container_mark(LzObject *object) {
+    if (object->type == LZ_OBJ_INSTANCE) {
+        return &((LzInstance *)object)->mark;
+    }
+    return container_is_array(object) ? &((LzArray *)object)->mark : &((LzDict *)object)->mark;
+}
+
+static size_t container_holders(const LzObject *object) {
+    if (object->type == LZ_OBJ_INSTANCE) {
+        return ((const LzInstance *)object)->holders;
+    }
+    return object->type == LZ_OBJ_ARRAY ? ((const LzArray *)object)->holders
+                                        : ((const LzDict *)object)->holders;
 }
 
 /* The state of one walk: what it looks for, the stamp of its visits, the containers still to open. */
@@ -245,8 +277,7 @@ static void walk_value(CycleWalk *walk, const LzValue *value, uint64_t *work) {
         walk->result = 1;
         return;
     }
-    uint32_t *mark = container_is_array(inner) ? &((LzArray *)inner)->mark
-                                               : &((LzDict *)inner)->mark;
+    uint32_t *mark = container_mark(inner);
     if (*mark == walk->epoch || !container_may_open(inner)) {
         return;
     }
@@ -276,8 +307,7 @@ int lz_containers_would_cycle(LzHeap *heap, const LzValue *value, const LzObject
     } else if (target == NULL) {
         return 0;
     }
-    if (target->type == LZ_OBJ_ARRAY ? ((const LzArray *)target)->holders == 0
-                                     : ((const LzDict *)target)->holders == 0) {
+    if (container_holders(target) == 0) {
         return 0;
     }
 
@@ -287,11 +317,7 @@ int lz_containers_would_cycle(LzHeap *heap, const LzValue *value, const LzObject
         return -1;
     }
     if (lz_value_is_container(value)) {
-        if (container_is_array(value->as.object)) {
-            ((LzArray *)value->as.object)->mark = walk.epoch;
-        } else {
-            ((LzDict *)value->as.object)->mark = walk.epoch;
-        }
+        *container_mark(value->as.object) = walk.epoch;
         (void)walk_push(&walk, value->as.object);
     } else {
         walk_value(&walk, value, work); /* an error: its causes and data are the roots */
@@ -376,7 +402,7 @@ LzStatus lz_array_push(LzVM *vm, LzArray *array, const LzValue *value) {
 LzStatus lz_array_resolve_index(LzVM *vm, const LzValue *index, size_t count, size_t *out) {
     if (index->type != LZ_VAL_INT) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "array index must be an int, got %s",
-                               lz_kind_name(lz_kind_of(index)));
+                               lz_value_kind_name(index));
     }
     int64_t position = index->as.integer;
     int64_t resolved = position < 0 ? position + (int64_t)count : position;
@@ -416,7 +442,7 @@ static LzStatus bound(LzVM *vm, const LzValue *value, int64_t count, int64_t fal
     }
     if (value->type != LZ_VAL_INT) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "slice bounds must be ints, got %s",
-                               lz_kind_name(lz_kind_of(value)));
+                               lz_value_kind_name(value));
     }
     int64_t position = value->as.integer;
     if (position < 0) {

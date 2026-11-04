@@ -306,6 +306,16 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_ERROR_IS";
     case LZ_OP_GET_FIELD:
         return "OP_GET_FIELD";
+    case LZ_OP_GET_FIELD_KEEP:
+        return "OP_GET_FIELD_KEEP";
+    case LZ_OP_SET_FIELD:
+        return "OP_SET_FIELD";
+    case LZ_OP_METHOD_LOOKUP:
+        return "OP_METHOD_LOOKUP";
+    case LZ_OP_GET_FIELD_W:
+        return "OP_GET_FIELD_W";
+    case LZ_OP_CLASS_INIT:
+        return "OP_CLASS_INIT";
     default:
         return "OP_UNKNOWN";
     }
@@ -383,7 +393,13 @@ size_t lz_opcode_length(uint8_t opcode) {
         return 2;
     case LZ_OP_TRY_BEGIN:
     case LZ_OP_GET_FIELD:
+    case LZ_OP_GET_FIELD_KEEP:
+    case LZ_OP_GET_FIELD_W:
+    case LZ_OP_SET_FIELD:
+    case LZ_OP_CLASS_INIT:
         return 3;
+    case LZ_OP_METHOD_LOOKUP:
+        return 4;
     case LZ_OP_CLOSE_UPVALUE_KEEP:
         return 3; /* the slot whose upvalue is closed */
     case LZ_OP_DICT:

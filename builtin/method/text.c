@@ -25,7 +25,7 @@ static const LzString *text_of(const LzValue *value) {
 static LzStatus want_text(LzVM *vm, const char *name, const LzValue *value, const LzString **out) {
     if (value->type != LZ_VAL_OBJECT || value->as.object->type != LZ_OBJ_STRING) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "%s(): expected a string, got %s", name,
-                               lz_kind_name(lz_kind_of(value)));
+                               lz_value_kind_name(value));
     }
     *out = text_of(value);
     return LZ_OK;
@@ -34,7 +34,7 @@ static LzStatus want_text(LzVM *vm, const char *name, const LzValue *value, cons
 static LzStatus want_int(LzVM *vm, const char *name, const LzValue *value, int64_t *out) {
     if (value->type != LZ_VAL_INT) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "%s(): expected an int, got %s", name,
-                               lz_kind_name(lz_kind_of(value)));
+                               lz_value_kind_name(value));
     }
     *out = value->as.integer;
     return LZ_OK;

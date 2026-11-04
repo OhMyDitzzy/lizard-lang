@@ -233,7 +233,7 @@ LzStatus lz_arith_bit_type_error(LzVM *vm, LzOpCode op, const LzValue *left, con
     const char *symbol = bit_symbol(op);
     if (right == NULL) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operator '%s' needs an int, got %s", symbol,
-                               lz_kind_name(lz_kind_of(left)));
+                               lz_value_kind_name(left));
     }
     const char *hint = "";
     if (left->type == LZ_VAL_BOOL || right->type == LZ_VAL_BOOL) {
@@ -242,7 +242,7 @@ LzStatus lz_arith_bit_type_error(LzVM *vm, LzOpCode op, const LzValue *left, con
                                     : "";
     }
     return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operator '%s' needs two ints, got %s and %s%s",
-                           symbol, lz_kind_name(lz_kind_of(left)), lz_kind_name(lz_kind_of(right)),
+                           symbol, lz_value_kind_name(left), lz_value_kind_name(right),
                            hint);
 }
 

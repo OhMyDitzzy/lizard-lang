@@ -1,0 +1,91 @@
+# Classes: your own kinds of value. No `new`: call the class like a function.
+
+class Point {
+    pub x: int
+    pub y: int = 0                      # a default; `pub` fields are the arguments of Point(...)
+
+    pub fn sum(self) => self.x + self.y
+
+    pub fn move(self, dx, dy) {
+        self.x += dx
+        self.y += dy
+    }
+
+    pub fn origin() => Point(0, 0)      # no `self`: a static function, called as Point.origin()
+    pub get length2(self) => self.x * self.x + self.y * self.y   # read like a field: p.length2
+}
+
+let p = Point(3, 4)
+println(p)                              # Point(x: 3, y: 4)
+println(p.sum(), p.length2)             # 7 25
+p.move(1, 1)
+println(p)                              # Point(x: 4, y: 5)
+println(Point(x: 7))                    # named arguments, and the default for y
+println(p == Point(4, 5))               # == compares what the objects hold
+println(identical(p, Point(4, 5)))      # identical() asks: the very same object?
+println(p.with(x: 10), p.copy())        # a changed copy, and a plain copy
+println([Point(1, 2), Point(3, 4)].map(Point.sum))
+
+# Visibility: no keyword = private, `pub` = open, `pub read` = readable, written only inside.
+class Account {
+    pub read owner: string
+    pub read balance: int = 0
+    count: int = 0                      # private
+
+    pub fn deposit(self, amount: int) {
+        if amount <= 0 { throw ValueError("amount must be positive") }
+        self.balance += amount
+        self.count += 1
+    }
+
+    pub get deposits(self) => self.count
+    pub fn to_string(self) => $"{self.owner}: {self.balance}"
+}
+
+let a = Account("Sari")
+a.deposit(100)
+a.deposit(50)
+println(a)                                         # Sari: 150
+println($"{a} after {a.deposits} deposits")
+println([a])                                       # elements use the debug form
+
+try {
+    a.balance = 5
+} catch e {
+    println(e.message)                             # 'balance' is read-only outside Account
+}
+try {
+    println(a.count)
+} catch e {
+    println(e.message)                             # 'count' is private to Account
+}
+
+# init() runs after the fields are filled: derive fields, check rules.
+class Temperature {
+    pub celsius: float
+    kelvin: float = 0.0
+
+    fn init(self) {
+        if self.celsius < -273.15 { throw ValueError("below absolute zero") }
+        self.kelvin = self.celsius + 273.15
+    }
+
+    pub get k(self) => self.kelvin
+}
+
+println(Temperature(25.0).k)
+try {
+    Temperature(-300.0)
+} catch e {
+    println(e.message)
+}
+
+# Constants belong to the class and can use it.
+class Color {
+    pub const WHITE = Color(255, 255, 255)
+    pub r: int
+    pub g: int
+    pub b: int
+    pub fn gray(level) => Color(level, level, level)
+}
+println(Color.WHITE, Color.gray(128))

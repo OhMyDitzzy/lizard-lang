@@ -28,6 +28,10 @@ static bool discard(void *ctx, const char *data, size_t length) {
 }
 
 static const char *const words[] = {
+    "class", "class A {", "class A { pub x: int }", "class A { pub read x: int = 1\n fn f(self) => self.x }",
+    "class A : B { }", "pub", "pub read", "get", "self", "init", "fn init(self) { }", "pub get g(self) => 1",
+    "const C = 1", "override", "operator", "trait", "extend", "super", "A(1)", "A(x: 1)", "a.x", "a.x = 1",
+    "a.x += 1", "a.f()", "a.x[0] = 2", "self.x += 1", "a.with(x: 2)", "a.copy()", "identical(a, a)",
     "let", "const", "if", "else", "while", "and", "or", "true", "false", "nil", "x", "y", "z",
     "print", "println", "1", "2", "0", "3.5", "\"s\"", "\"a\\n\"", "+", "-", "*", "/", "//", "%",
     "==", "!=", "&", "^", "~", "<<", ">>", "x & 3 | 4 ^ ~z << 1 >> 2", "<", "<=", ">", ">=", "!", "=", "(", ")", "{", "}", ",", ";", "\n", "\n",

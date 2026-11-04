@@ -352,7 +352,7 @@ static LzFormatResult format_text(const LzValue *v, const LzFormatSpec *s, const
     if (s->sign != 0 || s->alternate || s->zero || s->group != 0) {
         bad(error, 0, 1, "%s only works with numbers, but the value is %s",
             s->sign != 0 ? "a sign" : s->alternate ? "'#'" : s->zero ? "'0'" : "a digit group",
-            lz_kind_name(lz_kind_of(v)));
+            lz_value_kind_name(v));
         return LZ_FORMAT_BAD;
     }
 
@@ -413,7 +413,7 @@ LzFormatResult lz_format_value(const LzValue *v, const LzFormatSpec *s, const Lz
     if (type == 'c') {
         if (!is_int) {
             bad(error, 0, 1, "format type 'c' needs an int (a code point), but the value is %s",
-                lz_kind_name(lz_kind_of(v)));
+                lz_value_kind_name(v));
             return LZ_FORMAT_BAD;
         }
         int64_t scalar = v->as.integer;
@@ -436,7 +436,7 @@ LzFormatResult lz_format_value(const LzValue *v, const LzFormatSpec *s, const Lz
                     type);
             } else {
                 bad(error, 0, 1, "format type '%c' needs an int, but the value is %s", type,
-                    lz_kind_name(lz_kind_of(v)));
+                    lz_value_kind_name(v));
             }
             return LZ_FORMAT_BAD;
         }
@@ -461,7 +461,7 @@ LzFormatResult lz_format_value(const LzValue *v, const LzFormatSpec *s, const Lz
     /* f e E % g */
     if (!kind_is_number(v)) {
         bad(error, 0, 1, "format type '%c' needs a number, but the value is %s", type,
-            lz_kind_name(lz_kind_of(v)));
+            lz_value_kind_name(v));
         return LZ_FORMAT_BAD;
     }
     double number = is_int ? (double)v->as.integer : v->as.number;

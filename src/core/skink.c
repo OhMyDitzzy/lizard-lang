@@ -1,6 +1,7 @@
 #include "lizard/skink.h"
 
 #include "lizard/array.h"
+#include "lizard/class.h"
 #include "lizard/dict.h"
 #include "lizard/type.h"
 #include "lizard/vm.h"
@@ -142,6 +143,8 @@ static bool is_node(const LzObject *object) {
     switch (object->type) {
     case LZ_OBJ_CLOSURE:
     case LZ_OBJ_UPVALUE:
+    case LZ_OBJ_INSTANCE:
+    case LZ_OBJ_BOUND:
         return true;
     case LZ_OBJ_ARRAY:
         return array_may_hold_cycles((const LzArray *)object);
@@ -152,6 +155,7 @@ static bool is_node(const LzObject *object) {
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
     case LZ_OBJ_FUNCTION:
+    case LZ_OBJ_CLASS:
         break;
     }
     return false;
@@ -173,7 +177,11 @@ static bool may_join_cycle(const LzValue *value) {
     }
     switch (value->as.object->type) {
     case LZ_OBJ_CLOSURE:
+    case LZ_OBJ_INSTANCE:
+    case LZ_OBJ_BOUND:
         return true;
+    case LZ_OBJ_CLASS:
+        return false;
     case LZ_OBJ_ARRAY:
         return !array_is_typed_leaf((const LzArray *)value->as.object);
     case LZ_OBJ_DICT:
@@ -202,6 +210,11 @@ static size_t slot_count(const LzObject *node) {
         return 1;
     case LZ_OBJ_ERROR:
         return 2; /* cause and data */
+    case LZ_OBJ_INSTANCE:
+        return ((const LzInstance *)node)->cls->field_count;
+    case LZ_OBJ_BOUND:
+        return 2;
+    case LZ_OBJ_CLASS:
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
     case LZ_OBJ_FUNCTION:
@@ -254,6 +267,26 @@ static bool each_edge(Trial *trial, LzObject *node, EdgeFn visit) {
         }
         return true;
     }
+    case LZ_OBJ_INSTANCE: {
+        const LzInstance *instance = (const LzInstance *)node;
+        for (size_t i = 0; i < instance->cls->field_count; i++) {
+            const LzValue *field = &instance->fields[i];
+            if (is_graph_value(field) && !visit(trial, field->as.object)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    case LZ_OBJ_BOUND: {
+        const LzBound *bound = (const LzBound *)node;
+        if (is_graph_value(&bound->callee) && !visit(trial, bound->callee.as.object)) {
+            return false;
+        }
+        if (is_graph_value(&bound->receiver) && !visit(trial, bound->receiver.as.object)) {
+            return false;
+        }
+        return true;
+    }
     case LZ_OBJ_ERROR: {
         const LzError *error = (const LzError *)node;
         if (is_graph_value(&error->cause) && !visit(trial, error->cause.as.object)) {
@@ -264,6 +297,7 @@ static bool each_edge(Trial *trial, LzObject *node, EdgeFn visit) {
         }
         return true;
     }
+    case LZ_OBJ_CLASS:
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
     case LZ_OBJ_FUNCTION:
@@ -480,6 +514,26 @@ static void clear_edges(LzVM *vm, LzObject *node) {
         }
         break;
     }
+    case LZ_OBJ_INSTANCE: {
+        LzInstance *instance = (LzInstance *)node;
+        for (size_t i = 0; i < instance->cls->field_count; i++) {
+            LzValue old = instance->fields[i];
+            instance->fields[i] = lz_value_nil();
+            lz_drop_container_holder(&old);
+            lz_value_release(&vm->heap, &old);
+        }
+        break;
+    }
+    case LZ_OBJ_BOUND: {
+        LzBound *bound = (LzBound *)node;
+        LzValue callee = bound->callee;
+        LzValue receiver = bound->receiver;
+        bound->callee = lz_value_nil();
+        bound->receiver = lz_value_nil();
+        lz_value_release(&vm->heap, &callee);
+        lz_value_release(&vm->heap, &receiver);
+        break;
+    }
     case LZ_OBJ_ERROR: {
         LzError *error = (LzError *)node;
         LzValue cause = error->cause;
@@ -491,6 +545,7 @@ static void clear_edges(LzVM *vm, LzObject *node) {
         lz_value_release(&vm->heap, &data);
         break;
     }
+    case LZ_OBJ_CLASS:
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
     case LZ_OBJ_FUNCTION:

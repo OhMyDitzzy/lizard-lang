@@ -95,7 +95,7 @@ LzStatus lz_method_dict_merge(LzVM *vm, int argc, const LzValue *argv, LzValue *
     (void)argc;
     if (!lz_value_is_dict(&argv[1])) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "merge(): expected a dict, got %s",
-                               lz_kind_name(lz_kind_of(&argv[1])));
+                               lz_value_kind_name(&argv[1]));
     }
     return lz_dict_merge(vm, receiver(argv), lz_value_as_dict(&argv[1]), result);
 }

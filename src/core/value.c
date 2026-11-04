@@ -2,6 +2,7 @@
 #include "lizard/error.h"
 
 #include "lizard/array.h"
+#include "lizard/class.h"
 #include "lizard/dict.h"
 #include "lizard/function.h"
 #include "lizard/native.h"
@@ -166,8 +167,14 @@ static bool is_string_value(const LzValue *value) {
 }
 
 static bool write_entry(const LzValue *value, const LzWriter *writer) {
+    if (lz_value_is_instance(value)) {
+        return lz_instance_write(lz_value_as_instance(value), writer, true);
+    }
     if (is_string_value(value)) {
         return write_quoted((const LzString *)value->as.object, writer);
+    }
+    if (lz_value_is_instance(value)) {
+        return lz_instance_write(lz_value_as_instance(value), writer, true);
     }
     return lz_value_write(value, writer);
 }
@@ -215,7 +222,7 @@ static bool write_container(const LzObject *root, const LzWriter *writer) {
         if (!ok) {
             break;
         }
-        if (lz_value_is_container(item)) {
+        if (lz_value_is_container(item) && !lz_value_is_instance(item)) {
             if (depth == capacity) {
                 WriteFrame *grown = realloc(frames, capacity * 2 * sizeof *frames);
                 if (grown == NULL) {
@@ -267,6 +274,24 @@ static bool write_object(const LzObject *object, const LzWriter *writer) {
     }
     case LZ_OBJ_ERROR:
         return lz_error_write((const LzError *)object, writer);
+    case LZ_OBJ_CLASS: {
+        const LzClass *cls = (const LzClass *)object;
+        return lz_writer_write_cstr(writer, "<class ") &&
+               lz_writer_write(writer, cls->name->data, cls->name->length) &&
+               lz_writer_write_cstr(writer, ">");
+    }
+    case LZ_OBJ_INSTANCE:
+        return lz_instance_write((const LzInstance *)object, writer, false);
+    case LZ_OBJ_BOUND: {
+        const LzBound *bound = (const LzBound *)object;
+        if (lz_value_is_closure(&bound->callee) && !bound->skip_first) {
+            const LzFunction *function = lz_value_as_closure(&bound->callee)->function;
+            return lz_writer_write_cstr(writer, "<method ") &&
+                   lz_writer_write_cstr(writer, lz_function_display_name(function)) &&
+                   lz_writer_write_cstr(writer, ">");
+        }
+        return lz_value_write(&bound->callee, writer);
+    }
     case LZ_OBJ_FUNCTION:
         return lz_writer_write_cstr(writer, "<function code>");
     case LZ_OBJ_UPVALUE:
@@ -317,6 +342,15 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
         lz_value_release(heap, &error->data);
         break;
     }
+    case LZ_OBJ_CLASS:
+        lz_class_finalize(heap, (LzClass *)object);
+        break;
+    case LZ_OBJ_INSTANCE:
+        lz_instance_finalize(heap, (LzInstance *)object);
+        break;
+    case LZ_OBJ_BOUND:
+        lz_bound_finalize(heap, (LzBound *)object);
+        break;
     case LZ_OBJ_FUNCTION:
         lz_function_free_storage(heap, (LzFunction *)object, true);
         break;
@@ -448,6 +482,24 @@ static bool equal_leaf(const LzValue *left, const LzValue *right) {
     return false;
 }
 
+static size_t equal_count(const LzObject *object) {
+    switch (object->type) {
+    case LZ_OBJ_DICT:
+        return ((const LzDict *)object)->count;
+    case LZ_OBJ_INSTANCE:
+        return ((const LzInstance *)object)->cls->field_count;
+    default:
+        return ((const LzArray *)object)->count;
+    }
+}
+
+static const LzValue *equal_item(const LzObject *object, size_t index) {
+    if (object->type == LZ_OBJ_INSTANCE) {
+        return &((const LzInstance *)object)->fields[index];
+    }
+    return &((const LzArray *)object)->items[index];
+}
+
 typedef struct EqualFrame {
     const LzObject *left;
     const LzObject *right;
@@ -480,9 +532,12 @@ bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *
         left->as.object == right->as.object) {
         return equal_leaf(left, right);
     }
+    if (left->as.object->type != right->as.object->type) {
+        return false;
+    }
     bool left_dict = left->as.object->type == LZ_OBJ_DICT;
-    bool right_dict = right->as.object->type == LZ_OBJ_DICT;
-    if (left_dict != right_dict) {
+    if (left->as.object->type == LZ_OBJ_INSTANCE &&
+        lz_value_as_instance(left)->cls != lz_value_as_instance(right)->cls) {
         return false;
     }
     if (left_dict) {
@@ -513,9 +568,9 @@ bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *
         return true;
     }
 
-    const LzArray *x = lz_value_as_array(left);
-    const LzArray *y = lz_value_as_array(right);
-    if (x->count != y->count) {
+    const LzObject *x = left->as.object;
+    const LzObject *y = right->as.object;
+    if (equal_count(x) != equal_count(y)) {
         return false;
     }
 
@@ -525,14 +580,13 @@ bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *
     if (frames == NULL) {
         return false;
     }
-    frames[depth++] = (EqualFrame){&x->base, &y->base, 0};
+    frames[depth++] = (EqualFrame){x, y, 0};
 
     bool same = true;
     while (same && depth > 0) {
         EqualFrame *frame = &frames[depth - 1];
         bool frame_dict = frame->left->type == LZ_OBJ_DICT;
-        size_t count = frame_dict ? ((const LzDict *)frame->left)->count
-                                  : ((const LzArray *)frame->left)->count;
+        size_t count = equal_count(frame->left);
         if (frame->next == count) {
             depth--;
             continue;
@@ -554,8 +608,8 @@ bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *
             }
             continue;
         }
-        const LzValue *a = &((const LzArray *)frame->left)->items[frame->next];
-        const LzValue *b = &((const LzArray *)frame->right)->items[frame->next];
+        const LzValue *a = equal_item(frame->left, frame->next);
+        const LzValue *b = equal_item(frame->right, frame->next);
         frame->next++;
         if (++used > budget) {
             same = false;
@@ -567,12 +621,13 @@ bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *
                 same = false;
                 break;
             }
-            size_t inner = a->as.object->type == LZ_OBJ_DICT
-                               ? ((const LzDict *)a->as.object)->count
-                               : ((const LzArray *)a->as.object)->count;
-            size_t other = b->as.object->type == LZ_OBJ_DICT
-                               ? ((const LzDict *)b->as.object)->count
-                               : ((const LzArray *)b->as.object)->count;
+            if (a->as.object->type == LZ_OBJ_INSTANCE &&
+                lz_value_as_instance(a)->cls != lz_value_as_instance(b)->cls) {
+                same = false;
+                break;
+            }
+            size_t inner = equal_count(a->as.object);
+            size_t other = equal_count(b->as.object);
             if (inner != other) {
                 same = false;
                 break;
@@ -623,6 +678,9 @@ bool lz_value_write(const LzValue *value, const LzWriter *writer) {
 bool lz_value_write_debug(const LzValue *value, const LzWriter *writer) {
     if (value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_STRING) {
         return write_quoted((const LzString *)value->as.object, writer);
+    }
+    if (lz_value_is_instance(value)) {
+        return lz_instance_write(lz_value_as_instance(value), writer, true);
     }
     return lz_value_write(value, writer);
 }

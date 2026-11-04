@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "lizard/array.h"
+#include "lizard/class.h"
 #include "lizard/native.h"
 #include "lizard/vm.h"
 
@@ -139,6 +140,61 @@ static LzStatus call_native(LzVM *vm, const LzNative *native, size_t argc) {
     return LZ_OK;
 }
 
+
+/* A bound method becomes its function with the receiver as the first argument (or, when it drops
+ * the first argument, the function alone). Repeats while the result is another bound method. */
+static LzStatus unwrap_bound(LzVM *vm, size_t callee_index, size_t *argc) {
+    while (lz_value_is_bound(&vm->stack[callee_index])) {
+        LzBound *bound = (LzBound *)vm->stack[callee_index].as.object;
+        LzValue callee = bound->callee;
+        lz_value_retain(&callee);
+        if (bound->skip_first) {
+            if (*argc == 0) {
+                lz_value_release(&vm->heap, &callee);
+                return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "can only call functions");
+            }
+            LzValue first = vm->stack[callee_index + 1];
+            memmove(&vm->stack[callee_index + 1], &vm->stack[callee_index + 2],
+                    (*argc - 1) * sizeof(LzValue));
+            vm->stack_count--;
+            (*argc)--;
+            lz_value_release(&vm->heap, &first);
+        } else {
+            if (vm->stack_count + 1 > LZ_STACK_MAX) {
+                lz_value_release(&vm->heap, &callee);
+                return stack_overflow(vm);
+            }
+            LzValue receiver = bound->receiver;
+            lz_value_retain(&receiver);
+            memmove(&vm->stack[callee_index + 2], &vm->stack[callee_index + 1], *argc * sizeof(LzValue));
+            vm->stack[callee_index + 1] = receiver;
+            vm->stack_count++;
+            (*argc)++;
+        }
+        LzValue old = vm->stack[callee_index];
+        vm->stack[callee_index] = callee;
+        lz_value_release(&vm->heap, &old);
+    }
+    return LZ_OK;
+}
+
+/* Calls a class: the arguments and the callee on the stack are replaced by the new object. */
+static LzStatus construct_on_stack(LzVM *vm, size_t callee_index, size_t argc, size_t named_count,
+                                   const char *names, size_t names_length, const LzValue *named) {
+    LzClass *cls = lz_value_as_class(&vm->stack[callee_index]);
+    LzValue made = lz_value_nil();
+    LzStatus status = lz_class_construct(vm, cls, argc, &vm->stack[callee_index + 1], named_count, names,
+                                         names_length, named, &made);
+    if (status != LZ_OK) {
+        return status;
+    }
+    for (size_t i = 0; i < argc + 1; i++) {
+        drop_top(vm);
+    }
+    vm->stack[vm->stack_count++] = made;
+    return LZ_OK;
+}
+
 LzStatus lz_vm_call(LzVM *vm, size_t argc, size_t resume_ip, uint32_t call_offset, bool *entered) {
     *entered = false;
     if (vm->stack_count < argc + 1) {
@@ -146,7 +202,17 @@ LzStatus lz_vm_call(LzVM *vm, size_t argc, size_t resume_ip, uint32_t call_offse
     }
 
     size_t callee_index = vm->stack_count - argc - 1;
+    if (lz_value_is_bound(&vm->stack[callee_index])) {
+        LzStatus unwrapped = unwrap_bound(vm, callee_index, &argc);
+        if (unwrapped != LZ_OK) {
+            return unwrapped;
+        }
+    }
     const LzValue *callee = &vm->stack[callee_index];
+    if (lz_value_is_class(callee)) {
+        vm->native_call_offset = call_offset;
+        return construct_on_stack(vm, callee_index, argc, 0, NULL, 0, NULL);
+    }
     if (is_native(callee)) {
         vm->native_call_offset = call_offset;
         return call_native(vm, (const LzNative *)callee->as.object, argc);
@@ -269,12 +335,14 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
     size_t callee_index = array_index - 1;
     const LzValue *callee = &vm->stack[callee_index];
     bool native = is_native(callee);
-    if (!native && !lz_value_is_closure(callee)) {
+    bool wrapped = lz_value_is_bound(callee) || lz_value_is_class(callee);
+    if (!native && !wrapped && !lz_value_is_closure(callee)) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "can only call functions");
     }
     uint8_t error_kind = 0;
     bool makes_error = native && lz_native_error_kind((const LzNative *)callee->as.object, &error_kind);
-    if (native && named_count > 0 && !makes_error) {
+    bool is_with = native && callee->as.object == vm->native_with;
+    if (native && named_count > 0 && !makes_error && !is_with) {
         return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): builtin functions do not take named arguments",
                                ((const LzNative *)callee->as.object)->name->data);
     }
@@ -309,6 +377,48 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
 
     if (named_count == 0) {
         return lz_vm_call(vm, count, resume_ip, call_offset, entered);
+    }
+
+    if (lz_value_is_bound(&vm->stack[callee_index])) {
+        status = unwrap_bound(vm, callee_index, &count);
+        if (status != LZ_OK) {
+            drop_values(vm, named, named_count);
+            return status;
+        }
+        callee = &vm->stack[callee_index];
+        if (is_native(callee) || (!lz_value_is_closure(callee) && !lz_value_is_class(callee))) {
+            drop_values(vm, named, named_count);
+            if (is_native(callee)) {
+                return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): builtin functions do not take named arguments",
+                                       ((const LzNative *)callee->as.object)->name->data);
+            }
+            return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "can only call functions");
+        }
+    }
+    if (lz_value_is_class(&vm->stack[callee_index])) {
+        vm->native_call_offset = call_offset;
+        status = construct_on_stack(vm, callee_index, count, named_count, names->data, names->length, named);
+        drop_values(vm, named, named_count);
+        return status;
+    }
+    if (is_with) {
+        vm->native_call_offset = call_offset;
+        LzValue made = lz_value_nil();
+        if (count != 1 || !lz_value_is_instance(&vm->stack[callee_index + 1])) {
+            drop_values(vm, named, named_count);
+            return lz_vm_set_error(vm, LZ_ERR_ARITY, "with() takes named fields, like p.with(x: 10)");
+        }
+        status = lz_instance_with(vm, lz_value_as_instance(&vm->stack[callee_index + 1]), named_count,
+                                  names->data, names->length, named, &made);
+        drop_values(vm, named, named_count);
+        if (status != LZ_OK) {
+            return status;
+        }
+        for (size_t i = 0; i < count + 1; i++) {
+            drop_top(vm);
+        }
+        vm->stack[vm->stack_count++] = made;
+        return LZ_OK;
     }
 
     if (makes_error) {

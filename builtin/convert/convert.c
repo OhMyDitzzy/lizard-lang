@@ -1,4 +1,5 @@
 #include "convert/convert.h"
+#include "lizard/class.h"
 
 #include <math.h>
 
@@ -11,7 +12,7 @@ static bool is_string(const LzValue *value) {
 }
 
 static const char *kind_of(const LzValue *value) {
-    return lz_kind_name(lz_kind_of(value));
+    return lz_value_kind_name(value);
 }
 
 static int shown(const LzString *text) {
@@ -105,6 +106,10 @@ LzStatus lz_builtin_string(LzVM *vm, int argc, const LzValue *argv, LzValue *res
     LzWriter writer = lz_writer_from_buffer(&text);
     if (!lz_value_write(value, &writer)) {
         lz_buffer_free(&text);
+        LzStatus text_status = LZ_OK;
+        if (lz_vm_take_text_status(vm, &text_status)) {
+            return text_status;
+        }
         return lz_vm_out_of_memory(vm);
     }
 
@@ -121,5 +126,13 @@ LzStatus lz_builtin_bool(LzVM *vm, int argc, const LzValue *argv, LzValue *resul
     (void)vm;
     (void)argc;
     *result = lz_value_bool(lz_value_is_truthy(&argv[0]));
+    return LZ_OK;
+}
+
+/* identical(a, b): the same object (arrays, dicts, objects, functions); for scalars and strings, ==. */
+LzStatus lz_builtin_identical(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
+    (void)vm;
+    (void)argc;
+    *result = lz_value_bool(lz_values_identical(&argv[0], &argv[1]));
     return LZ_OK;
 }
