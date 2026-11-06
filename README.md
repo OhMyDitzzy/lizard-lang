@@ -581,6 +581,16 @@ A class can build on another with `:`, replace a function with `override`, call 
 `super`, and ask `is`. A trait lists what a class must provide and may bring ready-made functions.
 `operator` lets your own classes use `+`, `-`, `<`, `==` ...
 
+`extend` adds methods and properties to a type that exists, and an `error` can be a class with
+fields (`error Overdraft : ValueError { pub needed: int }`), caught by kind as before:
+
+```lizard
+extend string { pub fn shout(self) => self.to_upper() + "!" }
+println("hi".shout())                                  # HI!
+```
+
+See `examples/extend.lz` and `examples/error_classes.lz`.
+
 ```lizard
 trait Speaker {
     fn sound(self)                                    # a class must write this

@@ -1,0 +1,34 @@
+# extend: teach an existing type new tricks.
+# The new members exist from the moment the `extend` statement runs.
+
+extend string {
+    pub fn shout(self) => self.to_upper() + "!"
+}
+
+extend int {
+    pub fn double(self) => self * 2
+    pub get is_even(self) => self % 2 equal 0
+}
+
+class Point {
+    pub x: int
+    pub y: int
+}
+
+extend Point {
+    pub fn dist2(self, other) {
+        let dx = self.x - other.x
+        let dy = self.y - other.y
+        return dx * dx + dy * dy
+    }
+}
+
+println("hi".shout())
+println(21.double())
+println(21.is_even)
+println(Point(0, 0).dist2(Point(3, 4)))
+println(["a", "b"].map(fn(s) => s.shout()))
+
+# Extensions only add names: they never replace one that exists. Trying to add
+# `to_upper` to string would stop the program with:
+#   'to_upper' is already defined for string

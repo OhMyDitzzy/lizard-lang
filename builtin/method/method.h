@@ -26,6 +26,8 @@ typedef struct LzMethod {
 
 /* Creates the dispatchers and defines them in vm->methods. Called by lz_builtin_install. */
 LzStatus lz_method_install(LzVM *vm);
+/* Is there a builtin row named `name` that serves one of these kinds (an LZ_KIND_* mask)? */
+bool lz_method_has_row(const char *name, unsigned kinds);
 
 /* Implementations (text.c, number.c, method.c). */
 LzStatus lz_method_to_string(LzVM *vm, int argc, const LzValue *argv, LzValue *result);

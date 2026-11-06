@@ -1,4 +1,5 @@
 #include "lizard/type.h"
+#include "lizard/error.h"
 
 #include "lizard/array.h"
 #include "lizard/class.h"
@@ -246,6 +247,14 @@ bool lz_type_union(LzType *out, const LzType *a, const LzType *b) {
         result.class_name = b->class_name;
         result.class_id = b->class_id;
     }
+    if ((result.kinds & LZ_KIND_INSTANCE) == 0 && (result.kinds & LZ_KIND_ERROR) != 0) {
+        /* an error kind (class_id is kind + 1; 0 any error): two different ones make any error */
+        if ((a->kinds & LZ_KIND_ERROR) != 0 && (b->kinds & LZ_KIND_ERROR) != 0) {
+            result.class_id = a->class_id == b->class_id ? a->class_id : 0;
+        } else {
+            result.class_id = (a->kinds & LZ_KIND_ERROR) != 0 ? a->class_id : b->class_id;
+        }
+    }
     for (size_t i = 0; i < a->literal_count; i++) {
         if (!lz_type_add_literal(&result, &a->literals[i])) {
             return false;
@@ -272,6 +281,9 @@ bool lz_type_equal(const LzType *a, const LzType *b) {
         return false;
     }
     if ((a->kinds & LZ_KIND_INSTANCE) != 0 && a->class_id != b->class_id) {
+        return false;
+    }
+    if ((a->kinds & LZ_KIND_INSTANCE) == 0 && (a->kinds & LZ_KIND_ERROR) != 0 && a->class_id != b->class_id) {
         return false;
     }
     for (size_t i = 0; i < a->literal_count; i++) {
@@ -359,6 +371,12 @@ bool lz_type_matches(const LzType *type, const LzValue *value) {
         return lz_dict_conform((LzDict *)dict, type->element, type->value_element);
     }
     uint16_t value_kind = lz_kind_of(value);
+    if (value_kind == LZ_KIND_ERROR && (type->kinds & LZ_KIND_ERROR) != 0 && (type->kinds & LZ_KIND_INSTANCE) == 0 &&
+        type->class_id != 0) {
+        const LzError *error = (const LzError *)value->as.object;
+        size_t bit = (size_t)(type->class_id - 1);
+        return bit < 256 && ((error->is_kind[bit / 64] >> (bit % 64)) & 1u) != 0;
+    }
     if (INSTANCE_KIND_UNLIKELY(value_kind)) {
         return (type->kinds & LZ_KIND_INSTANCE) != 0 &&
                (type->class_id == 0 || lz_class_is_a(lz_value_as_instance(value)->cls, type->class_id));
@@ -402,6 +420,12 @@ LzAssign lz_type_assignable(const LzType *from, const LzType *to) {
         } else {
             always = false; /* stage 2: a subclass of to->class_name would overlap here */
         }
+    }
+
+    if ((from->kinds & LZ_KIND_ERROR) != 0 && (to->kinds & LZ_KIND_ERROR) != 0 &&
+        (to->kinds & LZ_KIND_INSTANCE) == 0 && to->class_id != 0 && from->class_id != to->class_id) {
+        always = false; /* some error, maybe of that kind: checked when it runs */
+        overlap = true;
     }
 
     if ((from->kinds & LZ_KIND_ARRAY) != 0) {
@@ -594,6 +618,9 @@ void lz_type_describe(const LzType *type, const LzWriter *out) {
     }
     if ((kinds & LZ_KIND_INSTANCE) != 0 && type->class_name != NULL) {
         PART(type->class_name->data); /* "any object" stays implied, like errors */
+    }
+    if ((kinds & LZ_KIND_ERROR) != 0 && (kinds & LZ_KIND_INSTANCE) == 0 && type->class_name != NULL) {
+        PART(type->class_name->data);
     }
     if ((kinds & LZ_KIND_DICT) != 0) {
         if (!first) {

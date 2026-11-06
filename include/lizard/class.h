@@ -83,6 +83,13 @@ typedef struct LzClass {
     int init_member;          /* the member `init`, or -1 */
     bool consts_ready;        /* the initialisers of the constants have run */
     uint32_t offset;
+    /* An `extend` block is a hidden class: it holds the members the block adds (is_ext) and is the
+     * "class" its code is written in, so its private members are visible only to that block. */
+    bool is_ext;
+    uint16_t ext_kinds;       /* is_ext: the builtin kinds it extends (an LZ_KIND_* mask), or 0 for a class */
+    uint64_t ext_target_id;   /* is_ext: the id of the class it extends, or 0 */
+    uint16_t ext_error_kind;  /* is_ext: the error kind it extends + 1 (an error and its descendants), or 0 */
+    LzString *ext_target;     /* is_ext: the name of the target as written (interned, retained) */
 } LzClass;
 
 typedef struct LzInstance {
@@ -91,6 +98,7 @@ typedef struct LzInstance {
     size_t holders;     /* containers that hold this instance, see lz_containers_would_cycle */
     uint32_t mark;      /* graph-walk stamp */
     uint64_t unset;     /* bit i: field i has no value yet */
+    struct LzObject *owner_error; /* the payload of an error (not retained): the error is `self` for the code of the class */
     LzValue fields[];
 } LzInstance;
 
@@ -166,12 +174,44 @@ LzStatus lz_class_construct(LzVM *vm, LzClass *cls, size_t positional, const LzV
                             size_t named_count, const char *names, size_t names_length,
                             const LzValue *named, LzValue *result);
 
+/*
+ * `extend` (see docs/CLASSES.md). lz_vm_extend_register adds the block `ext` to the VM once its
+ * statement runs: it resolves the target (`target`: the class value, or nil for a builtin kind),
+ * refuses names the target already has, and invalidates the method cache. lz_ext_find looks a name
+ * up for a class (and its ancestors) or for a builtin kind.
+ */
+LzStatus lz_vm_extend_register(LzVM *vm, LzClass *ext, const LzValue *target);
+void lz_vm_release_extensions(LzVM *vm);
+bool lz_ext_find_value(const LzVM *vm, const LzValue *value, const LzString *name, LzFound *out);
+bool lz_ext_find_kind(const LzVM *vm, uint16_t kind, const LzString *name, LzFound *out);
+bool lz_ext_find_class(const LzVM *vm, const LzClass *cls, const LzString *name, LzFound *out);
+
 /* The initialisers of the constants (once). Runs script code: needs a running VM. */
 LzStatus lz_class_run_consts(LzVM *vm, LzClass *cls);
 
 /* x.name: the instance's field, property or bound method, or a class's constant or function. */
 LzStatus lz_vm_member_get(LzVM *vm, uint64_t owner, const LzValue *target,
                           const LzString *name, LzValue *result, bool for_write);
+/*
+ * Error classes (`error Name : Parent { ... }`). The class is bound to its kind when the statement
+ * runs. An error of such a kind is an ordinary error value that carries a payload: an instance of
+ * the class that holds the fields. lz_error_class_bind checks and links `cls`.
+ */
+LzStatus lz_error_class_bind(LzVM *vm, LzClass *cls, uint8_t kind, uint8_t parent_kind);
+LzStatus lz_error_class_construct(LzVM *vm, LzClass *cls, uint8_t kind, size_t positional,
+                                  const LzValue *argv, size_t named_count, const char *names,
+                                  size_t names_length, const LzValue *named, LzValue *result);
+/* x.name / x.name = v / a method call on an error that carries a payload (*found: it is a member). */
+LzStatus lz_vm_error_member_get(LzVM *vm, uint64_t owner, const LzValue *error, const LzString *name,
+                                LzValue *result, bool *found);
+LzStatus lz_vm_error_member_set(LzVM *vm, uint64_t owner, const LzValue *error, const LzString *name,
+                                const LzValue *value, bool *found);
+/* Is the error an instance of the class `id` or of a descendant? (False without a payload.) */
+bool lz_error_is_class(const struct LzError *error, uint64_t id);
+
+/* x.name for a value that is not an object: what `extend` added for its kind (*found says whether). */
+LzStatus lz_vm_ext_get(LzVM *vm, uint64_t owner, const LzValue *target, const LzString *name,
+                       LzValue *result, bool *found);
 /* x.name = value. Takes no ownership of value. */
 LzStatus lz_vm_member_set(LzVM *vm, uint64_t owner, const LzValue *target,
                           const LzString *name, const LzValue *value);

@@ -55,6 +55,7 @@ typedef struct LzHandler {
 typedef struct LzErrorType {
     LzString *name; /* interned: the intern table owns it */
     uint8_t parent;
+    struct LzClass *cls; /* the class of an error declared with a body (retained), or NULL */
 } LzErrorType;
 
 struct LzSource;
@@ -107,6 +108,11 @@ struct LzVM {
     struct LzClass **class_registry; /* every live class, sorted by id (weak): see lz_class_by_id */
     size_t class_registry_count;
     size_t class_registry_capacity;
+    struct LzClass **exts;       /* the `extend` blocks that have run, in order (retained) */
+    size_t ext_count;
+    size_t ext_capacity;
+    bool (*method_row_check)(const char *name, unsigned kinds); /* set by the builtin methods: is there a builtin row of this name for these kinds? */
+    uint64_t ext_version;        /* bumped by every extend: caches of method lookups compare it */
     bool has_classes;            /* some class was declared: method calls must look at the receiver's class */
     LzObject *native_with;       /* the natives behind x.with(...) and x.copy() of an instance (retained, lazy) */
     LzObject *native_copy;

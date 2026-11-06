@@ -413,7 +413,7 @@ static void test_inheritance(void) {
     check_run_error("let q = 5\nclass B : q { }\n", "'q' is not a class or a trait");
     check_run_error("class A { }\nclass C { }\nclass B : A, C { }\n",
                     "a class can have only one parent class, and it must come first");
-    check_run_error("error E\nclass B : E { }\n", "inheriting from an error kind is not supported yet");
+    check_run_error("error E\nclass B : E { }\n", "use 'error B : E' to declare an error");
     check_run_error("class B : Nope { }", "undefined variable 'Nope'");
     /* init runs from the root down; every default is set before the first init */
     check_output("class A {\n    pub a: int = 1\n    fn init(self) { println(\"A\", self.a, self.b) }\n}\n"

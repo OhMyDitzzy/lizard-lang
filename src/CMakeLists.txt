@@ -15,6 +15,7 @@ add_library(lizard_core STATIC
     core/run.c
     core/skink.c
     core/error.c
+    core/extend.c
     core/report.c
     core/source.c
     core/suggest.c

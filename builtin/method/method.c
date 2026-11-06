@@ -249,7 +249,17 @@ static LzStatus dispatch(LzVM *vm, int argc, const LzValue *argv, LzValue *resul
                            lz_kind_name(kind), self->name->data, served);
 }
 
+bool lz_method_has_row(const char *name, unsigned kinds) {
+    for (size_t i = 0; i < METHOD_COUNT; i++) {
+        if ((methods[i].kinds & kinds) != 0 && strcmp(methods[i].name, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 LzStatus lz_method_install(LzVM *vm) {
+    vm->method_row_check = lz_method_has_row;
     for (size_t i = 0; i < METHOD_COUNT; i++) {
         if (i > 0 && same_group(&methods[i], &methods[i - 1])) {
             continue;

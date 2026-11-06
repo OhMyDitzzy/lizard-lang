@@ -195,7 +195,7 @@ println(Dog("Rex", breed: "Husky").intro())    # I am Rex and I say Woof
 
 * The parent must exist when the `class` statement runs. A name that is not a class or a trait is
   `'x' is not a class or a trait`; a builtin type is `cannot inherit from a builtin type`; an
-  error kind is `inheriting from an error kind is not supported yet`.
+  error kind is `use 'error X : Y' to declare an error`.
 * **Fields:** the parent's first, then the child's. The constructor takes the `pub` fields of the
   parent (from the root down) and then the child's: `Dog("Rex", breed: "Husky")`. A child cannot
   declare a field its parent has (`Dog redeclares field 'name' of Animal`), and a name cannot
@@ -330,6 +330,74 @@ types. `RuntimeError`: privacy, read-only, unknown members, properties, manual `
 without a value. The sandbox limits (fuel, heap, depth) are not catchable and pass through
 `finally`, including inside constructors, `init` and `to_string`.
 
+## `extend`
+
+```lizard
+extend string { pub fn shout(self) => self.to_upper() + "!" }
+extend int { pub get is_even(self) => self % 2 equal 0 }
+extend Point { pub fn dist2(self, other) => ... }
+```
+
+`extend Target { members }` adds methods and `get` properties to a type that exists, at the top
+level of a file. Target: `string`, `int`, `float`, `bool`, `array`, `dict`, `nil`, `function`
+(every value of that kind), or any class (the class and its descendants). `int[]` is refused
+(`extend works on a whole kind such as 'array', not on 'int[]'`), a trait too (`extending a trait
+is not supported yet`).
+
+* **Only new names.** Fields, constants, static functions, `init`, `operator`, `override` and
+  `super` are errors. A name the target already has (builtin method, class member, ancestor,
+  trait default, earlier extension) is `'x' is already defined for T`, with a help line.
+  A name that is only a global function (UFCS) may be added; the extension wins over it.
+* **From the statement on.** The block is a hidden class (`LzClass.is_ext`) registered in
+  `vm->exts` when its statement runs; it is not hoisted. Two blocks cannot add the same name.
+* **Privacy.** `pub` members are visible everywhere; others only inside the same block. The code in
+  a block is not "inside the class": it sees only the public members of `self`
+  (`'x' is private to Point`, help: `an extension can only use the public members of Point`).
+* **Resolution** for an instance: class chain (leaf to root), then extensions (leaf to root), then
+  trait defaults, then builtin methods, then global functions. For a builtin value: builtin
+  methods, extensions of its kind, global functions. A subclass's own member wins silently; a
+  subclass written later with the name of an extension needs `override`, and `super.name()`
+  reaches the extension.
+* `self` of an extension of a builtin kind is checked against that kind; of a class, not at all.
+  The result of an extension call has type `any`. Traces say `string.shout`, `Point.dist2`.
+* Not supported: `string.shout` (unbound, with a builtin type name as prefix); the bound forms
+  `"hi".shout` and `Point.dist2` work. Extending an error class or `Error` is not tested.
+
+## `error` as a class
+
+```lizard
+error InsufficientFunds : ValueError { pub needed: int }
+error Overdraft : InsufficientFunds {
+    pub account: string = "main"
+    pub get summary(self) => $"{self.account} short by {self.needed}"
+}
+throw Overdraft("not enough", needed: 15)      # or Overdraft("not enough", 15)
+```
+
+An `error` with a body has fields, methods, `get`, constants and `init` with the rules of a class.
+The constructor takes the message, then the `pub` fields (root to leaf); `cause:` and `data:` are
+only given by name. `e.message`, `e.kind`, `e.cause`, `e.data` and `e.trace` are unchanged, and
+so are the printed text (`Kind: message`) and `==` (identity). A field cannot be called like one
+of them (`E redeclares field 'message' of Error`).
+
+* Kind names are types: `e is ValueError`, `fn f(e: Error)`. Errors made by the VM (`TypeError`,
+  `RangeError`, ...) are of the builtin kinds, so `e is TypeError` is right for them.
+  `catch Kind as e` works through inheritance.
+* `class X : Error` is `use 'error X : Error' to declare an error`; `error X : SomeClass` is
+  `'SomeClass' is not an error kind`.
+* `to_string` of an error class is used by `println` and `{e}` (not by the report of an uncaught
+  error); the builtin `to_debug` is `Overdraft("not enough", needed: 15, account: "main")`.
+
+**Design (differs from a plain class):** an error stays one `LzError` object. One with fields
+carries a *payload*, an instance of its class that holds the fields (`LzError.payload`); `self` in
+its methods is the error itself. The class is bound to its kind (`LzErrorType.cls`) when the
+statement runs, so it is not hoisted, while a declaration without a body is, as before. An error
+class is not a global value: `Name(...)` is the kind's constructor. `is_kind` (a bitset of the
+ancestor kinds in each error) lets type checks run without the VM.
+
+Not done: a trait in the head of an `error`, `with`/`copy` of an error with fields, `==` on the
+fields.
+
 ## Decisions
 
 Choices made where the specification was open:
@@ -433,7 +501,7 @@ code for classes in stage 1.
 | more than one parent class, or not first | `a class can have only one parent class, and it must come first` |
 | parent is not a class or trait | `'x' is not a class or a trait` |
 | parent is a builtin type | `cannot inherit from a builtin type` |
-| parent is an error kind | `inheriting from an error kind is not supported yet` |
+| parent is an error kind | `use 'error X : Y' to declare an error` |
 | field declared again | `Dog redeclares field 'name' of Animal` |
 | forgot `override` | `Dog.speak() hides Animal.speak(); add 'override'` |
 | `override` with nothing to replace | `Dog.speek() overrides nothing (did you mean 'speak'?)` |
@@ -450,14 +518,11 @@ code for classes in stage 1.
 
 ## Planned (stage 3)
 
-Still parsed and refused with `... is not supported yet`: `extend`, `pub class`, and `trait` or
-`operator` written inside a trait's body (`operators in traits are not supported yet`). The design
-leaves room: member lookup is one function (`lz_class_lookup`) where a per-class cache with
-invalidation can go, the member table can take members from `extend` and from modules, and class
-identity (`LzClass.id`) does not depend on global names.
-
-Stage 3 opens reference cycles through objects. Today's refusal is in `lz_instance_store`
-(`lz_containers_would_cycle` with an object target); relaxing it also needs the skink to start
-from object stores, as it does for closures. Also left for later: the constructor, `init`, getters
-and operators in plain VM frames (see "Nested calls"), JIT for methods, patterns of `is` in
-`switch`, `error` as a class.
+Still parsed and refused with `... is not supported yet`: `pub class`, and `trait` or `operator`
+written inside a trait's body (`operators in traits are not supported yet`). Stage 3a added
+`extend` and `error` as a class (above). Left for later: stage 3b (reference cycles through
+objects: the refusal is in `lz_instance_store`, and the skink would start from object stores as it
+does for closures), the constructor, `init`, getters and operators in plain VM frames (see "Nested
+calls"), JIT for methods, patterns of `is` in `switch`, modules, `extend` of a trait, and a
+per-class method cache (member lookup is one function, `lz_class_lookup`; `vm->ext_version`
+changes with every `extend`).

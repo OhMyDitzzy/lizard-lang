@@ -68,6 +68,8 @@ typedef struct LzError {
     LzArray *trace; /* strings, innermost first; may be NULL */
     LzValue cause;
     LzValue data;
+    uint64_t is_kind[4];        /* bit k: the kind of this error is kind k or a descendant of it */
+    struct LzInstance *payload; /* an error of a class declared with `error`: the instance that holds its fields (retained), or NULL */
 } LzError;
 
 static inline bool lz_value_is_error(const LzValue *value) {
@@ -98,6 +100,18 @@ LzStatus lz_vm_error_declare(struct LzVM *vm, LzString *name, uint8_t parent, ui
 
 /* Is this native the function that makes errors of a kind? *kind says which one. */
 bool lz_native_error_kind(const struct LzNative *native, uint8_t *kind);
+
+/* Makes the plain error of a constructor call (checks the types); the creation reference moves to *result. */
+LzStatus lz_error_construct_core(struct LzVM *vm, uint8_t kind, const LzValue *message,
+                                 const LzValue *cause, const LzValue *data, LzValue *result);
+
+/* The class bound to a declared kind (`error Name : Parent { ... }`), or NULL. */
+struct LzClass *lz_vm_error_class(const struct LzVM *vm, unsigned kind);
+/* Binds a class to a declared kind (retained); widens the constructor to take the fields too. */
+LzStatus lz_vm_error_set_class(struct LzVM *vm, uint8_t kind, struct LzClass *cls);
+/* Lets the constructor of the kind take the fields of a class declared in the file (before it runs). */
+void lz_vm_error_widen_constructor(struct LzVM *vm, uint8_t kind);
+void lz_vm_release_error_classes(struct LzVM *vm);
 
 /* The native behind every error constructor; the kind is in the native's data. */
 LzStatus lz_error_type_native(struct LzVM *vm, int argc, const LzValue *argv, LzValue *result);
@@ -136,6 +150,10 @@ LzStatus lz_error_attach_trace(struct LzVM *vm, LzError *error);
  * form a cycle here: the error is new, so nothing holds it yet. The caller checks the types.
  */
 void lz_error_set_extra(struct LzVM *vm, LzError *error, const LzValue *cause, const LzValue *data);
+
+/* The text of an error for println and friends: the to_string / to_debug of its class when it has one,
+ * else "Kind: message" (debug form of an error with fields: Kind("message", field: v)). */
+bool lz_error_write_text(const LzError *error, const LzWriter *writer, bool debug);
 
 /* "Kind: message". Returns false when the writer fails. */
 bool lz_error_write(const LzError *error, const LzWriter *writer);

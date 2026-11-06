@@ -204,6 +204,10 @@ typedef struct Parser {
     size_t class_parent_count; /* parents named in the head of the class being compiled */
     bool is_rhs;              /* parsing the type after `is`: an unknown name is "not a type" */
     bool in_trait;            /* the body being compiled is a trait's */
+    bool in_extend;           /* the body being compiled is an `extend` block's */
+    uint64_t error_class_kinds[4]; /* bit k: the error kind k has a class (declared in this file) */
+    uint16_t extend_kinds;    /* ...and the builtin kinds it extends (0: a class) */
+    uint16_t error_self_kind; /* the body being compiled is of an error class: its kind + 1, else 0 */
     bool last_bodiless;       /* the member function just compiled had no body (a trait's requirement) */
     LzString *classes[64];    /* the classes declared so far: valid names in a type */
     uint64_t class_ids[64];   /* their identities (LzClass.id), parallel to classes */
@@ -1217,6 +1221,15 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
                 out->class_id = lz_value_as_class(bound)->id;
                 return true;
             }
+            uint8_t error_kind;
+            if (lz_vm_error_kind_from_name(parser->vm, parser->source->text + token.offset, token.length,
+                                           &error_kind)) {
+                *out = lz_type_of_kinds(LZ_KIND_ERROR); /* Error, ValueError, an error of the script... */
+                out->class_id = (uint64_t)error_kind + 1;
+                out->class_name = lz_vm_intern(parser->vm, lz_vm_error_kind_name(parser->vm, error_kind),
+                                               strlen(lz_vm_error_kind_name(parser->vm, error_kind)));
+                return true;
+            }
             if (bound != NULL) {
                 error_with_name(parser, &token, "'", "' is not a type");
                 return false;
@@ -1710,6 +1723,10 @@ static Expr call_args(Parser *parser, Expr callee, bool receiver);
 static Expr super_expr(Parser *parser, const LzToken *token) {
     if (parser->in_trait) {
         error_at(parser, token, "'super' cannot be used in a trait");
+        return any_expr();
+    }
+    if (parser->in_extend) {
+        error_at(parser, token, "'super' cannot be used in an extension");
         return any_expr();
     }
     bool method = false;
@@ -2864,7 +2881,12 @@ static Expr call_result(Expr callee) {
 static Expr call_special(Parser *parser, Expr callee, const LzToken *paren, bool receiver) {
     uint32_t offset = paren->offset;
     const FuncSig *sig = callee.sig;
-    bool makes_error = callee.native != NULL && !receiver && lz_native_error_kind(callee.native, NULL);
+    uint8_t error_kind_made = 0;
+    bool makes_error = callee.native != NULL && !receiver && lz_native_error_kind(callee.native, &error_kind_made);
+    /* An error with a class takes its fields by name too: the call checks them when it runs. */
+    bool error_has_class = makes_error &&
+                           (((parser->error_class_kinds[error_kind_made / 64] >> (error_kind_made % 64)) & 1u) != 0 ||
+                            lz_vm_error_class(parser->vm, error_kind_made) != NULL);
     emit_op_at(parser, LZ_OP_ARRAY_NEW, offset);
     if (receiver) {
         /* [callee][receiver][array] -> [callee][array][receiver] -> [callee][array] */
@@ -2908,7 +2930,9 @@ static Expr call_special(Parser *parser, Expr callee, const LzToken *paren, bool
                         error_with_name(parser, &name_token, "argument '", "' is given twice");
                     }
                 }
-                if (makes_error) {
+                if (makes_error && error_has_class) {
+                    /* checked when the call runs */
+                } else if (makes_error) {
                     bool known = name != NULL && ((name->length == 5 && memcmp(name->data, "cause", 5) == 0) ||
                                                   (name->length == 4 && memcmp(name->data, "data", 4) == 0));
                     if (!known) {
@@ -5574,6 +5598,12 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
             bool is_self = is_member && param->length == 4 && memcmp(param->data, "self", 4) == 0;
             if (is_self && param_count != 0) {
                 error_at(parser, &param_token, "'self' must be the first parameter of a method");
+            } else if (is_self && !rest && parser->error_self_kind != 0) {
+                declared = lz_type_of_kinds(LZ_KIND_ERROR); /* self is the error value */
+                declared.class_id = parser->error_self_kind;
+            } else if (is_self && !rest && parser->in_extend) {
+                /* An extension of a builtin kind checks `self` against it; of a class, not at all. */
+                declared = lz_type_of_kinds(parser->extend_kinds != 0 ? parser->extend_kinds : LZ_KINDS_ANY);
             } else if (is_self && !rest) {
                 declared = lz_type_of_kinds(LZ_KIND_INSTANCE); /* Point.sum(x) checks x is a Point */
                 declared.class_name = parser->class_name;
@@ -6040,6 +6070,10 @@ static void class_member(Parser *parser, LzClass *cls) {
         LzTokenType after = next_token_type(parser);
         if (after != LZ_TOKEN_COLON && after != LZ_TOKEN_EQUAL && after != LZ_TOKEN_NEWLINE &&
             after != LZ_TOKEN_RIGHT_BRACE && after != LZ_TOKEN_SEMICOLON) {
+            if (parser->in_extend) {
+                error_at_current(parser, "operators cannot be added by extend yet");
+                return;
+            }
             operator_member(parser, cls, vis, is_override);
             return;
         }
@@ -6074,6 +6108,20 @@ static void class_member(Parser *parser, LzClass *cls) {
         return;
     }
     (void)has_pub;
+    if (parser->in_extend) {
+        if (is_override) {
+            error_at(parser, &override_token, "extend cannot override a method; it can only add new ones");
+            return;
+        }
+        if (kind == LZ_MEMBER_FIELD) {
+            error_at(parser, &head, "an extension cannot add fields");
+            return;
+        }
+        if (kind == LZ_MEMBER_CONST) {
+            error_at(parser, &head, "an extension cannot add constants");
+            return;
+        }
+    }
     if (parser->in_trait) {
         vis = LZ_VIS_PUB; /* what a trait offers is public, written `pub` or not */
         if (kind == LZ_MEMBER_FIELD) {
@@ -6166,6 +6214,16 @@ static void class_member(Parser *parser, LzClass *cls) {
         }
     } else if (!has_self) {
         kind = LZ_MEMBER_STATIC;
+    }
+    if (parser->in_extend) {
+        if (kind == LZ_MEMBER_STATIC) {
+            error_at(parser, &name_token, "an extension cannot add static functions yet");
+            return;
+        }
+        if (kind == LZ_MEMBER_METHOD && strcmp(name->data, "init") == 0) {
+            error_at(parser, &name_token, "an extension cannot add init()");
+            return;
+        }
     }
     if (parser->in_trait) {
         if (kind == LZ_MEMBER_STATIC) {
@@ -6351,6 +6409,131 @@ static void class_declaration(Parser *parser) {
     }
     emit_op_at(parser, LZ_OP_CLASS_INIT, name_token.offset);
     emit_u16_at(parser, index, name_token.offset);
+    end_statement(parser);
+}
+
+/*
+ * `extend Target { members }`: adds methods and properties to a type that exists. The block is a
+ * hidden class (see src/core/extend.c); the statement that registers it runs at its place in the
+ * file, so the names it adds exist from there on.
+ */
+static void extend_declaration(Parser *parser) {
+    LzToken extend_token = parser->current;
+    advance(parser); /* extend */
+    if (parser->fs->function != NULL || parser->scope_depth != 0) {
+        error_at(parser, &extend_token, "extend can only be used at the top level");
+        skip_class_body(parser);
+        return;
+    }
+    advance(parser); /* the target */
+    LzToken target = parser->previous;
+    char text[48];
+    token_text(parser, &target, text, sizeof text);
+    uint16_t kinds = 0;
+    bool is_class = false;
+    char message[160];
+    if (check(parser, LZ_TOKEN_LEFT_BRACKET)) {
+        error_at(parser, &target, "extend works on a whole kind such as 'array', not on 'int[]'");
+        skip_class_body(parser);
+        return;
+    }
+    if (strcmp(text, "string") == 0) {
+        kinds = LZ_KIND_STRING;
+    } else if (strcmp(text, "int") == 0) {
+        kinds = LZ_KIND_INT;
+    } else if (strcmp(text, "float") == 0) {
+        kinds = LZ_KIND_FLOAT;
+    } else if (strcmp(text, "bool") == 0) {
+        kinds = LZ_KIND_BOOL;
+    } else if (strcmp(text, "array") == 0) {
+        kinds = LZ_KIND_ARRAY;
+    } else if (strcmp(text, "dict") == 0) {
+        kinds = LZ_KIND_DICT;
+    } else if (strcmp(text, "nil") == 0) {
+        kinds = LZ_KIND_NIL;
+    } else if (strcmp(text, "function") == 0) {
+        kinds = LZ_KIND_FUNCTION;
+    } else {
+        LzType ignored;
+        if (builtin_type(text, &ignored)) {
+            (void)snprintf(message, sizeof message, "'%s' is not a type that can be extended", text);
+            error_at(parser, &target, message);
+            skip_class_body(parser);
+            return;
+        }
+        is_class = true;
+    }
+    LzString *name = intern_token(parser, &target);
+    if (name == NULL) {
+        return;
+    }
+    if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
+        error_at_current(parser, "expected '{' before the extend body");
+        return;
+    }
+    parser->vm->has_classes = true;
+    LzClass *cls = lz_class_new(parser->vm, name, target.offset);
+    if (cls == NULL) {
+        fail(parser, lz_vm_out_of_memory(parser->vm));
+        return;
+    }
+    cls->is_ext = true;
+    cls->ext_kinds = kinds;
+    cls->ext_target = name;
+    lz_object_retain(&name->base);
+
+    LzString *saved_class = parser->class_name;
+    uint64_t saved_class_id = parser->current_class_id;
+    size_t saved_parent_count = parser->class_parent_count;
+    bool saved_in_trait = parser->in_trait;
+    bool saved_in_extend = parser->in_extend;
+    parser->class_name = name;
+    parser->current_class_id = cls->id;
+    parser->class_parent_count = 0;
+    parser->in_trait = false;
+    parser->in_extend = true;
+    uint16_t saved_extend_kinds = parser->extend_kinds;
+    parser->extend_kinds = kinds;
+
+    advance(parser); /* { */
+    int body_depth = parser->bracket_depth - 1;
+    skip_newlines(parser);
+    while (!check(parser, LZ_TOKEN_RIGHT_BRACE) && !check(parser, LZ_TOKEN_EOF) && parser->fatal == LZ_OK &&
+           !parser->panic) {
+        class_member(parser, cls);
+        while (match(parser, LZ_TOKEN_NEWLINE) || match(parser, LZ_TOKEN_SEMICOLON)) {
+        }
+    }
+    parser->class_name = saved_class;
+    parser->current_class_id = saved_class_id;
+    parser->class_parent_count = saved_parent_count;
+    parser->in_trait = saved_in_trait;
+    parser->in_extend = saved_in_extend;
+    parser->extend_kinds = saved_extend_kinds;
+    if (!parser->panic) {
+        consume(parser, LZ_TOKEN_RIGHT_BRACE, "expected '}' after the extend body");
+    }
+    if (parser->panic || parser->fatal != LZ_OK) {
+        while (parser->fatal == LZ_OK && !check(parser, LZ_TOKEN_EOF) && parser->bracket_depth > body_depth) {
+            advance(parser);
+        }
+        lz_object_release(&parser->vm->heap, &cls->base);
+        return;
+    }
+    for (size_t i = 0; i < cls->member_count; i++) {
+        if (cls->members[i].is_required) {
+            error_at(parser, &extend_token, "this function needs a body (only a trait can leave it out)");
+            lz_object_release(&parser->vm->heap, &cls->base);
+            return;
+        }
+    }
+    uint16_t index = add_constant(parser, lz_value_object(&cls->base), true);
+    lz_object_release(&parser->vm->heap, &cls->base);
+    uint16_t name_index = add_constant(parser, lz_value_object(&name->base), true);
+    emit_op_at(parser, LZ_OP_EXTEND, target.offset);
+    emit_u16_at(parser, index, target.offset);
+    emit_u16_at(parser, name_index, target.offset);
+    emit_byte_at(parser, is_class ? 1 : 0, target.offset);
     end_statement(parser);
 }
 
@@ -6671,6 +6854,76 @@ static bool at_error_declaration(const Parser *parser) {
 }
 
 /*
+ * The body of `error Name : Parent { ... }`, or the empty class of an error whose parent has one: a
+ * class in the sense of `class`, bound to the kind when the statement runs (it is not hoisted: its
+ * defaults and `init` are code). The kind itself is declared by the prescan, as without a body.
+ */
+static void error_class_body(Parser *parser, const LzToken *name_token, uint8_t kind, bool has_body,
+                             bool parent_class) {
+    LzString *name = intern_token(parser, name_token);
+    if (name == NULL) {
+        return;
+    }
+    parser->vm->has_classes = true;
+    LzClass *cls = lz_class_new(parser->vm, name, name_token->offset);
+    if (cls == NULL) {
+        fail(parser, lz_vm_out_of_memory(parser->vm));
+        return;
+    }
+    LzString *saved_class = parser->class_name;
+    uint64_t saved_class_id = parser->current_class_id;
+    size_t saved_parent_count = parser->class_parent_count;
+    bool saved_in_trait = parser->in_trait;
+    bool saved_in_extend = parser->in_extend;
+    parser->class_name = name;
+    parser->current_class_id = cls->id;
+    parser->class_parent_count = parent_class ? 1 : 0;
+    parser->in_trait = false;
+    parser->in_extend = false;
+    uint16_t saved_self_kind = parser->error_self_kind;
+    parser->error_self_kind = (uint16_t)(kind + 1);
+    int body_depth = parser->bracket_depth;
+    if (has_body) {
+        advance(parser); /* { */
+        body_depth = parser->bracket_depth - 1;
+        skip_newlines(parser);
+        while (!check(parser, LZ_TOKEN_RIGHT_BRACE) && !check(parser, LZ_TOKEN_EOF) && parser->fatal == LZ_OK &&
+               !parser->panic) {
+            class_member(parser, cls);
+            while (match(parser, LZ_TOKEN_NEWLINE) || match(parser, LZ_TOKEN_SEMICOLON)) {
+            }
+        }
+    }
+    parser->class_name = saved_class;
+    parser->current_class_id = saved_class_id;
+    parser->class_parent_count = saved_parent_count;
+    parser->in_trait = saved_in_trait;
+    parser->in_extend = saved_in_extend;
+    parser->error_self_kind = saved_self_kind;
+    if (has_body && !parser->panic) {
+        consume(parser, LZ_TOKEN_RIGHT_BRACE, "expected '}' after the error body");
+    }
+    if (parser->panic || parser->fatal != LZ_OK) {
+        while (parser->fatal == LZ_OK && !check(parser, LZ_TOKEN_EOF) && parser->bracket_depth > body_depth) {
+            advance(parser);
+        }
+        lz_object_release(&parser->vm->heap, &cls->base);
+        return;
+    }
+    lz_class_seal(cls);
+    uint16_t index = add_constant(parser, lz_value_object(&cls->base), true);
+    lz_object_release(&parser->vm->heap, &cls->base);
+    uint16_t name_index = add_constant(parser, lz_value_object(&name->base), true);
+    emit_op_at(parser, LZ_OP_ERROR_CLASS, name_token->offset);
+    emit_u16_at(parser, index, name_token->offset);
+    emit_u16_at(parser, name_index, name_token->offset);
+    emit_byte_at(parser, 0, name_token->offset);
+    parser->error_class_kinds[kind / 64] |= (uint64_t)1 << (kind % 64);
+    lz_vm_error_widen_constructor(parser->vm, kind);
+    end_statement(parser);
+}
+
+/*
  * error Name [: Parent]. The kind is already declared by the prescan; here the declaration is
  * checked for where it stands and its mistakes are told. `error` is a keyword here and nowhere
  * else: anywhere but the start of a statement it is a name like any other.
@@ -6695,6 +6948,9 @@ static void error_declaration(Parser *parser) {
     }
     if (nested) {
         error_at(parser, &keyword, "an 'error' declaration is only allowed at the top level");
+        if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            skip_class_body(parser);
+        }
         return;
     }
 
@@ -6717,11 +6973,32 @@ static void error_declaration(Parser *parser) {
         break;
     case ERROR_DECL_DUPLICATE:
         error_with_name(parser, &name_token, "duplicate error type '", "'");
+        if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            skip_class_body(parser);
+        }
         return;
     case ERROR_DECL_COLLISION:
         error_with_name(parser, &name_token, "'", "' is already used by a variable or function");
+        if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            skip_class_body(parser);
+        }
         return;
     case ERROR_DECL_UNKNOWN_PARENT: {
+        {
+            LzString *parent_name = intern_token(parser, &parent_token);
+            bool is_class = false;
+            for (size_t i = 0; parent_name != NULL && i < parser->class_count; i++) {
+                is_class = is_class || parser->classes[i] == parent_name;
+            }
+            const LzValue *bound = parent_name != NULL ? lz_table_get(&parser->vm->globals, parent_name) : NULL;
+            if (is_class || (bound != NULL && lz_value_is_class(bound))) {
+                error_with_name(parser, &parent_token, "'", "' is not an error kind");
+                if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+                    skip_class_body(parser);
+                }
+                return;
+            }
+        }
         LzSuggester suggester;
         lz_suggester_init(&suggester, parser->source->text + parent_token.offset,
                           parent_token.length);
@@ -6737,6 +7014,9 @@ static void error_declaration(Parser *parser) {
         }
         error_with_name_suggest(parser, &parent_token, "unknown error type '", "'",
                                 "not a known error type", &suggester.found);
+        if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            skip_class_body(parser);
+        }
         return;
     }
     case ERROR_DECL_LIMIT: {
@@ -6744,8 +7024,25 @@ static void error_declaration(Parser *parser) {
         (void)snprintf(message, sizeof message, "too many error types (limit %d)",
                        LZ_ERROR_TYPES_MAX);
         error_at(parser, &name_token, message);
+        if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            skip_class_body(parser);
+        }
         return;
     }
+    }
+    uint8_t kind = 0;
+    uint8_t parent_kind = LZ_ERROR_ERROR;
+    bool known = lz_vm_error_kind_from_name(parser->vm, parser->source->text + name_token.offset,
+                                            name_token.length, &kind);
+    if (known) {
+        (void)lz_vm_error_kind_parent(parser->vm, kind, &parent_kind);
+    }
+    bool has_body = check(parser, LZ_TOKEN_LEFT_BRACE);
+    bool parent_class = ((parser->error_class_kinds[parent_kind / 64] >> (parent_kind % 64)) & 1u) != 0 ||
+                        lz_vm_error_class(parser->vm, parent_kind) != NULL;
+    if (known && (has_body || parent_class)) {
+        error_class_body(parser, &name_token, kind, has_body, parent_class);
+        return;
     }
     end_statement(parser);
 }
@@ -6898,6 +7195,11 @@ static void declaration(Parser *parser) {
             advance(parser); /* pub */
             advance(parser); /* class */
             skip_class_body(parser);
+        } else if (word_is(parser, &parser->current, "extend") &&
+                   (next_token_type(parser) == LZ_TOKEN_IDENTIFIER || next_token_type(parser) == LZ_TOKEN_NIL) &&
+                   peek_token(parser, 2).type != LZ_TOKEN_EQUAL && peek_token(parser, 2).type != LZ_TOKEN_DOT &&
+                   peek_token(parser, 2).type != LZ_TOKEN_LEFT_PAREN) {
+            extend_declaration(parser);
         } else if (at_error_declaration(parser)) {
             error_declaration(parser);
         } else if (is_type_keyword(parser) && next_token_type(parser) == LZ_TOKEN_IDENTIFIER) {
@@ -6941,6 +7243,15 @@ static void prescan_classes(Parser *parser) {
         bool starts = at_start;
         at_start = token.type == LZ_TOKEN_NEWLINE || token.type == LZ_TOKEN_SEMICOLON ||
                    (token.type == LZ_TOKEN_RIGHT_BRACE && lexer.nesting == 0);
+        if (starts && lexer.nesting == 0 && word_is(parser, &token, "extend")) {
+            LzLexer peek = lexer;
+            LzToken name = lz_lexer_next(&peek);
+            LzToken after = lz_lexer_next(&peek);
+            if ((name.type == LZ_TOKEN_IDENTIFIER || name.type == LZ_TOKEN_NIL) && (after.type == LZ_TOKEN_LEFT_BRACE || after.type == LZ_TOKEN_LEFT_BRACKET)) {
+                parser->vm->has_classes = true;
+                return;
+            }
+        }
         if (starts && lexer.nesting == 0 && word_is(parser, &token, "class")) {
             LzLexer peek = lexer;
             LzToken name = lz_lexer_next(&peek);

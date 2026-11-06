@@ -42,6 +42,11 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->error_help[0] = '\0';
     vm->text_status = LZ_OK;
     vm->has_classes = false;
+    vm->exts = NULL;
+    vm->ext_count = 0;
+    vm->ext_capacity = 0;
+    vm->ext_version = 0;
+    vm->method_row_check = NULL;
     vm->next_class_id = 0;
     vm->class_registry = NULL;
     vm->class_registry_count = 0;
@@ -99,11 +104,13 @@ void lz_vm_release_roots(LzVM *vm) {
         vm->last_thrown = lz_value_nil();
         lz_value_release(&vm->heap, &last);
     }
+    lz_vm_release_error_classes(vm); /* before the count goes: the classes are retained per kind */
     vm->error_type_count = 0; /* the names go with the intern table below */
     lz_table_free(&vm->heap, &vm->methods);
     lz_table_free(&vm->heap, &vm->builtins);
     lz_table_free(&vm->heap, &vm->globals);
     lz_table_free(&vm->heap, &vm->strings);
+    lz_vm_release_extensions(vm);
     lz_vm_release_class_constants(vm); /* a constant may be an instance of its own class */
     if (vm->native_with != NULL) {
         lz_object_release(&vm->heap, vm->native_with);

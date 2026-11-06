@@ -1,4 +1,5 @@
 #include "lizard/error.h"
+#include "lizard/class.h"
 
 #include "lizard/dict.h"
 #include "lizard/native.h"
@@ -239,6 +240,7 @@ LzStatus lz_vm_error_declare(LzVM *vm, LzString *name, uint8_t parent, uint8_t *
     }
     vm->error_types[vm->error_type_count].name = name;
     vm->error_types[vm->error_type_count].parent = parent;
+    vm->error_types[vm->error_type_count].cls = NULL;
     vm->error_type_count++;
     *out = kind;
     return LZ_OK;
@@ -269,6 +271,16 @@ LzStatus lz_error_new(LzVM *vm, unsigned kind, const char *message, size_t lengt
     error->trace = NULL;
     error->cause = lz_value_nil();
     error->data = lz_value_nil();
+    error->payload = NULL;
+    memset(error->is_kind, 0, sizeof error->is_kind);
+    for (unsigned k = kind;; ) {
+        error->is_kind[k / 64] |= (uint64_t)1 << (k % 64);
+        uint8_t parent;
+        if (!lz_vm_error_kind_parent(vm, k, &parent)) {
+            break;
+        }
+        k = parent;
+    }
     *out = error;
     return LZ_OK;
 }
@@ -323,8 +335,8 @@ static bool is_string(const LzValue *value) {
 }
 
 /* Checks the arguments and makes the error; the creation reference moves to *result. */
-static LzStatus construct(LzVM *vm, uint8_t kind, const LzValue *message, const LzValue *cause,
-                          const LzValue *data, LzValue *result) {
+LzStatus lz_error_construct_core(LzVM *vm, uint8_t kind, const LzValue *message, const LzValue *cause,
+                                 const LzValue *data, LzValue *result) {
     if (!is_string(message)) {
         return lz_vm_set_error(vm, LZ_ERR_TYPE, "the message of an error must be a string");
     }
@@ -345,9 +357,12 @@ static LzStatus construct(LzVM *vm, uint8_t kind, const LzValue *message, const 
 LzStatus lz_error_type_native(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
     /* current_native is valid at the entry only: read it before anything else runs. */
     uint8_t kind = (uint8_t)(uintptr_t)vm->current_native->data;
-    (void)argc; /* lz_native_call has checked that there is exactly one */
+    LzClass *cls = lz_vm_error_class(vm, kind);
+    if (cls != NULL) {
+        return lz_error_class_construct(vm, cls, kind, (size_t)argc, argv, 0, NULL, 0, NULL, result);
+    }
     LzValue nil = lz_value_nil();
-    return construct(vm, kind, &argv[0], &nil, &nil, result);
+    return lz_error_construct_core(vm, kind, &argv[0], &nil, &nil, result);
 }
 
 /* The index of the name [name, name + length) among the names the call can take, or -1. */
@@ -365,6 +380,11 @@ LzStatus lz_error_construct_named(LzVM *vm, uint8_t kind, size_t positional, con
                                   size_t named_count, const char *names, size_t names_length,
                                   const LzValue *named, LzValue *result) {
     const char *kind_name = lz_vm_error_kind_name(vm, kind);
+    LzClass *cls = lz_vm_error_class(vm, kind);
+    if (cls != NULL) {
+        return lz_error_class_construct(vm, cls, kind, positional, argv, named_count, names, names_length,
+                                        named, result);
+    }
     if (positional != 1) {
         return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): wrong number of arguments (%zu given)",
                                kind_name, positional);
@@ -393,5 +413,49 @@ LzStatus lz_error_construct_named(LzVM *vm, uint8_t kind, size_t positional, con
         given[slot] = named[k];
         position = end + 1;
     }
-    return construct(vm, kind, &argv[0], &given[0], &given[1], result);
+    return lz_error_construct_core(vm, kind, &argv[0], &given[0], &given[1], result);
+}
+
+/* Classes of declared kinds */
+
+LzClass *lz_vm_error_class(const LzVM *vm, unsigned kind) {
+    if (kind < LZ_ERROR_KIND_COUNT || (size_t)(kind - LZ_ERROR_KIND_COUNT) >= vm->error_type_count) {
+        return NULL;
+    }
+    return vm->error_types[kind - LZ_ERROR_KIND_COUNT].cls;
+}
+
+LzStatus lz_vm_error_set_class(LzVM *vm, uint8_t kind, LzClass *cls) {
+    if (kind < LZ_ERROR_KIND_COUNT || (size_t)(kind - LZ_ERROR_KIND_COUNT) >= vm->error_type_count) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "only a declared error kind can have a class");
+    }
+    LzErrorType *type = &vm->error_types[kind - LZ_ERROR_KIND_COUNT];
+    if (type->cls == cls) {
+        return LZ_OK; /* the statement ran before */
+    }
+    lz_object_retain(&cls->base);
+    LzClass *old = type->cls;
+    type->cls = cls;
+    if (old != NULL) {
+        lz_object_release(&vm->heap, &old->base);
+    }
+    lz_vm_error_widen_constructor(vm, kind);
+    return LZ_OK;
+}
+
+void lz_vm_error_widen_constructor(LzVM *vm, uint8_t kind) {
+    const LzValue *found = lz_vm_lookup(vm, vm->error_types[kind - LZ_ERROR_KIND_COUNT].name);
+    if (found != NULL && found->type == LZ_VAL_OBJECT && found->as.object->type == LZ_OBJ_NATIVE) {
+        ((LzNative *)found->as.object)->max_args = 1 + 64; /* the fields are checked when it runs */
+    }
+}
+
+void lz_vm_release_error_classes(LzVM *vm) {
+    for (size_t i = 0; i < vm->error_type_count; i++) {
+        LzClass *cls = vm->error_types[i].cls;
+        vm->error_types[i].cls = NULL;
+        if (cls != NULL) {
+            lz_object_release(&vm->heap, &cls->base);
+        }
+    }
 }

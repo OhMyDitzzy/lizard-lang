@@ -176,6 +176,9 @@ static bool write_entry(const LzValue *value, const LzWriter *writer) {
     if (lz_value_is_instance(value)) {
         return lz_instance_write(lz_value_as_instance(value), writer, true);
     }
+    if (lz_value_is_error(value)) {
+        return lz_error_write_text((const LzError *)value->as.object, writer, true);
+    }
     return lz_value_write(value, writer);
 }
 
@@ -273,7 +276,7 @@ static bool write_object(const LzObject *object, const LzWriter *writer) {
                lz_writer_write_cstr(writer, ">");
     }
     case LZ_OBJ_ERROR:
-        return lz_error_write((const LzError *)object, writer);
+        return lz_error_write_text((const LzError *)object, writer, false);
     case LZ_OBJ_CLASS: {
         const LzClass *cls = (const LzClass *)object;
         return lz_writer_write_cstr(writer, cls->is_trait ? "<trait " : "<class ") &&
@@ -338,6 +341,10 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
             lz_object_release(heap, &error->trace->base);
         }
         lz_value_release(heap, &error->cause);
+        if (error->payload != NULL) {
+            error->payload->owner_error = NULL;
+            lz_object_release(heap, &error->payload->base);
+        }
         lz_drop_container_holder(&error->data);
         lz_value_release(heap, &error->data);
         break;
@@ -696,6 +703,9 @@ bool lz_value_write_debug(const LzValue *value, const LzWriter *writer) {
     }
     if (lz_value_is_instance(value)) {
         return lz_instance_write(lz_value_as_instance(value), writer, true);
+    }
+    if (lz_value_is_error(value)) {
+        return lz_error_write_text((const LzError *)value->as.object, writer, true);
     }
     return lz_value_write(value, writer);
 }

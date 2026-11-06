@@ -135,7 +135,7 @@ static bool error_may_hold_cycles(const LzError *error) {
     bool data = error->data.type == LZ_VAL_OBJECT && error->data.as.object->type != LZ_OBJ_STRING &&
                 error->data.as.object->type != LZ_OBJ_NATIVE &&
                 error->data.as.object->type != LZ_OBJ_FUNCTION;
-    return data || error->cause.type == LZ_VAL_OBJECT;
+    return data || error->cause.type == LZ_VAL_OBJECT || error->payload != NULL;
 }
 
 /* Objects that can take part in a cycle. Strings, natives and functions are leaves. */
@@ -209,7 +209,7 @@ static size_t slot_count(const LzObject *node) {
     case LZ_OBJ_UPVALUE:
         return 1;
     case LZ_OBJ_ERROR:
-        return 2; /* cause and data */
+        return 3; /* cause, data and the payload */
     case LZ_OBJ_INSTANCE:
         return ((const LzInstance *)node)->cls->field_count;
     case LZ_OBJ_BOUND:
@@ -293,6 +293,9 @@ static bool each_edge(Trial *trial, LzObject *node, EdgeFn visit) {
             return false;
         }
         if (is_graph_value(&error->data) && !visit(trial, error->data.as.object)) {
+            return false;
+        }
+        if (error->payload != NULL && !visit(trial, &error->payload->base)) {
             return false;
         }
         return true;
@@ -543,6 +546,12 @@ static void clear_edges(LzVM *vm, LzObject *node) {
         lz_drop_container_holder(&data);
         lz_value_release(&vm->heap, &cause);
         lz_value_release(&vm->heap, &data);
+        if (error->payload != NULL) {
+            LzInstance *payload = error->payload;
+            error->payload = NULL;
+            payload->owner_error = NULL;
+            lz_object_release(&vm->heap, &payload->base);
+        }
         break;
     }
     case LZ_OBJ_CLASS:

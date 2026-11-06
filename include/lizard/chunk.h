@@ -127,9 +127,14 @@ typedef enum LzOpCode {
                           becomes [self][the parent's method]; mode 1 (a property): [self] becomes the
                           value of the parent's property. The search starts at the parent of the class
                           the code is written in, not at the class of self. */
-    LZ_OP_CLASS_LINK   /* u16 constant (a class), u16 constant (the parent's name), u8 role: pops the
+    LZ_OP_CLASS_LINK,  /* u16 constant (a class), u16 constant (the parent's name), u8 role: pops the
                           parent class (or trait) named in the head `class A : B, C` and joins it to
                           the class; role 0 is the first entry, 1 a later one */
+    LZ_OP_ERROR_CLASS, /* u16 constant (a class), u16 constant (the name of the kind), u8 reserved: binds the
+                          body of `error Name : Parent { ... }` to its kind */
+    LZ_OP_EXTEND       /* u16 constant (an extend block, a hidden class), u16 constant (the name of the
+                          target), u8 mode: registers the block. Mode 0: a builtin kind (the block says
+                          which); mode 1: the target is the class the global of that name holds */
 } LzOpCode;
 
 #define LZ_CONSTANTS_MAX 65536

@@ -777,6 +777,18 @@ static LzStatus set_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     }
     LzValue value = vm->stack[vm->stack_count - 1];
     LzValue target = vm->stack[vm->stack_count - 2];
+    if (lz_value_is_error(&target) && ((LzError *)target.as.object)->payload != NULL) {
+        bool member = false;
+        status = lz_vm_error_member_set(vm, current_owner(vm), &target, name, &value, &member);
+        if (status != LZ_OK) {
+            return status;
+        }
+        if (member) {
+            pop(vm);
+            pop(vm);
+            return LZ_OK;
+        }
+    }
     if (!lz_value_is_instance(&target) && !lz_value_is_class(&target)) {
         return lz_vm_set_error(vm, LZ_ERR_TYPE, "cannot assign to field '%s' of %s", name->data,
                                lz_value_kind_name(&target));
@@ -840,6 +852,64 @@ static LzStatus super_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     return lz_vm_super_lookup(vm, current_owner(vm), name, mode, vm->stack_count - need);
 }
 
+/* `error Name : Parent { ... }` once the body is compiled: binds the class to the kind. */
+static LzStatus error_class_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
+    const LzValue *constant = NULL;
+    LzStatus status = read_constant(vm, chunk, ip, &constant);
+    if (status != LZ_OK) {
+        return status;
+    }
+    if (!lz_value_is_class(constant)) {
+        return malformed(vm, "class expected");
+    }
+    LzString *name = NULL;
+    status = read_name(vm, chunk, ip, &name);
+    if (status != LZ_OK) {
+        return status;
+    }
+    if (*ip >= chunk->count) {
+        return malformed(vm, "truncated operand");
+    }
+    (*ip)++; /* reserved */
+    uint8_t kind;
+    uint8_t parent;
+    if (!lz_vm_error_kind_from_name(vm, name->data, name->length, &kind) ||
+        !lz_vm_error_kind_parent(vm, kind, &parent)) {
+        return malformed(vm, "unknown error kind");
+    }
+    return lz_error_class_bind(vm, lz_value_as_class(constant), kind, parent);
+}
+
+/* `extend T { ... }` after the block is compiled: registers it (see lz_vm_extend_register). */
+static LzStatus extend_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
+    const LzValue *constant = NULL;
+    LzStatus status = read_constant(vm, chunk, ip, &constant);
+    if (status != LZ_OK) {
+        return status;
+    }
+    if (!lz_value_is_class(constant)) {
+        return malformed(vm, "class expected");
+    }
+    LzString *target_name = NULL;
+    status = read_name(vm, chunk, ip, &target_name);
+    if (status != LZ_OK) {
+        return status;
+    }
+    if (*ip >= chunk->count) {
+        return malformed(vm, "truncated operand");
+    }
+    uint8_t mode = chunk->code[(*ip)++];
+    LzClass *ext = lz_value_as_class(constant);
+    if (mode == 0) {
+        return lz_vm_extend_register(vm, ext, NULL);
+    }
+    const LzValue *target = lz_vm_lookup(vm, target_name);
+    if (target == NULL) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "'%s' is not a type that can be extended", target_name->data);
+    }
+    return lz_vm_extend_register(vm, ext, target);
+}
+
 /* The head `class A : B, C` after the name is bound: `B` is on the stack. */
 static LzStatus class_link_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     const LzValue *constant = NULL;
@@ -879,7 +949,9 @@ static LzStatus class_link_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
         }
     } else if (top->type == LZ_VAL_OBJECT && top->as.object->type == LZ_OBJ_NATIVE &&
                lz_native_error_kind((const LzNative *)top->as.object, NULL)) {
-        status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "inheriting from an error kind is not supported yet");
+        char help[160];
+        (void)snprintf(help, sizeof help, "use 'error %s : %s' to declare an error", cls->name->data, parent_name->data);
+        status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "%s", help);
     } else {
         status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "'%s' is not a class or a trait", parent_name->data);
     }
@@ -901,11 +973,49 @@ static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool wr
     if (lz_value_is_instance(top) || lz_value_is_class(top)) {
         return member_get_op(vm, name, false, write_check);
     }
+    if (vm->ext_count != 0) {
+        LzValue target = *top;
+        LzValue result = lz_value_nil();
+        bool found_ext = false;
+        lz_value_retain(&target);
+        status = lz_vm_ext_get(vm, current_owner(vm), &target, name, &result, &found_ext);
+        if (status != LZ_OK) {
+            lz_value_release(&vm->heap, &target);
+            return status;
+        }
+        if (found_ext) {
+            LzValue old = vm->stack[vm->stack_count - 1];
+            vm->stack[vm->stack_count - 1] = result;
+            lz_value_release(&vm->heap, &old);
+            lz_value_release(&vm->heap, &target);
+            return LZ_OK;
+        }
+        lz_value_release(&vm->heap, &target);
+    }
     if (!lz_value_is_error(top)) {
         return lz_vm_set_error(vm, LZ_ERR_TYPE, "%s has no field '%s'",
                                lz_value_kind_name(top), name->data);
     }
     LzError *error = (LzError *)top->as.object;
+    if (error->payload != NULL) {
+        LzValue target = *top;
+        LzValue result = lz_value_nil();
+        bool member = false;
+        lz_value_retain(&target);
+        status = lz_vm_error_member_get(vm, current_owner(vm), &target, name, &result, &member);
+        if (status != LZ_OK) {
+            lz_value_release(&vm->heap, &target);
+            return status;
+        }
+        if (member) {
+            LzValue old = vm->stack[vm->stack_count - 1];
+            vm->stack[vm->stack_count - 1] = result;
+            lz_value_release(&vm->heap, &old);
+            lz_value_release(&vm->heap, &target);
+            return LZ_OK;
+        }
+        lz_value_release(&vm->heap, &target);
+    }
     LzValue field;
     LzArray *empty = NULL;
     if (strcmp(name->data, "message") == 0) {
@@ -1647,6 +1757,20 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         if (status == LZ_OK) {
             if (vm->stack_count == 0) {
                 status = malformed(vm, "stack underflow");
+            } else if (lz_value_is_error(&vm->stack[vm->stack_count - 1]) &&
+                       ((LzError *)vm->stack[vm->stack_count - 1].as.object)->payload != NULL) {
+                /* an error with fields: the target stays under the value */
+                LzValue target = vm->stack[vm->stack_count - 1];
+                LzValue field = lz_value_nil();
+                bool member = false;
+                status = lz_vm_error_member_get(vm, current_owner(vm), &target, name, &field, &member);
+                if (status == LZ_OK && !member) {
+                    status = lz_vm_set_error(vm, LZ_ERR_TYPE, "%s has no field '%s'", lz_value_kind_name(&target),
+                                             name->data);
+                }
+                if (status == LZ_OK) {
+                    status = push(vm, field);
+                }
             } else if (!lz_value_is_instance(&vm->stack[vm->stack_count - 1]) &&
                        !lz_value_is_class(&vm->stack[vm->stack_count - 1])) {
                 status = lz_vm_set_error(vm, LZ_ERR_TYPE, "%s has no field '%s'",
@@ -1668,6 +1792,12 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         break;
     case LZ_OP_CLASS_LINK:
         status = class_link_op(vm, chunk, &ip);
+        break;
+    case LZ_OP_EXTEND:
+        status = extend_op(vm, chunk, &ip);
+        break;
+    case LZ_OP_ERROR_CLASS:
+        status = error_class_op(vm, chunk, &ip);
         break;
     case LZ_OP_SUPER:
         status = super_op(vm, chunk, &ip);

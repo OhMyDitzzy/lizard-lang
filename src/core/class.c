@@ -7,6 +7,7 @@
 
 #include "lizard/array.h"
 #include "lizard/dict.h"
+#include "lizard/error.h"
 #include "lizard/native.h"
 #include "lizard/suggest.h"
 
@@ -105,6 +106,11 @@ LzClass *lz_class_new(LzVM *vm, LzString *name, uint32_t offset) {
     cls->init_member = -1;
     cls->consts_ready = false;
     cls->offset = offset;
+    cls->is_ext = false;
+    cls->ext_kinds = 0;
+    cls->ext_target_id = 0;
+    cls->ext_error_kind = 0;
+    cls->ext_target = NULL;
     if (!registry_add(vm, cls)) {
         lz_object_release(&vm->heap, &cls->base); /* the finalizer drops the name it holds */
         return NULL;
@@ -222,6 +228,10 @@ bool lz_class_lookup(const LzClass *cls, const LzString *name, LzFound *out) {
             }
         }
     }
+    /* Then what `extend` added to the class or to an ancestor, before the defaults of traits. */
+    if (cls->vm != NULL && cls->vm->ext_count != 0 && lz_ext_find_class(cls->vm, cls, name, out)) {
+        return true;
+    }
     for (const LzClass *c = cls; c != NULL; c = c->parent) {
         for (size_t i = 0; i < c->trait_count; i++) {
             if (trait_find(c->traits[i], name, false, out)) {
@@ -281,6 +291,10 @@ void lz_class_finalize(LzHeap *heap, LzClass *cls) {
     if (cls->parent != NULL) {
         lz_object_release(heap, &cls->parent->base);
         cls->parent = NULL;
+    }
+    if (cls->ext_target != NULL) {
+        lz_object_release(heap, &cls->ext_target->base);
+        cls->ext_target = NULL;
     }
     lz_object_release(heap, &cls->name->base);
 }
@@ -414,7 +428,22 @@ static LzStatus no_member(LzVM *vm, const LzClass *cls, uint64_t owner, const Lz
                 "%s has no %s '%s'%s", cls->name->data, what, name->data, suggestion);
 }
 
+static uint64_t calling_owner(const LzVM *vm);
+
+static LzInstance *payload_of(const LzValue *value);
+
 static LzStatus private_error(LzVM *vm, const LzClass *declared, const LzMember *member) {
+    uint64_t caller = calling_owner(vm);
+    const LzClass *code = caller != 0 ? lz_class_by_id(vm, caller) : NULL;
+    if (code != NULL && code->is_ext && !declared->is_ext) {
+        char help[160];
+        (void)snprintf(help, sizeof help, "an extension can only use the public members of %s", declared->name->data);
+        return fail(vm, LZ_ERR_RUNTIME, help, "'%s' is private to %s", member->name->data, declared->name->data);
+    }
+    if (declared->is_ext) {
+        return fail(vm, LZ_ERR_RUNTIME, "it can only be used inside the extend block that declares it",
+                    "'%s' is private to its extend %s block", member->name->data, declared->name->data);
+    }
     const char *help = member->kind == LZ_MEMBER_FIELD || member->kind == LZ_MEMBER_GETTER
                            ? "mark it 'pub' (or 'pub read') to use it from outside"
                            : (member->kind == LZ_MEMBER_CONST ? "mark it 'pub' to use it from outside"
@@ -824,6 +853,11 @@ LzStatus lz_class_link(LzVM *vm, LzClass *cls, LzClass *parent) {
 
 /* ---- instances ---- */
 
+/* What `self` is for the code of the class: the instance, or the error that carries it as payload. */
+static LzValue self_of(const LzInstance *instance) {
+    return lz_value_object(instance->owner_error != NULL ? instance->owner_error : (LzObject *)&instance->base);
+}
+
 static LzInstance *instance_alloc(LzVM *vm, LzClass *cls) {
     size_t size = sizeof(LzInstance) + cls->field_count * sizeof(LzValue);
     LzInstance *instance = lz_heap_alloc(&vm->heap, LZ_OBJ_INSTANCE, size);
@@ -834,6 +868,7 @@ static LzInstance *instance_alloc(LzVM *vm, LzClass *cls) {
     instance->cls = cls;
     instance->holders = 0;
     instance->mark = 0;
+    instance->owner_error = NULL;
     instance->unset = cls->field_count >= 64 ? UINT64_MAX : (((uint64_t)1 << cls->field_count) - 1u);
     for (size_t i = 0; i < cls->field_count; i++) {
         instance->fields[i] = lz_value_nil();
@@ -969,7 +1004,7 @@ static LzStatus run_inits(LzVM *vm, const LzClass *cls, const LzValue *self) {
 
 static LzStatus finish_instance(LzVM *vm, LzInstance *instance) {
     LzClass *cls = instance->cls;
-    LzValue self = lz_value_object(&instance->base);
+    LzValue self = self_of(instance);
     LzStatus status = run_inits(vm, cls, &self);
     if (status != LZ_OK) {
         return status;
@@ -1028,9 +1063,10 @@ static const LzString *name_at(LzVM *vm, const char *names, size_t length, size_
     return *out;
 }
 
-LzStatus lz_class_construct(LzVM *vm, LzClass *cls, size_t positional, const LzValue *argv,
-                            size_t named_count, const char *names, size_t names_length,
-                            const LzValue *named, LzValue *result) {
+/* `core`: the error value of an error class, which takes the instance as its payload. */
+static LzStatus construct_impl(LzVM *vm, LzClass *cls, size_t positional, const LzValue *argv,
+                               size_t named_count, const char *names, size_t names_length,
+                               const LzValue *named, LzError *core, LzValue *result) {
     if (cls->is_trait) {
         return fail(vm, LZ_ERR_RUNTIME, "a trait is implemented by a class; create one of those",
                     "%s is a trait and cannot be created; use a class that implements it", cls->name->data);
@@ -1070,6 +1106,10 @@ LzStatus lz_class_construct(LzVM *vm, LzClass *cls, size_t positional, const LzV
     if (instance == NULL) {
         return lz_vm_out_of_memory(vm);
     }
+    if (core != NULL) {
+        core->payload = instance; /* the creation reference moves to the error */
+        instance->owner_error = &core->base;
+    }
     LzStatus status = LZ_OK;
     for (size_t i = 0; i < cls->param_count && status == LZ_OK; i++) {
         if (given[i] != NULL) {
@@ -1092,12 +1132,91 @@ LzStatus lz_class_construct(LzVM *vm, LzClass *cls, size_t positional, const LzV
     if (status == LZ_OK) {
         status = finish_instance(vm, instance);
     }
+    if (core != NULL) {
+        if (status != LZ_OK) {
+            return status; /* the caller owns the error and drops it, and the payload with it */
+        }
+        *result = lz_value_object(&core->base);
+        return LZ_OK;
+    }
     if (status != LZ_OK) {
         lz_object_release(&vm->heap, &instance->base);
         return status;
     }
     *result = lz_value_object(&instance->base);
     return LZ_OK;
+}
+
+LzStatus lz_class_construct(LzVM *vm, LzClass *cls, size_t positional, const LzValue *argv,
+                            size_t named_count, const char *names, size_t names_length,
+                            const LzValue *named, LzValue *result) {
+    return construct_impl(vm, cls, positional, argv, named_count, names, names_length, named, NULL, result);
+}
+
+/*
+ * `Kind(message, field..., cause: e, data: v, field: v)`: the message, then the fields, in the
+ * order of the class; `cause` and `data` are only ever given by name.
+ */
+LzStatus lz_error_class_construct(LzVM *vm, LzClass *cls, uint8_t kind, size_t positional,
+                                  const LzValue *argv, size_t named_count, const char *names,
+                                  size_t names_length, const LzValue *named, LzValue *result) {
+    if (positional < 1) {
+        return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): wrong number of arguments (%zu given)",
+                               lz_vm_error_kind_name(vm, kind), positional);
+    }
+    /* Split the named arguments: cause and data are the error's, the rest are fields. */
+    LzValue cause = lz_value_nil();
+    LzValue data = lz_value_nil();
+    bool seen_cause = false;
+    bool seen_data = false;
+    LzValue rest[LZ_CLASS_FIELDS_MAX + 2];
+    char rest_names[LZ_CLASS_FIELDS_MAX * 64 + 1];
+    size_t rest_count = 0;
+    size_t rest_length = 0;
+    size_t position = 0;
+    for (size_t k = 0; k < named_count; k++) {
+        size_t end = position;
+        while (end < names_length && names[end] != '\0') {
+            end++;
+        }
+        size_t length = end - position;
+        const char *text = names + position;
+        position = end + 1;
+        if (length == 5 && memcmp(text, "cause", 5) == 0) {
+            if (seen_cause) {
+                return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): got multiple values for argument 'cause'",
+                                       cls->name->data);
+            }
+            seen_cause = true;
+            cause = named[k];
+        } else if (length == 4 && memcmp(text, "data", 4) == 0) {
+            if (seen_data) {
+                return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): got multiple values for argument 'data'",
+                                       cls->name->data);
+            }
+            seen_data = true;
+            data = named[k];
+        } else {
+            if (rest_count >= LZ_CLASS_FIELDS_MAX + 2 || rest_length + length + 1 > sizeof rest_names) {
+                return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): too many named arguments", cls->name->data);
+            }
+            memcpy(rest_names + rest_length, text, length);
+            rest_names[rest_length + length] = '\0';
+            rest_length += length + 1;
+            rest[rest_count++] = named[k];
+        }
+    }
+    LzValue core_value = lz_value_nil();
+    LzStatus status = lz_error_construct_core(vm, kind, &argv[0], &cause, &data, &core_value);
+    if (status != LZ_OK) {
+        return status;
+    }
+    status = construct_impl(vm, cls, positional - 1, argv + 1, rest_count, rest_names, rest_length, rest,
+                            (LzError *)core_value.as.object, result);
+    if (status != LZ_OK) {
+        lz_object_release(&vm->heap, core_value.as.object);
+    }
+    return status;
 }
 
 LzStatus lz_instance_copy(LzVM *vm, const LzInstance *source, LzValue *result) {
@@ -1207,11 +1326,11 @@ static LzStatus instance_get(LzVM *vm, uint64_t owner, LzInstance *instance,
         }
         return read_field(vm, instance, member, result);
     case LZ_MEMBER_GETTER: {
-        LzValue self = lz_value_object(&instance->base);
+        LzValue self = self_of(instance);
         return call_closure(vm, &member->value, 1, &self, result);
     }
     case LZ_MEMBER_METHOD: {
-        LzValue self = lz_value_object(&instance->base);
+        LzValue self = self_of(instance);
         LzBound *bound = lz_bound_new(&vm->heap, &member->value, &self, false);
         if (bound == NULL) {
             return lz_vm_out_of_memory(vm);
@@ -1260,6 +1379,32 @@ LzStatus lz_vm_member_get(LzVM *vm, uint64_t owner, const LzValue *target,
         return instance_get(vm, owner, lz_value_as_instance(target), name, result, for_write);
     }
     return class_get(vm, owner, lz_value_as_class(target), name, result);
+}
+
+LzStatus lz_vm_ext_get(LzVM *vm, uint64_t owner, const LzValue *target, const LzString *name,
+                      LzValue *result, bool *found) {
+    *found = false;
+    if (vm->ext_count == 0) {
+        return LZ_OK;
+    }
+    LzFound hit;
+    if (!lz_ext_find_value(vm, target, name, &hit)) {
+        return LZ_OK;
+    }
+    *found = true;
+    if (!member_visible(owner, hit.declared_in, hit.member)) {
+        return private_error(vm, hit.declared_in, hit.member);
+    }
+    LzValue self = *target;
+    if (hit.member->kind == LZ_MEMBER_GETTER) {
+        return call_closure(vm, &hit.member->value, 1, &self, result);
+    }
+    LzBound *bound = lz_bound_new(&vm->heap, &hit.member->value, &self, false);
+    if (bound == NULL) {
+        return lz_vm_out_of_memory(vm);
+    }
+    *result = lz_value_object(&bound->base);
+    return LZ_OK;
 }
 
 LzStatus lz_vm_member_set(LzVM *vm, uint64_t owner, const LzValue *target,
@@ -1324,7 +1469,7 @@ static LzStatus set_bound_callee(LzVM *vm, size_t index, const LzValue *callee, 
 static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, int mode,
                                 size_t receiver_index) {
     LzValue receiver = vm->stack[receiver_index];
-    LzInstance *instance = lz_value_as_instance(&receiver);
+    LzInstance *instance = lz_value_is_instance(&receiver) ? lz_value_as_instance(&receiver) : payload_of(&receiver);
     LzClass *cls = instance->cls;
     size_t fallback = receiver_index + 1;
     LzFound hit;
@@ -1700,6 +1845,27 @@ LzStatus lz_vm_method_lookup(LzVM *vm, uint64_t owner, const LzString *name, int
     if (lz_value_is_class(receiver)) {
         return class_callee(vm, owner, name, receiver_index);
     }
+    if (lz_value_is_error(receiver) && payload_of(receiver) != NULL) {
+        LzFound member;
+        if (lz_class_lookup(payload_of(receiver)->cls, name, &member)) {
+            return instance_callee(vm, owner, name, mode, receiver_index);
+        }
+    }
+    if (vm->ext_count != 0) {
+        LzFound hit;
+        if (lz_ext_find_value(vm, receiver, name, &hit)) {
+            if (!member_visible(owner, hit.declared_in, hit.member)) {
+                return private_error(vm, hit.declared_in, hit.member);
+            }
+            if (hit.member->kind == LZ_MEMBER_GETTER) {
+                return fail(vm, LZ_ERR_RUNTIME, NULL, "'%s' is a property; write x.%s without parentheses",
+                            name->data, name->data);
+            }
+            LzValue callee = hit.member->value;
+            lz_value_retain(&callee);
+            return set_callee(vm, receiver_index + 1, callee);
+        }
+    }
     if (mode == 0) {
         return LZ_OK;
     }
@@ -1731,6 +1897,85 @@ static const LzMember *user_text_method(const LzClass *cls, const char *name) {
         }
     }
     return NULL;
+}
+
+/* ---- errors that carry a payload ---- */
+
+static LzInstance *payload_of(const LzValue *value) {
+    if (!lz_value_is_error(value)) {
+        return NULL;
+    }
+    return ((const LzError *)value->as.object)->payload;
+}
+
+LzStatus lz_vm_error_member_get(LzVM *vm, uint64_t owner, const LzValue *error, const LzString *name,
+                                LzValue *result, bool *found) {
+    *found = false;
+    LzInstance *payload = payload_of(error);
+    if (payload == NULL) {
+        return LZ_OK;
+    }
+    LzFound hit;
+    if (!lz_class_lookup(payload->cls, name, &hit)) {
+        return LZ_OK; /* message, kind, cause, data, trace and the builtin methods are the caller's */
+    }
+    *found = true;
+    return instance_get(vm, owner, payload, name, result, false);
+}
+
+LzStatus lz_vm_error_member_set(LzVM *vm, uint64_t owner, const LzValue *error, const LzString *name,
+                                const LzValue *value, bool *found) {
+    *found = false;
+    LzInstance *payload = payload_of(error);
+    if (payload == NULL) {
+        return LZ_OK;
+    }
+    LzFound hit;
+    if (!lz_class_lookup(payload->cls, name, &hit)) {
+        return LZ_OK;
+    }
+    *found = true;
+    LzValue target = lz_value_object(&payload->base);
+    return lz_vm_member_set(vm, owner, &target, name, value);
+}
+
+bool lz_error_is_class(const LzError *error, uint64_t id) {
+    if (error->payload == NULL) {
+        return false;
+    }
+    for (const LzClass *c = error->payload->cls; c != NULL; c = c->parent) {
+        if (c->id == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool builtin_error_field(const char *name) {
+    return strcmp(name, "message") == 0 || strcmp(name, "kind") == 0 || strcmp(name, "cause") == 0 ||
+           strcmp(name, "data") == 0 || strcmp(name, "trace") == 0;
+}
+
+LzStatus lz_error_class_bind(LzVM *vm, LzClass *cls, uint8_t kind, uint8_t parent_kind) {
+    for (size_t i = 0; i < cls->member_count; i++) {
+        const LzMember *member = &cls->members[i];
+        if (member->kind == LZ_MEMBER_FIELD && builtin_error_field(member->name->data)) {
+            return link_fail(vm, cls->offset, NULL, "%s redeclares field '%s' of Error", cls->name->data,
+                             member->name->data);
+        }
+    }
+    LzClass *parent = lz_vm_error_class(vm, parent_kind);
+    if (parent != NULL) {
+        LzStatus status = lz_class_link(vm, cls, parent);
+        if (status != LZ_OK) {
+            return status;
+        }
+    }
+    LzStatus bound = lz_vm_error_set_class(vm, kind, cls);
+    if (bound != LZ_OK) {
+        return bound;
+    }
+    return lz_class_run_consts(vm, cls);
 }
 
 bool lz_instance_write(const LzInstance *instance, const LzWriter *writer, bool debug) {
@@ -1788,6 +2033,53 @@ bool lz_instance_write(const LzInstance *instance, const LzWriter *writer, bool 
     ok = ok && lz_writer_write_cstr(writer, ")");
     write_depth--;
     return ok;
+}
+
+bool lz_error_write_text(const LzError *error, const LzWriter *writer, bool debug) {
+    const LzInstance *payload = error->payload;
+    if (payload == NULL) {
+        return lz_error_write(error, writer);
+    }
+    LzClass *cls = payload->cls;
+    LzVM *vm = cls->vm;
+    const LzMember *user = user_text_method(cls, debug ? "to_debug" : "to_string");
+    if (user != NULL && vm->frame_count > 0) {
+        LzValue self = lz_value_object((LzObject *)&error->base);
+        LzValue text = lz_value_nil();
+        LzStatus status = call_closure(vm, &user->value, 1, &self, &text);
+        bool ok;
+        if (status != LZ_OK) {
+            vm->text_status = status;
+            return false;
+        }
+        if (text.type != LZ_VAL_OBJECT || text.as.object->type != LZ_OBJ_STRING) {
+            vm->text_status = lz_vm_set_error(vm, LZ_ERR_TYPE, "%s() of %s must return a string, got %s",
+                                              debug ? "to_debug" : "to_string", cls->name->data,
+                                              lz_value_kind_name(&text));
+            lz_value_release(&vm->heap, &text);
+            return false;
+        }
+        ok = lz_writer_write(writer, ((const LzString *)text.as.object)->data,
+                             ((const LzString *)text.as.object)->length);
+        lz_value_release(&vm->heap, &text);
+        return ok;
+    }
+    if (!debug) {
+        return lz_error_write(error, writer);
+    }
+    bool ok = lz_writer_write(writer, error->kind_name->data, error->kind_name->length) &&
+              lz_writer_write_cstr(writer, "(") && lz_value_write_debug(&(LzValue){LZ_VAL_OBJECT, {.object = &error->message->base}}, writer);
+    for (size_t slot = 0; ok && slot < cls->field_count; slot++) {
+        const LzMember *member = field_at(cls, slot);
+        ok = lz_writer_write_cstr(writer, ", ") && lz_writer_write(writer, member->name->data, member->name->length) &&
+             lz_writer_write_cstr(writer, ": ");
+        if (!ok) {
+            break;
+        }
+        ok = ((payload->unset >> member->slot) & 1u) != 0 ? lz_writer_write_cstr(writer, "<unset>")
+                                                          : lz_value_write_debug(&payload->fields[member->slot], writer);
+    }
+    return ok && lz_writer_write_cstr(writer, ")");
 }
 
 bool lz_instance_same_class(const LzInstance *a, const LzInstance *b) {

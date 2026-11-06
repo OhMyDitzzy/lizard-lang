@@ -1,0 +1,45 @@
+# Errors are classes: they can carry fields, properties and methods.
+
+error InsufficientFunds : ValueError {
+    pub needed: int
+}
+
+error Overdraft : InsufficientFunds {
+    pub account: string = "main"
+    pub get summary(self) => $"{self.account} short by {self.needed}"
+}
+
+fn withdraw(balance, amount) {
+    if amount > balance {
+        throw Overdraft("not enough", needed: amount - balance)
+    }
+    return balance - amount
+}
+
+try {
+    withdraw(10, 25)
+} catch e {
+    println(e.message)
+    println(e.needed)
+    println(e.summary)
+    println(e is Overdraft)
+    println(e is ValueError)
+    println(e is TypeError)
+}
+
+# catch can still filter by kind, and an error is caught by its ancestors too
+try {
+    withdraw(1, 5)
+} catch ValueError as e {
+    println("value error, short by", e.needed)
+}
+
+# errors made by the language itself are of the built-in classes
+try {
+    let items = [1, 2, 3]
+    println(items[10])
+} catch e {
+    println(e is RangeError, e is RuntimeError)
+}
+
+println(Overdraft("x", 3).to_debug())
