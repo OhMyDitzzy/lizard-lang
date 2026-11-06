@@ -167,6 +167,7 @@ LzType lz_type_of_value(const LzValue *value) {
             type.value_element = lz_value_as_dict(value)->value_type;
         } else if (lz_value_is_instance(value)) {
             type.class_name = lz_value_as_instance(value)->cls->name;
+            type.class_id = lz_value_as_instance(value)->cls->id;
         }
     }
     return type;
@@ -185,6 +186,7 @@ LzType lz_type_widen(const LzType *type) {
     widened.element = type->element;
     widened.value_element = type->value_element;
     widened.class_name = type->class_name;
+    widened.class_id = type->class_id;
     return widened;
 }
 
@@ -234,11 +236,15 @@ bool lz_type_union(LzType *out, const LzType *a, const LzType *b) {
         result.value_element = b->value_element;
     }
     if ((a->kinds & LZ_KIND_INSTANCE) != 0 && (b->kinds & LZ_KIND_INSTANCE) != 0) {
-        result.class_name = a->class_name == b->class_name ? a->class_name : NULL; /* any object */
+        bool same = a->class_id == b->class_id;
+        result.class_name = same ? a->class_name : NULL; /* any object */
+        result.class_id = same ? a->class_id : 0;
     } else if ((a->kinds & LZ_KIND_INSTANCE) != 0) {
         result.class_name = a->class_name;
+        result.class_id = a->class_id;
     } else if ((b->kinds & LZ_KIND_INSTANCE) != 0) {
         result.class_name = b->class_name;
+        result.class_id = b->class_id;
     }
     for (size_t i = 0; i < a->literal_count; i++) {
         if (!lz_type_add_literal(&result, &a->literals[i])) {
@@ -265,7 +271,7 @@ bool lz_type_equal(const LzType *a, const LzType *b) {
         (a->element != b->element || a->value_element != b->value_element)) {
         return false;
     }
-    if ((a->kinds & LZ_KIND_INSTANCE) != 0 && a->class_name != b->class_name) {
+    if ((a->kinds & LZ_KIND_INSTANCE) != 0 && a->class_id != b->class_id) {
         return false;
     }
     for (size_t i = 0; i < a->literal_count; i++) {
@@ -295,7 +301,7 @@ uint32_t lz_type_hash(const LzType *type) {
         hash ^= mix((uint64_t)(uintptr_t)type->value_element ^ 0x8888u);
     }
     if ((type->kinds & LZ_KIND_INSTANCE) != 0) {
-        hash ^= mix((uint64_t)(uintptr_t)type->class_name ^ 0x9999u);
+        hash ^= mix(type->class_id ^ 0x9999u);
     }
     for (size_t i = 0; i < type->literal_count; i++) {
         const LzLiteral *literal = &type->literals[i];
@@ -355,7 +361,7 @@ bool lz_type_matches(const LzType *type, const LzValue *value) {
     uint16_t value_kind = lz_kind_of(value);
     if (INSTANCE_KIND_UNLIKELY(value_kind)) {
         return (type->kinds & LZ_KIND_INSTANCE) != 0 &&
-               (type->class_name == NULL || type->class_name == lz_value_as_instance(value)->cls->name);
+               (type->class_id == 0 || lz_class_is_a(lz_value_as_instance(value)->cls, type->class_id));
     }
     if ((value_kind & type->kinds) != 0) {
         return true;
@@ -388,9 +394,9 @@ LzAssign lz_type_assignable(const LzType *from, const LzType *to) {
     if ((from->kinds & LZ_KIND_INSTANCE) != 0) {
         if ((to->kinds & LZ_KIND_INSTANCE) == 0) {
             always = false;
-        } else if (to->class_name == NULL || to->class_name == from->class_name) {
+        } else if (to->class_id == 0 || to->class_id == from->class_id) {
             overlap = true;
-        } else if (from->class_name == NULL) {
+        } else if (from->class_id == 0) {
             always = false; /* some object, maybe of that class */
             overlap = true;
         } else {

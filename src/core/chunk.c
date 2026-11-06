@@ -316,6 +316,12 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_GET_FIELD_W";
     case LZ_OP_CLASS_INIT:
         return "OP_CLASS_INIT";
+    case LZ_OP_CLASS_LINK:
+        return "OP_CLASS_LINK";
+    case LZ_OP_SUPER:
+        return "OP_SUPER";
+    case LZ_OP_IS:
+        return "OP_IS";
     default:
         return "OP_UNKNOWN";
     }
@@ -400,6 +406,12 @@ size_t lz_opcode_length(uint8_t opcode) {
         return 3;
     case LZ_OP_METHOD_LOOKUP:
         return 4;
+    case LZ_OP_CLASS_LINK:
+        return 6;
+    case LZ_OP_SUPER:
+        return 4;
+    case LZ_OP_IS:
+        return 3;
     case LZ_OP_CLOSE_UPVALUE_KEEP:
         return 3; /* the slot whose upvalue is closed */
     case LZ_OP_DICT:

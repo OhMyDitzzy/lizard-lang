@@ -1,0 +1,49 @@
+# Operators: let your own classes use + - * < == like numbers do.
+
+class Vec {
+    pub x: int
+    pub y: int
+
+    pub operator +(self, other) => Vec(self.x + other.x, self.y + other.y)
+    pub operator -(self, other) => Vec(self.x - other.x, self.y - other.y)
+    pub operator -(self) => Vec(-self.x, -self.y)         # one parameter: the minus sign alone
+    pub operator *(self, k) => Vec(self.x * k, self.y * k)
+    pub operator ==(self, other) => other is Vec and self.x == other.x and self.y == other.y
+    pub operator <(self, other) => self.length2() < other.length2()
+
+    pub fn length2(self) => self.x * self.x + self.y * self.y
+}
+
+let a = Vec(1, 2)
+let b = Vec(3, 4)
+println(a + b)
+println(b - a)
+println(-a)
+println(a * 3)
+println(a + b * 2)
+
+# == compares the way you decided; != is its opposite.
+println(a == Vec(1, 2), a != b)
+
+# Only < is defined, yet all four orderings work.
+println(a < b, a > b, a <= b, a >= b)
+
+# += and friends use the same operators.
+let p = Vec(0, 0)
+for i in 1..=3 {
+    p += Vec(i, i)
+}
+println(p)
+
+# sort, min and max use <
+let points = [Vec(3, 3), Vec(1, 1), Vec(2, 2)]
+sort(points)
+println(points)
+println(min(points), max(points))
+
+# The left operand decides: `vec * 2` works, `2 * vec` says what to write instead.
+try {
+    println(2 * a)
+} catch e {
+    println(e.message)
+}

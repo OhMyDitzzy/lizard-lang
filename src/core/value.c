@@ -276,7 +276,7 @@ static bool write_object(const LzObject *object, const LzWriter *writer) {
         return lz_error_write((const LzError *)object, writer);
     case LZ_OBJ_CLASS: {
         const LzClass *cls = (const LzClass *)object;
-        return lz_writer_write_cstr(writer, "<class ") &&
+        return lz_writer_write_cstr(writer, cls->is_trait ? "<trait " : "<class ") &&
                lz_writer_write(writer, cls->name->data, cls->name->length) &&
                lz_writer_write_cstr(writer, ">");
     }
@@ -527,6 +527,12 @@ bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *
     uint64_t budget = *work;
     uint64_t used = 0;
     *work = 0;
+    if (left->type == LZ_VAL_OBJECT && left->as.object->type == LZ_OBJ_INSTANCE) {
+        bool same = false;
+        if (lz_class_equal_hook(left, right, &same)) {
+            return same; /* the class's own `operator ==` answered */
+        }
+    }
 
     if (!lz_value_is_container(left) || !lz_value_is_container(right) ||
         left->as.object == right->as.object) {
@@ -615,6 +621,15 @@ bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *
             same = false;
             used = UINT64_MAX;
             break;
+        }
+        if (a->type == LZ_VAL_OBJECT && a->as.object->type == LZ_OBJ_INSTANCE) {
+            bool answer = false;
+            if (lz_class_equal_hook(a, b, &answer)) {
+                if (!answer) {
+                    same = false;
+                }
+                continue;
+            }
         }
         if (lz_value_is_container(a) && lz_value_is_container(b) && a->as.object != b->as.object) {
             if (a->as.object->type != b->as.object->type) {

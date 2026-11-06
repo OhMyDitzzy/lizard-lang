@@ -588,7 +588,14 @@ LzStatus lz_vm_values_equal(LzVM *vm, const LzValue *a, const LzValue *b, bool *
     if (vm->fuel != LZ_FUEL_UNLIMITED) {
         work = vm->fuel > (UINT64_MAX - 7) / 8 ? UINT64_MAX - 1 : vm->fuel * 8 + 7;
     }
+    LzVM *saved_scope = NULL;
+    lz_class_equal_scope_begin(vm, &saved_scope);
     *same = lz_value_equal_budget(a, b, &work);
+    LzStatus operator_status = lz_class_equal_scope_end(saved_scope);
+    if (operator_status != LZ_OK) {
+        *same = false;
+        return operator_status;
+    }
     if (work == UINT64_MAX) {
         vm->fuel = 0;
         return lz_vm_set_error(vm, LZ_ERR_FUEL, "instruction limit exceeded");

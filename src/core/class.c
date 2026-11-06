@@ -12,14 +12,90 @@
 
 /* ---- building a class ---- */
 
+/* The classes of a VM sorted by id (ids only grow, so adding is appending). */
+static bool registry_add(LzVM *vm, LzClass *cls) {
+    if (vm->class_registry_count == vm->class_registry_capacity) {
+        size_t capacity = vm->class_registry_capacity == 0 ? 16 : vm->class_registry_capacity * 2;
+        LzClass **grown = realloc(vm->class_registry, capacity * sizeof *grown);
+        if (grown == NULL) {
+            return false;
+        }
+        vm->class_registry = grown;
+        vm->class_registry_capacity = capacity;
+    }
+    vm->class_registry[vm->class_registry_count++] = cls;
+    return true;
+}
+
+static size_t registry_find(const LzVM *vm, uint64_t id) {
+    size_t low = 0;
+    size_t high = vm->class_registry_count;
+    while (low < high) {
+        size_t mid = low + (high - low) / 2;
+        if (vm->class_registry[mid]->id < id) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+static void registry_remove(LzVM *vm, const LzClass *cls) {
+    size_t at = registry_find(vm, cls->id);
+    if (at < vm->class_registry_count && vm->class_registry[at] == cls) {
+        memmove(&vm->class_registry[at], &vm->class_registry[at + 1],
+                (vm->class_registry_count - at - 1) * sizeof *vm->class_registry);
+        vm->class_registry_count--;
+    }
+}
+
+const LzClass *lz_class_by_id(const LzVM *vm, uint64_t id) {
+    size_t at = registry_find(vm, id);
+    return at < vm->class_registry_count && vm->class_registry[at]->id == id ? vm->class_registry[at] : NULL;
+}
+
+/* Is `trait`, or a trait it extends, the one with this id? */
+static bool trait_extends(const LzClass *trait, uint64_t id) {
+    if (trait->id == id) {
+        return true;
+    }
+    for (size_t i = 0; i < trait->trait_count; i++) {
+        if (trait_extends(trait->traits[i], id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool lz_class_is_a(const LzClass *cls, uint64_t id) {
+    for (; cls != NULL; cls = cls->parent) {
+        if (cls->id == id) {
+            return true;
+        }
+        for (size_t i = 0; i < cls->trait_count; i++) {
+            if (trait_extends(cls->traits[i], id)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 LzClass *lz_class_new(LzVM *vm, LzString *name, uint32_t offset) {
     LzClass *cls = lz_heap_alloc(&vm->heap, LZ_OBJ_CLASS, sizeof *cls);
     if (cls == NULL) {
         return NULL;
     }
+    cls->id = ++vm->next_class_id;
     cls->name = name;
     lz_object_retain(&name->base);
     cls->parent = NULL;
+    cls->is_trait = false;
+    cls->traits = NULL;
+    cls->trait_count = 0;
+    cls->linked = false;
+    cls->own_field_count = 0;
     cls->vm = vm;
     cls->members = NULL;
     cls->member_count = 0;
@@ -29,6 +105,10 @@ LzClass *lz_class_new(LzVM *vm, LzString *name, uint32_t offset) {
     cls->init_member = -1;
     cls->consts_ready = false;
     cls->offset = offset;
+    if (!registry_add(vm, cls)) {
+        lz_object_release(&vm->heap, &cls->base); /* the finalizer drops the name it holds */
+        return NULL;
+    }
     return cls;
 }
 
@@ -62,18 +142,94 @@ bool lz_class_add_member(LzClass *cls, LzString *name, LzMemberKind kind, LzVisi
     return true;
 }
 
-void lz_class_seal(LzClass *cls) {
+/*
+ * Fields by slot and constructor parameters: the parent's, then this class's own. The slots of the
+ * own fields start where the parent's end (`base`); a class with no parent has base 0.
+ */
+static void layout(LzClass *cls, size_t base) { /* `base` is added to the own slots */
+    const LzClass *parent = cls->parent;
     cls->param_count = 0;
+    if (parent != NULL) {
+        for (size_t i = 0; i < parent->field_count; i++) {
+            cls->field_refs[i] = parent->field_refs[i];
+        }
+        for (size_t i = 0; i < parent->param_count; i++) {
+            cls->params[cls->param_count++] = parent->params[i];
+        }
+    }
+    for (size_t i = 0; i < cls->member_count; i++) {
+        LzMember *member = &cls->members[i];
+        if (member->kind != LZ_MEMBER_FIELD) {
+            continue;
+        }
+        member->slot = (uint16_t)(member->slot + base);
+        cls->field_refs[member->slot].cls = cls;
+        cls->field_refs[member->slot].index = (uint16_t)i;
+        if (member->vis != LZ_VIS_PRIVATE) {
+            cls->params[cls->param_count++] = member->slot;
+        }
+    }
+    cls->field_count = base + cls->own_field_count;
+}
+
+void lz_class_seal(LzClass *cls) {
     cls->init_member = -1;
+    cls->own_field_count = cls->field_count;
     for (size_t i = 0; i < cls->member_count; i++) {
         const LzMember *member = &cls->members[i];
-        if (member->kind == LZ_MEMBER_FIELD && member->vis != LZ_VIS_PRIVATE) {
-            cls->params[cls->param_count++] = (uint16_t)i;
-        }
         if (member->kind == LZ_MEMBER_METHOD && strcmp(member->name->data, "init") == 0) {
             cls->init_member = (int)i;
         }
     }
+    layout(cls, 0); /* as a class without a parent; lz_class_link redoes it for one with a parent */
+}
+
+/* The member of a field slot. */
+static const LzMember *field_at(const LzClass *cls, size_t slot) {
+    const LzFieldRef *ref = &cls->field_refs[slot];
+    return &ref->cls->members[ref->index];
+}
+
+/*
+ * A member of a trait, or of a trait it extends. `required` picks the requirements (no body); else
+ * the defaults. A trait's own member is found before the ones of the traits it extends.
+ */
+static bool trait_find(const LzClass *trait, const LzString *name, bool required, LzFound *out) {
+    for (size_t i = 0; i < trait->member_count; i++) {
+        const LzMember *member = &trait->members[i];
+        if (member->name == name && (member->is_required != 0) == required) {
+            out->member = member;
+            out->declared_in = trait;
+            return true;
+        }
+    }
+    for (size_t i = 0; i < trait->trait_count; i++) {
+        if (trait_find(trait->traits[i], name, required, out)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The classes of the chain win; the default of a trait answers only when none of them has the name. */
+bool lz_class_lookup(const LzClass *cls, const LzString *name, LzFound *out) {
+    for (const LzClass *c = cls; c != NULL; c = c->parent) {
+        for (size_t i = 0; i < c->member_count; i++) {
+            if (c->members[i].name == name && c->members[i].is_required == 0) {
+                out->member = &c->members[i];
+                out->declared_in = c;
+                return true;
+            }
+        }
+    }
+    for (const LzClass *c = cls; c != NULL; c = c->parent) {
+        for (size_t i = 0; i < c->trait_count; i++) {
+            if (trait_find(c->traits[i], name, false, out)) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 const LzMember *lz_class_find(const LzClass *cls, const LzString *name) {
@@ -85,9 +241,15 @@ const LzMember *lz_class_find(const LzClass *cls, const LzString *name) {
     return NULL;
 }
 
-bool lz_class_sees(const LzString *owner, const LzClass *cls) {
-    /* Stage 2: also true when `owner` names a class derived from cls. */
-    return owner != NULL && owner == cls->name;
+bool lz_class_sees(const LzVM *vm, uint64_t owner, const LzClass *declaring) {
+    if (owner == 0) {
+        return false;
+    }
+    if (owner == declaring->id) {
+        return true;
+    }
+    const LzClass *code = lz_class_by_id(vm, owner);
+    return code != NULL && lz_class_is_a(code, declaring->id);
 }
 
 const char *lz_class_display_name(const LzClass *cls) {
@@ -109,6 +271,17 @@ void lz_class_finalize(LzHeap *heap, LzClass *cls) {
     }
     free(cls->members);
     cls->members = NULL;
+    registry_remove(cls->vm, cls);
+    for (size_t i = 0; i < cls->trait_count; i++) {
+        lz_object_release(heap, &cls->traits[i]->base);
+    }
+    free(cls->traits);
+    cls->traits = NULL;
+    cls->trait_count = 0;
+    if (cls->parent != NULL) {
+        lz_object_release(heap, &cls->parent->base);
+        cls->parent = NULL;
+    }
     lz_object_release(heap, &cls->name->base);
 }
 
@@ -197,23 +370,26 @@ static LzStatus fail(LzVM *vm, LzStatus status, const char *help, const char *fo
     return status;
 }
 
-static bool member_visible(const LzString *owner, const LzClass *cls, const LzMember *member) {
-    return member->vis != LZ_VIS_PRIVATE || lz_class_sees(owner, cls);
+/* `declared` is the class that declares the member (not the class of the object). */
+static bool member_visible(uint64_t owner, const LzClass *declared, const LzMember *member) {
+    return member->vis != LZ_VIS_PRIVATE || lz_class_sees(declared->vm, owner, declared);
 }
 
 /* " (did you mean 'x'?)" for a name that is not a member, from the members the caller can see. */
-static void did_you_mean(const LzClass *cls, const LzString *owner, const LzString *name,
+static void did_you_mean(const LzClass *cls, uint64_t owner, const LzString *name,
                          bool fields_only, char *out, size_t size) {
     out[0] = '\0';
     LzSuggester suggester;
     lz_suggester_init(&suggester, name->data, name->length);
-    for (size_t i = 0; i < cls->member_count; i++) {
-        const LzMember *member = &cls->members[i];
-        if (fields_only && member->kind != LZ_MEMBER_FIELD) {
-            continue;
-        }
-        if (member_visible(owner, cls, member)) {
-            lz_suggester_offer(&suggester, member->name->data);
+    for (const LzClass *c = cls; c != NULL; c = c->parent) {
+        for (size_t i = 0; i < c->member_count; i++) {
+            const LzMember *member = &c->members[i];
+            if (fields_only && member->kind != LZ_MEMBER_FIELD) {
+                continue;
+            }
+            if (member_visible(owner, c, member)) {
+                lz_suggester_offer(&suggester, member->name->data);
+            }
         }
     }
     size_t count = suggester.found.count;
@@ -230,7 +406,7 @@ static void did_you_mean(const LzClass *cls, const LzString *owner, const LzStri
     }
 }
 
-static LzStatus no_member(LzVM *vm, const LzClass *cls, const LzString *owner, const LzString *name,
+static LzStatus no_member(LzVM *vm, const LzClass *cls, uint64_t owner, const LzString *name,
                           const char *what, bool fields_only, bool write) {
     char suggestion[160];
     did_you_mean(cls, owner, name, fields_only, suggestion, sizeof suggestion);
@@ -238,7 +414,7 @@ static LzStatus no_member(LzVM *vm, const LzClass *cls, const LzString *owner, c
                 "%s has no %s '%s'%s", cls->name->data, what, name->data, suggestion);
 }
 
-static LzStatus private_error(LzVM *vm, const LzClass *cls, const LzMember *member) {
+static LzStatus private_error(LzVM *vm, const LzClass *declared, const LzMember *member) {
     const char *help = member->kind == LZ_MEMBER_FIELD || member->kind == LZ_MEMBER_GETTER
                            ? "mark it 'pub' (or 'pub read') to use it from outside"
                            : (member->kind == LZ_MEMBER_CONST ? "mark it 'pub' to use it from outside"
@@ -246,10 +422,10 @@ static LzStatus private_error(LzVM *vm, const LzClass *cls, const LzMember *memb
     if (member->kind == LZ_MEMBER_GETTER) {
         help = "mark it 'pub' to use it from outside";
     }
-    return fail(vm, LZ_ERR_RUNTIME, help, "'%s' is private to %s", member->name->data, cls->name->data);
+    return fail(vm, LZ_ERR_RUNTIME, help, "'%s' is private to %s", member->name->data, declared->name->data);
 }
 
-static LzStatus read_only_error(LzVM *vm, const LzClass *cls, const LzMember *member) {
+static LzStatus read_only_error(LzVM *vm, const LzClass *cls, const LzMember *member) { /* cls: the class that declares it */
     char help[160];
     const char *method = NULL;
     for (size_t i = 0; i < cls->member_count; i++) {
@@ -272,6 +448,378 @@ static LzStatus read_only_error(LzVM *vm, const LzClass *cls, const LzMember *me
 static LzStatus unset_error(LzVM *vm, const LzClass *cls, const LzMember *member) {
     return fail(vm, LZ_ERR_RUNTIME, NULL, "field '%s' of %s has no value yet (assign it in init())",
                 member->name->data, cls->name->data);
+}
+
+/* ---- inheritance ---- */
+
+static const char *kind_phrase(const LzMember *member) {
+    switch ((LzMemberKind)member->kind) {
+    case LZ_MEMBER_FIELD:
+        return "a field";
+    case LZ_MEMBER_METHOD:
+        return "a function";
+    case LZ_MEMBER_STATIC:
+        return "a static function";
+    case LZ_MEMBER_GETTER:
+        return "a property";
+    case LZ_MEMBER_CONST:
+        return "a constant";
+    }
+    return "a member";
+}
+
+/* "Dog.speak()" for a function, "Dog.area" for a property or anything else. */
+static void member_label(char *out, size_t size, const LzClass *cls, const LzMember *member) {
+    bool call = member->kind == LZ_MEMBER_METHOD || member->kind == LZ_MEMBER_STATIC;
+    (void)snprintf(out, size, "%s.%s%s", cls->name->data, member->name->data, call ? "()" : "");
+}
+
+static bool is_function_like(const LzMember *member) {
+    return member->kind == LZ_MEMBER_METHOD || member->kind == LZ_MEMBER_STATIC || member->kind == LZ_MEMBER_GETTER;
+}
+
+/* Parameters a caller writes: `self` is not one. */
+static size_t written_params(const LzMember *member) {
+    if (member->value.type != LZ_VAL_OBJECT || member->value.as.object->type != LZ_OBJ_CLOSURE) {
+        return 0;
+    }
+    size_t count = lz_value_as_closure(&member->value)->function->param_count;
+    bool has_self = member->kind == LZ_MEMBER_METHOD || member->kind == LZ_MEMBER_GETTER;
+    return has_self && count > 0 ? count - 1 : count;
+}
+
+/* An error placed on the declaration that is wrong (the run-time error points at its source). */
+static LzStatus link_fail(LzVM *vm, uint32_t offset, const char *help, const char *format, ...)
+    LZ_PRINTF_FORMAT(4, 5);
+static LzStatus link_fail(LzVM *vm, uint32_t offset, const char *help, const char *format, ...) {
+    char message[256];
+    va_list args;
+    va_start(args, format);
+    (void)vsnprintf(message, sizeof message, format, args);
+    va_end(args);
+    LzStatus status = fail(vm, LZ_ERR_RUNTIME, help, "%s", message);
+    vm->error_offset = offset;
+    return status;
+}
+
+/*
+ * The member `name` that a class inherits, if any: from the parent chain (and the defaults of its
+ * traits), else from a default of a trait of this class, else (with *required set) from a
+ * requirement of one.
+ */
+static bool find_inherited(const LzClass *cls, const LzString *name, LzFound *out, bool *required) {
+    *required = false;
+    if (cls->parent != NULL && lz_class_lookup(cls->parent, name, out)) {
+        return true;
+    }
+    for (size_t i = 0; i < cls->trait_count; i++) {
+        if (trait_find(cls->traits[i], name, false, out)) {
+            return true;
+        }
+    }
+    for (size_t i = 0; i < cls->trait_count; i++) {
+        if (trait_find(cls->traits[i], name, true, out)) {
+            *required = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void offer_trait_names(LzSuggester *suggester, const LzClass *trait) {
+    for (size_t i = 0; i < trait->member_count; i++) {
+        lz_suggester_offer(suggester, trait->members[i].name->data);
+    }
+    for (size_t i = 0; i < trait->trait_count; i++) {
+        offer_trait_names(suggester, trait->traits[i]);
+    }
+}
+
+static LzStatus check_overrides(LzVM *vm, const LzClass *cls) {
+    for (size_t i = 0; i < cls->member_count; i++) {
+        const LzMember *own = &cls->members[i];
+        LzFound inherited;
+        bool required = false;
+        bool found = find_inherited(cls, own->name, &inherited, &required);
+        if (!found) {
+            if (own->is_override) {
+                LzSuggester suggester;
+                lz_suggester_init(&suggester, own->name->data, own->name->length);
+                for (const LzClass *c = cls->parent; c != NULL; c = c->parent) {
+                    for (size_t k = 0; k < c->member_count; k++) {
+                        if (is_function_like(&c->members[k])) {
+                            lz_suggester_offer(&suggester, c->members[k].name->data);
+                        }
+                    }
+                    for (size_t k = 0; k < c->trait_count; k++) {
+                        offer_trait_names(&suggester, c->traits[k]);
+                    }
+                }
+                for (size_t k = 0; k < cls->trait_count; k++) {
+                    offer_trait_names(&suggester, cls->traits[k]);
+                }
+                char label[128];
+                char hint[96] = "";
+                member_label(label, sizeof label, cls, own);
+                if (suggester.found.count > 0) {
+                    (void)snprintf(hint, sizeof hint, " (did you mean '%s'?)", suggester.found.names[0]);
+                }
+                return link_fail(vm, own->offset, "remove 'override', or fix the name", "%s overrides nothing%s",
+                                 label, hint);
+            }
+            continue;
+        }
+        if (required) {
+            continue; /* meeting a requirement: the contract check below judges it */
+        }
+        const LzMember *base = inherited.member;
+        const LzClass *base_cls = inherited.declared_in;
+        if (own->kind == LZ_MEMBER_FIELD && base->kind == LZ_MEMBER_FIELD) {
+            return link_fail(vm, own->offset, "a field of the parent is already a field of this class",
+                             "%s redeclares field '%s' of %s", cls->name->data, own->name->data,
+                             base_cls->name->data);
+        }
+        if (own->kind == LZ_MEMBER_METHOD && base->kind == LZ_MEMBER_METHOD && strcmp(own->name->data, "init") == 0) {
+            continue; /* every init runs, root first */
+        }
+        bool both_functions = is_function_like(own) && is_function_like(base);
+        if (!both_functions) {
+            return link_fail(vm, own->offset, NULL, "'%s' is %s of %s and cannot be redeclared as %s",
+                             own->name->data, kind_phrase(base), base_cls->name->data, kind_phrase(own));
+        }
+        char own_label[128];
+        char base_label[128];
+        member_label(own_label, sizeof own_label, cls, own);
+        member_label(base_label, sizeof base_label, base_cls, base);
+        if (own->kind != base->kind) {
+            return link_fail(vm, own->offset, NULL, "%s.%s is %s but %s.%s is %s", cls->name->data,
+                             own->name->data, kind_phrase(own), base_cls->name->data, base->name->data,
+                             kind_phrase(base));
+        }
+        if (!own->is_override) {
+            return link_fail(vm, own->offset, "write 'override' before it if you mean to replace the parent's",
+                             "%s hides %s; add 'override'", own_label, base_label);
+        }
+        size_t expected = written_params(base);
+        size_t got = written_params(own);
+        if (expected != got) {
+            return link_fail(vm, own->offset, NULL,
+                             "%s must take the same parameters as %s (expected %zu, got %zu)", own_label,
+                             base_label, expected, got);
+        }
+        if (own->vis == LZ_VIS_PRIVATE && base->vis != LZ_VIS_PRIVATE) {
+            return link_fail(vm, own->offset, "an override may be more open than the original, not less",
+                             "%s cannot be private because %s is public", own_label, base_label);
+        }
+    }
+    return LZ_OK;
+}
+
+/* ---- traits ---- */
+
+LzStatus lz_class_add_trait(LzVM *vm, LzClass *cls, LzClass *trait) {
+    for (size_t i = 0; i < cls->trait_count; i++) {
+        if (cls->traits[i] == trait) {
+            return link_fail(vm, cls->offset, "name each trait once", "trait '%s' is listed twice in the head of %s",
+                             trait->name->data, cls->name->data);
+        }
+    }
+    LzClass **grown = realloc(cls->traits, (cls->trait_count + 1) * sizeof *grown);
+    if (grown == NULL) {
+        return lz_vm_out_of_memory(vm);
+    }
+    cls->traits = grown;
+    lz_object_retain(&trait->base);
+    cls->traits[cls->trait_count++] = trait;
+    return LZ_OK;
+}
+
+#define TRAIT_SET_MAX 64
+typedef struct TraitSet {
+    const LzClass *items[TRAIT_SET_MAX];
+    size_t count;
+} TraitSet;
+
+/* `trait` and the traits it extends, each once. */
+static void collect_trait(const LzClass *trait, TraitSet *set) {
+    for (size_t i = 0; i < set->count; i++) {
+        if (set->items[i] == trait) {
+            return;
+        }
+    }
+    if (set->count < TRAIT_SET_MAX) {
+        set->items[set->count++] = trait;
+    }
+    for (size_t i = 0; i < trait->trait_count; i++) {
+        collect_trait(trait->traits[i], set);
+    }
+}
+
+static const LzMember *own_member(const LzClass *cls, const LzString *name) {
+    for (size_t i = 0; i < cls->member_count; i++) {
+        if (cls->members[i].name == name) {
+            return &cls->members[i];
+        }
+    }
+    return NULL;
+}
+
+/* A member of the class chain (not of a trait) with this name. */
+static bool chain_has(const LzClass *cls, const LzString *name, LzFound *out) {
+    for (const LzClass *c = cls; c != NULL; c = c->parent) {
+        const LzMember *member = own_member(c, name);
+        if (member != NULL) {
+            out->member = member;
+            out->declared_in = c;
+            return true;
+        }
+    }
+    return false;
+}
+
+static LzStatus check_contracts(LzVM *vm, const LzClass *cls, const TraitSet *all) {
+    TraitSet mine = {.count = 0};
+    for (size_t i = 0; i < cls->trait_count; i++) {
+        collect_trait(cls->traits[i], &mine);
+    }
+    for (size_t t = 0; t < mine.count; t++) {
+        const LzClass *trait = mine.items[t];
+        for (size_t m = 0; m < trait->member_count; m++) {
+            const LzMember *required = &trait->members[m];
+            if (!required->is_required) {
+                continue;
+            }
+            LzFound impl;
+            if (!chain_has(cls, required->name, &impl)) {
+                bool specialised = false; /* a trait that extends this one may carry the default */
+                for (size_t q = 0; q < all->count && !specialised; q++) {
+                    const LzMember *other = own_member(all->items[q], required->name);
+                    specialised = other != NULL && !other->is_required && all->items[q] != trait &&
+                                  trait_extends(all->items[q], trait->id);
+                }
+                if (specialised) {
+                    continue;
+                }
+                return link_fail(vm, cls->offset, "write it in the class, or take it from a parent class",
+                                 "%s does not implement '%s' required by %s", cls->name->data,
+                                 required->name->data, trait->name->data);
+            }
+            const LzMember *given = impl.member;
+            if (required->kind == LZ_MEMBER_GETTER && given->kind == LZ_MEMBER_FIELD) {
+                return link_fail(vm, given->offset, "write it as: get name(self) => ...",
+                                 "'%s' is required as a 'get' property; a field cannot satisfy it",
+                                 required->name->data);
+            }
+            if (given->kind != required->kind) {
+                return link_fail(vm, given->offset, NULL, "%s.%s is %s but %s.%s is %s", impl.declared_in->name->data,
+                                 given->name->data, kind_phrase(given), trait->name->data, required->name->data,
+                                 kind_phrase(required));
+            }
+            char given_label[128];
+            char required_label[128];
+            member_label(given_label, sizeof given_label, impl.declared_in, given);
+            member_label(required_label, sizeof required_label, trait, required);
+            size_t expected = written_params(required);
+            size_t got = written_params(given);
+            if (expected != got) {
+                return link_fail(vm, given->offset, NULL,
+                                 "%s must take the same parameters as %s (expected %zu, got %zu)", given_label,
+                                 required_label, expected, got);
+            }
+            if (given->vis == LZ_VIS_PRIVATE) {
+                return link_fail(vm, given->offset, "add 'pub'", "%s must be public because %s requires it",
+                                 given_label, trait->name->data);
+            }
+        }
+    }
+    return LZ_OK;
+}
+
+/* Two traits that give a class the same name (a default, or a default against a requirement). */
+static LzStatus check_conflicts(LzVM *vm, const LzClass *cls, const TraitSet *all) {
+    for (size_t t = 0; t < all->count; t++) {
+        const LzClass *trait = all->items[t];
+        for (size_t m = 0; m < trait->member_count; m++) {
+            const LzString *name = trait->members[m].name;
+            /* look at a name once: at the first trait that has it */
+            bool seen = false;
+            for (size_t earlier = 0; earlier < t && !seen; earlier++) {
+                seen = own_member(all->items[earlier], name) != NULL;
+            }
+            if (seen) {
+                continue;
+            }
+            const LzClass *providers[TRAIT_SET_MAX];
+            size_t count = 0;
+            bool any_default = false;
+            for (size_t q = 0; q < all->count; q++) {
+                const LzMember *member = own_member(all->items[q], name);
+                if (member != NULL) {
+                    providers[count++] = all->items[q];
+                    any_default = any_default || !member->is_required;
+                }
+            }
+            /* a trait that extends another one wins over it */
+            const LzClass *left[TRAIT_SET_MAX];
+            size_t left_count = 0;
+            for (size_t p = 0; p < count; p++) {
+                bool beaten = false;
+                for (size_t q = 0; q < count && !beaten; q++) {
+                    beaten = q != p && trait_extends(providers[q], providers[p]->id);
+                }
+                if (!beaten) {
+                    left[left_count++] = providers[p];
+                }
+            }
+            LzFound defined;
+            if (left_count < 2 || !any_default || chain_has(cls, name, &defined)) {
+                continue;
+            }
+            return link_fail(vm, cls->offset, "define it in the class to say which one you mean",
+                             "%s gets '%s' from both %s and %s; define %s() in %s to choose", cls->name->data,
+                             name->data, left[0]->name->data, left[1]->name->data, name->data, cls->name->data);
+        }
+    }
+    return LZ_OK;
+}
+
+LzStatus lz_class_finish(LzVM *vm, LzClass *cls) {
+    if (cls->is_trait) {
+        return LZ_OK;
+    }
+    LzStatus status = check_overrides(vm, cls);
+    if (status != LZ_OK) {
+        return status;
+    }
+    TraitSet all = {.count = 0};
+    for (const LzClass *c = cls; c != NULL; c = c->parent) {
+        for (size_t i = 0; i < c->trait_count; i++) {
+            collect_trait(c->traits[i], &all);
+        }
+    }
+    if (all.count == 0) {
+        return LZ_OK;
+    }
+    status = check_conflicts(vm, cls, &all); /* a name two traits both give: say so before what is missing */
+    if (status != LZ_OK) {
+        return status;
+    }
+    return check_contracts(vm, cls, &all);
+}
+
+LzStatus lz_class_link(LzVM *vm, LzClass *cls, LzClass *parent) {
+    if (cls->parent == parent) {
+        return LZ_OK; /* the statement ran before */
+    }
+    if (parent->field_count + cls->own_field_count > LZ_CLASS_FIELDS_MAX) {
+        return link_fail(vm, cls->offset, "a class and its parents can have at most 64 fields together",
+                         "%s has too many fields with those of %s", cls->name->data, parent->name->data);
+    }
+    lz_object_retain(&parent->base);
+    cls->parent = parent;
+    layout(cls, parent->field_count);
+    cls->linked = true;
+    return LZ_OK;
 }
 
 /* ---- instances ---- */
@@ -400,22 +948,36 @@ LzStatus lz_class_run_consts(LzVM *vm, LzClass *cls) {
     return status;
 }
 
-static LzStatus finish_instance(LzVM *vm, LzInstance *instance) {
-    LzClass *cls = instance->cls;
+/* The `init` of every class that has one, from the root of the hierarchy down to the leaf. */
+static LzStatus run_inits(LzVM *vm, const LzClass *cls, const LzValue *self) {
+    if (cls->parent != NULL) {
+        LzStatus status = run_inits(vm, cls->parent, self);
+        if (status != LZ_OK) {
+            return status;
+        }
+    }
     if (cls->init_member >= 0) {
-        LzValue self = lz_value_object(&instance->base);
         LzValue ignored = lz_value_nil();
-        LzStatus status = call_closure(vm, &cls->members[cls->init_member].value, 1, &self, &ignored);
+        LzStatus status = call_closure(vm, &cls->members[cls->init_member].value, 1, self, &ignored);
         if (status != LZ_OK) {
             return status;
         }
         lz_value_release(&vm->heap, &ignored);
     }
+    return LZ_OK;
+}
+
+static LzStatus finish_instance(LzVM *vm, LzInstance *instance) {
+    LzClass *cls = instance->cls;
+    LzValue self = lz_value_object(&instance->base);
+    LzStatus status = run_inits(vm, cls, &self);
+    if (status != LZ_OK) {
+        return status;
+    }
     if (instance->unset != 0) {
-        for (size_t i = 0; i < cls->member_count; i++) {
-            const LzMember *member = &cls->members[i];
-            if (member->kind == LZ_MEMBER_FIELD && ((instance->unset >> member->slot) & 1u) != 0) {
-                return unset_error(vm, cls, member);
+        for (size_t slot = 0; slot < cls->field_count; slot++) {
+            if (((instance->unset >> slot) & 1u) != 0) {
+                return unset_error(vm, cls, field_at(cls, slot));
             }
         }
     }
@@ -426,13 +988,13 @@ static LzStatus finish_instance(LzVM *vm, LzInstance *instance) {
 static LzStatus param_of(LzVM *vm, const LzClass *cls, const LzString *name, size_t *param,
                          const char *callname) {
     for (size_t i = 0; i < cls->param_count; i++) {
-        if (cls->members[cls->params[i]].name == name) {
+        if (field_at(cls, cls->params[i])->name == name) {
             *param = i;
             return LZ_OK;
         }
     }
-    const LzMember *member = lz_class_find(cls, name);
-    if (member != NULL && member->kind == LZ_MEMBER_FIELD) {
+    LzFound found;
+    if (lz_class_lookup(cls, name, &found) && found.member->kind == LZ_MEMBER_FIELD) {
         return fail(vm, LZ_ERR_ARITY, NULL, "'%s' is private to %s, so it is not an argument of %s(...)",
                     name->data, cls->name->data, callname);
     }
@@ -441,7 +1003,7 @@ static LzStatus param_of(LzVM *vm, const LzClass *cls, const LzString *name, siz
     LzSuggester suggester;
     lz_suggester_init(&suggester, name->data, name->length);
     for (size_t i = 0; i < cls->param_count; i++) {
-        lz_suggester_offer(&suggester, cls->members[cls->params[i]].name->data);
+        lz_suggester_offer(&suggester, field_at(cls, cls->params[i])->name->data);
     }
     if (suggester.found.count > 0) {
         (void)snprintf(suggestion, sizeof suggestion, " (did you mean '%s'?)", suggester.found.names[0]);
@@ -469,6 +1031,10 @@ static const LzString *name_at(LzVM *vm, const char *names, size_t length, size_
 LzStatus lz_class_construct(LzVM *vm, LzClass *cls, size_t positional, const LzValue *argv,
                             size_t named_count, const char *names, size_t names_length,
                             const LzValue *named, LzValue *result) {
+    if (cls->is_trait) {
+        return fail(vm, LZ_ERR_RUNTIME, "a trait is implemented by a class; create one of those",
+                    "%s is a trait and cannot be created; use a class that implements it", cls->name->data);
+    }
     if (positional > cls->param_count) {
         return fail(vm, LZ_ERR_ARITY, NULL, "%s takes at most %zu argument%s, got %zu", cls->name->data,
                     cls->param_count, cls->param_count == 1 ? "" : "s", positional);
@@ -494,7 +1060,7 @@ LzStatus lz_class_construct(LzVM *vm, LzClass *cls, size_t positional, const LzV
         given[param] = &named[k];
     }
     for (size_t i = 0; i < cls->param_count; i++) {
-        const LzMember *member = &cls->members[cls->params[i]];
+        const LzMember *member = field_at(cls, cls->params[i]);
         if (given[i] == NULL && member->thunk.type == LZ_VAL_NIL) {
             return fail(vm, LZ_ERR_ARITY, NULL, "%s needs '%s'", cls->name->data, member->name->data);
         }
@@ -507,14 +1073,13 @@ LzStatus lz_class_construct(LzVM *vm, LzClass *cls, size_t positional, const LzV
     LzStatus status = LZ_OK;
     for (size_t i = 0; i < cls->param_count && status == LZ_OK; i++) {
         if (given[i] != NULL) {
-            status = lz_instance_store(vm, instance, &cls->members[cls->params[i]], given[i]);
+            status = lz_instance_store(vm, instance, field_at(cls, cls->params[i]), given[i]);
         }
     }
-    /* The rest from their defaults, in declaration order. */
-    for (size_t i = 0; i < cls->member_count && status == LZ_OK; i++) {
-        const LzMember *member = &cls->members[i];
-        if (member->kind != LZ_MEMBER_FIELD || ((instance->unset >> member->slot) & 1u) == 0 ||
-            member->thunk.type == LZ_VAL_NIL) {
+    /* The rest from their defaults: the parent's fields first, then the class's own, in declaration order. */
+    for (size_t slot = 0; slot < cls->field_count && status == LZ_OK; slot++) {
+        const LzMember *member = field_at(cls, slot);
+        if (((instance->unset >> slot) & 1u) == 0 || member->thunk.type == LZ_VAL_NIL) {
             continue;
         }
         LzValue value = lz_value_nil();
@@ -576,7 +1141,7 @@ LzStatus lz_instance_with(LzVM *vm, const LzInstance *source, size_t named_count
             break;
         }
         seen[param] = true;
-        status = lz_instance_store(vm, copy, &cls->members[cls->params[param]], &named[k]);
+        status = lz_instance_store(vm, copy, field_at(cls, cls->params[param]), &named[k]);
     }
     if (status == LZ_OK) {
         status = finish_instance(vm, copy);
@@ -624,20 +1189,21 @@ static LzStatus read_field(LzVM *vm, const LzInstance *instance, const LzMember 
     return LZ_OK;
 }
 
-static LzStatus instance_get(LzVM *vm, const LzString *owner, LzInstance *instance,
+static LzStatus instance_get(LzVM *vm, uint64_t owner, LzInstance *instance,
                              const LzString *name, LzValue *result, bool for_write) {
     LzClass *cls = instance->cls;
-    const LzMember *member = lz_class_find(cls, name);
-    if (member == NULL) {
+    LzFound found;
+    if (!lz_class_lookup(cls, name, &found)) {
         return no_member(vm, cls, owner, name, "field", true, false);
     }
-    if (!member_visible(owner, cls, member)) {
-        return private_error(vm, cls, member);
+    const LzMember *member = found.member;
+    if (!member_visible(owner, found.declared_in, member)) {
+        return private_error(vm, found.declared_in, member);
     }
     switch (member->kind) {
     case LZ_MEMBER_FIELD:
-        if (for_write && member->vis == LZ_VIS_PUB_READ && !lz_class_sees(owner, cls)) {
-            return read_only_error(vm, cls, member);
+        if (for_write && member->vis == LZ_VIS_PUB_READ && !lz_class_sees(vm, owner, found.declared_in)) {
+            return read_only_error(vm, found.declared_in, member);
         }
         return read_field(vm, instance, member, result);
     case LZ_MEMBER_GETTER: {
@@ -663,14 +1229,15 @@ static LzStatus instance_get(LzVM *vm, const LzString *owner, LzInstance *instan
     return LZ_OK;
 }
 
-static LzStatus class_get(LzVM *vm, const LzString *owner, LzClass *cls, const LzString *name,
+static LzStatus class_get(LzVM *vm, uint64_t owner, LzClass *cls, const LzString *name,
                           LzValue *result) {
-    const LzMember *member = lz_class_find(cls, name);
-    if (member == NULL) {
+    LzFound found;
+    if (!lz_class_lookup(cls, name, &found)) {
         return no_member(vm, cls, owner, name, "constant or function", false, false);
     }
-    if (!member_visible(owner, cls, member)) {
-        return private_error(vm, cls, member);
+    const LzMember *member = found.member;
+    if (!member_visible(owner, found.declared_in, member)) {
+        return private_error(vm, found.declared_in, member);
     }
     switch (member->kind) {
     case LZ_MEMBER_CONST:
@@ -687,7 +1254,7 @@ static LzStatus class_get(LzVM *vm, const LzString *owner, LzClass *cls, const L
     return LZ_OK;
 }
 
-LzStatus lz_vm_member_get(LzVM *vm, const LzString *owner, const LzValue *target,
+LzStatus lz_vm_member_get(LzVM *vm, uint64_t owner, const LzValue *target,
                           const LzString *name, LzValue *result, bool for_write) {
     if (lz_value_is_instance(target)) {
         return instance_get(vm, owner, lz_value_as_instance(target), name, result, for_write);
@@ -695,11 +1262,12 @@ LzStatus lz_vm_member_get(LzVM *vm, const LzString *owner, const LzValue *target
     return class_get(vm, owner, lz_value_as_class(target), name, result);
 }
 
-LzStatus lz_vm_member_set(LzVM *vm, const LzString *owner, const LzValue *target,
+LzStatus lz_vm_member_set(LzVM *vm, uint64_t owner, const LzValue *target,
                           const LzString *name, const LzValue *value) {
     if (lz_value_is_class(target)) {
         LzClass *cls = lz_value_as_class(target);
-        const LzMember *member = lz_class_find(cls, name);
+        LzFound at;
+        const LzMember *member = lz_class_lookup(cls, name, &at) ? at.member : NULL;
         if (member != NULL && member->kind == LZ_MEMBER_CONST) {
             return fail(vm, LZ_ERR_RUNTIME, NULL, "'%s' is a constant and cannot be assigned", name->data);
         }
@@ -710,17 +1278,18 @@ LzStatus lz_vm_member_set(LzVM *vm, const LzString *owner, const LzValue *target
     }
     LzInstance *instance = lz_value_as_instance(target);
     LzClass *cls = instance->cls;
-    const LzMember *member = lz_class_find(cls, name);
-    if (member == NULL) {
+    LzFound found;
+    if (!lz_class_lookup(cls, name, &found)) {
         return no_member(vm, cls, owner, name, "field", true, true);
     }
-    if (!member_visible(owner, cls, member)) {
-        return private_error(vm, cls, member);
+    const LzMember *member = found.member;
+    if (!member_visible(owner, found.declared_in, member)) {
+        return private_error(vm, found.declared_in, member);
     }
     switch (member->kind) {
     case LZ_MEMBER_FIELD:
-        if (member->vis == LZ_VIS_PUB_READ && !lz_class_sees(owner, cls)) {
-            return read_only_error(vm, cls, member);
+        if (member->vis == LZ_VIS_PUB_READ && !lz_class_sees(vm, owner, found.declared_in)) {
+            return read_only_error(vm, found.declared_in, member);
         }
         return lz_instance_store(vm, instance, member, value);
     case LZ_MEMBER_GETTER:
@@ -752,25 +1321,23 @@ static LzStatus set_bound_callee(LzVM *vm, size_t index, const LzValue *callee, 
     return set_callee(vm, index, lz_value_object(&bound->base));
 }
 
-static LzStatus instance_callee(LzVM *vm, const LzString *owner, const LzString *name, int mode,
+static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, int mode,
                                 size_t receiver_index) {
     LzValue receiver = vm->stack[receiver_index];
     LzInstance *instance = lz_value_as_instance(&receiver);
     LzClass *cls = instance->cls;
     size_t fallback = receiver_index + 1;
-    const LzMember *member = lz_class_find(cls, name);
-    if (member != NULL && cls->init_member >= 0 && &cls->members[cls->init_member] == member) {
+    LzFound hit;
+    const LzMember *member = lz_class_lookup(cls, name, &hit) ? hit.member : NULL;
+    if (member != NULL && member->kind == LZ_MEMBER_METHOD && strcmp(name->data, "init") == 0) {
         return fail(vm, LZ_ERR_RUNTIME, NULL, "init() runs automatically when an object is created");
     }
     if (member != NULL) {
-        if (!member_visible(owner, cls, member)) {
-            return private_error(vm, cls, member);
+        if (!member_visible(owner, hit.declared_in, member)) {
+            return private_error(vm, hit.declared_in, member);
         }
         switch (member->kind) {
         case LZ_MEMBER_METHOD:
-            if (cls->init_member >= 0 && &cls->members[cls->init_member] == member) {
-                return fail(vm, LZ_ERR_RUNTIME, NULL, "init() runs automatically when an object is created");
-            }
             lz_value_retain(&member->value);
             return set_callee(vm, fallback, member->value);
         case LZ_MEMBER_STATIC:
@@ -808,9 +1375,6 @@ static LzStatus instance_callee(LzVM *vm, const LzString *owner, const LzString 
         lz_object_retain(*slot);
         return set_callee(vm, fallback, lz_value_object(*slot));
     }
-    if (strcmp(name->data, "init") == 0 && cls->init_member >= 0) {
-        return fail(vm, LZ_ERR_RUNTIME, NULL, "init() runs automatically when an object is created");
-    }
     if (mode == 0) {
         return LZ_OK; /* the fallback compiled with the call: a builtin method or a function of that name */
     }
@@ -829,15 +1393,16 @@ static LzStatus instance_callee(LzVM *vm, const LzString *owner, const LzString 
     return set_callee(vm, fallback, callee);
 }
 
-static LzStatus class_callee(LzVM *vm, const LzString *owner, const LzString *name, size_t receiver_index) {
+static LzStatus class_callee(LzVM *vm, uint64_t owner, const LzString *name, size_t receiver_index) {
     LzValue receiver = vm->stack[receiver_index];
     LzClass *cls = lz_value_as_class(&receiver);
-    const LzMember *member = lz_class_find(cls, name);
-    if (member == NULL) {
+    LzFound found;
+    if (!lz_class_lookup(cls, name, &found)) {
         return no_member(vm, cls, owner, name, "function or constant", false, false);
     }
-    if (!member_visible(owner, cls, member)) {
-        return private_error(vm, cls, member);
+    const LzMember *member = found.member;
+    if (!member_visible(owner, found.declared_in, member)) {
+        return private_error(vm, found.declared_in, member);
     }
     switch (member->kind) {
     case LZ_MEMBER_STATIC:
@@ -853,7 +1418,280 @@ static LzStatus class_callee(LzVM *vm, const LzString *owner, const LzString *na
     return LZ_OK;
 }
 
-LzStatus lz_vm_method_lookup(LzVM *vm, const LzString *owner, const LzString *name, int mode,
+/* ---- operators ---- */
+
+static uint64_t calling_owner(const LzVM *vm) {
+    if (vm->frame_count == 0) {
+        return 0;
+    }
+    const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
+    return frame->closure != NULL ? frame->closure->function->owner_id : 0;
+}
+
+static const char *value_class_name(const LzValue *value) {
+    return lz_value_is_instance(value) ? lz_value_as_instance(value)->cls->name->data : lz_value_kind_name(value);
+}
+
+/*
+ * Runs the operator `symbol` of `receiver`'s class with (receiver, other), or with the receiver
+ * alone when `other` is NULL. *found is false when its class has none.
+ */
+static LzStatus run_operator(LzVM *vm, const LzValue *receiver, const char *symbol, const LzValue *other,
+                             LzValue *result, bool *found) {
+    *found = false;
+    if (!lz_value_is_instance(receiver)) {
+        return LZ_OK;
+    }
+    LzString *name = lz_vm_intern(vm, symbol, strlen(symbol));
+    if (name == NULL) {
+        return lz_vm_out_of_memory(vm);
+    }
+    LzFound hit;
+    if (!lz_class_lookup(lz_value_as_instance(receiver)->cls, name, &hit) || hit.member->kind != LZ_MEMBER_METHOD) {
+        return LZ_OK;
+    }
+    if (!member_visible(calling_owner(vm), hit.declared_in, hit.member)) {
+        return private_error(vm, hit.declared_in, hit.member);
+    }
+    *found = true;
+    LzValue argv[2] = {*receiver, other != NULL ? *other : lz_value_nil()};
+    return call_closure(vm, &hit.member->value, other != NULL ? 2 : 1, argv, result);
+}
+
+/* The result of `operator ==` or `operator <` must be a bool. */
+static LzStatus expect_bool(LzVM *vm, const LzValue *receiver, const char *symbol, LzValue *result) {
+    if (result->type == LZ_VAL_BOOL) {
+        return LZ_OK;
+    }
+    LzStatus status = lz_vm_set_error(vm, LZ_ERR_TYPE, "operator %s of %s must return a bool, got %s", symbol,
+                                      value_class_name(receiver), lz_value_kind_name(result));
+    lz_value_release(&vm->heap, result);
+    return status;
+}
+
+static const char *binary_symbol(LzOpCode op) {
+    switch (op) {
+    case LZ_OP_ADD:
+        return "+";
+    case LZ_OP_SUBTRACT:
+        return "-";
+    case LZ_OP_MULTIPLY:
+        return "*";
+    case LZ_OP_DIVIDE:
+        return "/";
+    case LZ_OP_MODULO:
+        return "%";
+    default:
+        return NULL;
+    }
+}
+
+static const char *operator_text(LzOpCode op) {
+    switch (op) {
+    case LZ_OP_FLOOR_DIVIDE:
+        return "//";
+    case LZ_OP_BIT_AND:
+        return "&";
+    case LZ_OP_BIT_OR:
+        return "|";
+    case LZ_OP_BIT_XOR:
+        return "^";
+    case LZ_OP_SHL:
+        return "<<";
+    case LZ_OP_SHR:
+        return ">>";
+    default:
+        return binary_symbol(op) != NULL ? binary_symbol(op) : "?";
+    }
+}
+
+LzStatus lz_class_binary_operator(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right,
+                                  LzValue *result, bool *handled) {
+    *handled = false;
+    if (lz_value_is_instance(left)) {
+        *handled = true;
+        const char *symbol = binary_symbol(op);
+        bool found = false;
+        if (symbol != NULL) {
+            LzStatus status = run_operator(vm, left, symbol, right, result, &found);
+            if (status != LZ_OK || found) {
+                return status;
+            }
+        }
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operator '%s' is not defined for %s", operator_text(op),
+                               value_class_name(left));
+    }
+    const char *symbol = binary_symbol(op);
+    if (symbol != NULL && lz_value_is_instance(right)) {
+        LzString *name = lz_vm_intern(vm, symbol, strlen(symbol));
+        LzFound hit;
+        if (name != NULL && lz_class_lookup(lz_value_as_instance(right)->cls, name, &hit) &&
+            hit.member->kind == LZ_MEMBER_METHOD) {
+            *handled = true;
+            return lz_vm_set_error(vm, LZ_ERR_RUNTIME,
+                                   "%s defines '%s' only when it is on the left; write vec %s 2",
+                                   value_class_name(right), symbol, symbol);
+        }
+    }
+    return LZ_OK;
+}
+
+/* `a < b`: the operator of a. */
+static LzStatus less_than(LzVM *vm, const LzValue *a, const LzValue *b, bool *answer) {
+    LzValue result = lz_value_nil();
+    bool found = false;
+    LzStatus status = run_operator(vm, a, "<", b, &result, &found);
+    if (status != LZ_OK) {
+        return status;
+    }
+    if (!found) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operator '<' is not defined for %s", value_class_name(a));
+    }
+    status = expect_bool(vm, a, "<", &result);
+    if (status != LZ_OK) {
+        return status;
+    }
+    *answer = result.as.boolean;
+    return LZ_OK;
+}
+
+LzStatus lz_class_order_operator(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right,
+                                 LzValue *result, bool *handled) {
+    *handled = false;
+    if (!lz_value_is_instance(left) && !lz_value_is_instance(right)) {
+        return LZ_OK;
+    }
+    *handled = true;
+    bool answer = false;
+    LzStatus status = LZ_OK;
+    switch (op) {
+    case LZ_OP_LESS:
+        status = less_than(vm, left, right, &answer);
+        break;
+    case LZ_OP_GREATER:
+        status = less_than(vm, right, left, &answer); /* a > b is b < a */
+        break;
+    case LZ_OP_LESS_EQUAL:
+    case LZ_OP_GREATER_EQUAL: {
+        bool forward = op == LZ_OP_LESS_EQUAL;
+        status = forward ? less_than(vm, left, right, &answer) : less_than(vm, right, left, &answer);
+        if (status == LZ_OK && !answer) {
+            status = lz_vm_values_equal(vm, left, right, &answer); /* ... or equal */
+        }
+        break;
+    }
+    default:
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "unknown comparison operator");
+    }
+    if (status != LZ_OK) {
+        return status;
+    }
+    *result = lz_value_bool(answer);
+    return LZ_OK;
+}
+
+LzStatus lz_class_negate_operator(LzVM *vm, const LzValue *operand, LzValue *result, bool *handled) {
+    *handled = false;
+    if (!lz_value_is_instance(operand)) {
+        return LZ_OK;
+    }
+    *handled = true;
+    bool found = false;
+    LzStatus status = run_operator(vm, operand, "-@", NULL, result, &found);
+    if (status != LZ_OK || found) {
+        return status;
+    }
+    return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operator '-' is not defined for %s", value_class_name(operand));
+}
+
+/* Equality inside a comparison that has no VM argument: the VM comparing is remembered here. */
+static LzVM *equal_vm = NULL;
+static LzStatus equal_pending = LZ_OK;
+
+void lz_class_equal_scope_begin(LzVM *vm, LzVM **saved) {
+    *saved = equal_vm;
+    equal_vm = vm;
+}
+
+LzStatus lz_class_equal_scope_end(LzVM *saved) {
+    equal_vm = saved;
+    LzStatus status = equal_pending;
+    equal_pending = LZ_OK;
+    return status;
+}
+
+bool lz_class_equal_hook(const LzValue *left, const LzValue *right, bool *same) {
+    if (equal_vm == NULL || !lz_value_is_instance(left)) {
+        return false;
+    }
+    LzVM *vm = equal_vm;
+    if (equal_pending != LZ_OK) {
+        *same = false; /* an operator already failed: stop quickly, the error is reported */
+        return true;
+    }
+    LzValue result = lz_value_nil();
+    bool found = false;
+    LzStatus status = run_operator(vm, left, "==", right, &result, &found);
+    if (status == LZ_OK && found) {
+        status = expect_bool(vm, left, "==", &result);
+    }
+    if (status != LZ_OK) {
+        equal_pending = status;
+        *same = false;
+        return true;
+    }
+    if (!found) {
+        return false;
+    }
+    *same = result.as.boolean;
+    return true;
+}
+
+LzStatus lz_vm_super_lookup(LzVM *vm, uint64_t owner, const LzString *name, int mode, size_t receiver) {
+    const LzClass *code = lz_class_by_id(vm, owner);
+    LzFound hit;
+    if (code == NULL || code->parent == NULL || !lz_class_lookup(code->parent, name, &hit)) {
+        return fail(vm, LZ_ERR_RUNTIME, NULL, "the parent of %s has no method '%s'",
+                    code != NULL ? code->name->data : "this class", name->data);
+    }
+    const LzMember *member = hit.member;
+    switch (member->kind) {
+    case LZ_MEMBER_METHOD:
+        if (mode == 1) {
+            return fail(vm, LZ_ERR_RUNTIME, NULL, "'%s' is a function; write super.%s() with parentheses",
+                        name->data, name->data);
+        }
+        lz_value_retain(&member->value);
+        lz_value_release(&vm->heap, &vm->stack[receiver + 1]);
+        vm->stack[receiver + 1] = member->value;
+        return LZ_OK;
+    case LZ_MEMBER_GETTER: {
+        if (mode == 0) {
+            return fail(vm, LZ_ERR_RUNTIME, NULL, "'%s' is a property; write super.%s without parentheses",
+                        name->data, name->data);
+        }
+        LzValue self = vm->stack[receiver];
+        LzValue value = lz_value_nil();
+        LzStatus status = call_closure(vm, &member->value, 1, &self, &value);
+        if (status != LZ_OK) {
+            return status;
+        }
+        lz_value_release(&vm->heap, &vm->stack[receiver]);
+        vm->stack[receiver] = value;
+        return LZ_OK;
+    }
+    case LZ_MEMBER_STATIC:
+        return fail(vm, LZ_ERR_RUNTIME, NULL, "'%s' is a static function; call it as %s.%s()", name->data,
+                    hit.declared_in->name->data, name->data);
+    case LZ_MEMBER_FIELD:
+    case LZ_MEMBER_CONST:
+        return fail(vm, LZ_ERR_RUNTIME, NULL, "'super' reaches functions and properties, and '%s' is %s of %s",
+                    name->data, kind_phrase(member), hit.declared_in->name->data);
+    }
+    return LZ_OK;
+}
+
+LzStatus lz_vm_method_lookup(LzVM *vm, uint64_t owner, const LzString *name, int mode,
                              size_t receiver_index) {
     const LzValue *receiver = &vm->stack[receiver_index];
     if (lz_value_is_instance(receiver)) {
@@ -883,11 +1721,13 @@ LzStatus lz_vm_method_lookup(LzVM *vm, const LzString *owner, const LzString *na
 static unsigned write_depth = 0;
 
 static const LzMember *user_text_method(const LzClass *cls, const char *name) {
-    for (size_t i = 0; i < cls->member_count; i++) {
-        const LzMember *member = &cls->members[i];
-        if (member->kind == LZ_MEMBER_METHOD && member->vis != LZ_VIS_PRIVATE &&
-            strcmp(member->name->data, name) == 0) {
-            return member;
+    for (; cls != NULL; cls = cls->parent) {
+        for (size_t i = 0; i < cls->member_count; i++) {
+            const LzMember *member = &cls->members[i];
+            if (member->kind == LZ_MEMBER_METHOD && member->vis != LZ_VIS_PRIVATE &&
+                strcmp(member->name->data, name) == 0) {
+                return member;
+            }
         }
     }
     return NULL;
@@ -897,7 +1737,7 @@ bool lz_instance_write(const LzInstance *instance, const LzWriter *writer, bool 
     LzClass *cls = instance->cls;
     LzVM *vm = cls->vm;
     if (write_depth >= WRITE_DEPTH_MAX) {
-        vm->text_status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "value is nested too deeply to print");
+        vm->text_status = lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow: value is nested too deeply to print");
         return false;
     }
     write_depth++;
@@ -926,11 +1766,8 @@ bool lz_instance_write(const LzInstance *instance, const LzWriter *writer, bool 
     }
     ok = lz_writer_write(writer, cls->name->data, cls->name->length) && lz_writer_write_cstr(writer, "(");
     bool first = true;
-    for (size_t i = 0; ok && i < cls->member_count; i++) {
-        const LzMember *member = &cls->members[i];
-        if (member->kind != LZ_MEMBER_FIELD) {
-            continue;
-        }
+    for (size_t slot = 0; ok && slot < cls->field_count; slot++) {
+        const LzMember *member = field_at(cls, slot);
         if (!first) {
             ok = lz_writer_write_cstr(writer, ", ");
         }

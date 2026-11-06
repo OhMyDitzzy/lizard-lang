@@ -162,12 +162,21 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
         size_t next = constant_instruction(chunk, offset, out);
         return next + 1; /* the mode byte */
     }
+    case LZ_OP_SUPER: {
+        size_t next = constant_instruction(chunk, offset, out);
+        return next + 1; /* the mode byte */
+    }
+    case LZ_OP_CLASS_LINK: {
+        size_t next = constant_instruction(chunk, offset, out);
+        return next + 3; /* the parent's name and the role */
+    }
     case LZ_OP_GET_LOCAL:
     case LZ_OP_SET_LOCAL:
     case LZ_OP_GET_UPVALUE:
     case LZ_OP_SET_UPVALUE:
         return slot_instruction(chunk, offset, out);
     case LZ_OP_CHECK_TYPE:
+    case LZ_OP_IS:
     case LZ_OP_CHECK_RETURN:
         return type_instruction(chunk, offset, out);
     case LZ_OP_CHECK_PARAM:

@@ -1,4 +1,11 @@
+#define _GNU_SOURCE 1
+#include <stdint.h>
 #include <stdio.h>
+#if defined(__linux__)
+#include <pthread.h>
+#elif defined(__APPLE__)
+#include <pthread.h>
+#endif
 #include <string.h>
 
 #include "lizard/array.h"
@@ -231,8 +238,77 @@ LzStatus lz_vm_call(LzVM *vm, size_t argc, size_t resume_ip, uint32_t call_offse
     return status;
 }
 
+/*
+ * The lowest address the nested callbacks may reach. A callback costs 1 to 3 KiB of C stack (more
+ * under AddressSanitizer), so the count limit alone cannot protect a small stack. The real end
+ * of this thread's stack is asked of the system and 192 KiB are kept back for the work between
+ * two checks. Where it cannot be asked, the callbacks get 768 KiB below the first one.
+ */
+#define C_STACK_MARGIN (192u * 1024u)
+#define C_STACK_FALLBACK (768u * 1024u)
+
+/*
+ * Asking the system for the stack of a thread is slow (on Linux it reads /proc/self/maps), so the
+ * answer is kept in the VM and used again while the code runs on the same stack.
+ */
+static uintptr_t c_stack_floor(LzVM *vm, uintptr_t now) {
+    if (vm->c_stack_hi != 0 && now >= vm->c_stack_lo && now < vm->c_stack_hi) {
+        return vm->c_stack_lo + C_STACK_MARGIN;
+    }
+#if defined(__linux__)
+    pthread_attr_t attr;
+    if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+        void *low = NULL;
+        size_t size = 0;
+        int ok = pthread_attr_getstack(&attr, &low, &size);
+        (void)pthread_attr_destroy(&attr);
+        if (ok == 0 && low != NULL && (uintptr_t)low < now && now - (uintptr_t)low > C_STACK_MARGIN) {
+            vm->c_stack_lo = (uintptr_t)low;
+            vm->c_stack_hi = (uintptr_t)low + size;
+            return vm->c_stack_lo + C_STACK_MARGIN;
+        }
+    }
+#elif defined(__APPLE__)
+    pthread_t self = pthread_self();
+    uintptr_t top = (uintptr_t)pthread_get_stackaddr_np(self);
+    size_t size = pthread_get_stacksize_np(self);
+    if (top > now && size > C_STACK_MARGIN && top - size < now && now - (top - size) > C_STACK_MARGIN) {
+        vm->c_stack_lo = top - size;
+        vm->c_stack_hi = top;
+        return vm->c_stack_lo + C_STACK_MARGIN;
+    }
+#endif
+    return now > C_STACK_FALLBACK ? now - C_STACK_FALLBACK : 0;
+}
+
+/*
+ * The address of this frame on the real stack. The address of a local would be wrong under
+ * AddressSanitizer, which moves locals to a "fake stack" on the heap.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#define C_STACK_NOW() ((uintptr_t)__builtin_frame_address(0))
+#else
+#define C_STACK_NOW() ((uintptr_t)&here)
+#endif
+
+/* True when this callback would nest deeper than the C stack can take. */
+static bool c_stack_exhausted(LzVM *vm) {
+    char here;
+    (void)here;
+    uintptr_t now = C_STACK_NOW();
+    if (vm->native_depth == 0) {
+        vm->c_stack_floor = c_stack_floor(vm, now);
+        return false;
+    }
+    return now < vm->c_stack_floor;
+}
+
 LzStatus lz_vm_call_value(LzVM *vm, const LzValue *callee, size_t argc, const LzValue *argv,
                           LzValue *result) {
+    if (c_stack_exhausted(vm)) {
+        return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
+                               "stack overflow: callbacks nested too deeply for the C stack");
+    }
     if (vm->native_depth >= LZ_NATIVE_DEPTH_MAX) {
         return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
                                "stack overflow: callbacks nested too deeply (limit %d)",

@@ -167,7 +167,161 @@ Member lookup on an object: its class (with visibility) → the built-in methods
 
 A class name works wherever a type does: `fn f(p: Point)`, `let q: Point`, `pub next: Point`,
 `Point[]`. It matches instances of that class. Class names are known from their declaration on
-(a method may name its own class).
+(a method may name its own class). A class made by an earlier source run in the same VM can be
+named too, by the binding of the name when the annotation is compiled; a name bound to something
+that is not a class is `'Foo' is not a type`.
+
+A type names a class by its **identity** (`LzClass.id`, a number that is never reused), not by its
+name. If a class is defined again in a later source, objects of the old class do not match the new
+`A` and the message says so: `expected A, got A (made by an earlier definition of that class)`.
+
+## Inheritance
+
+`class Dog : Animal { ... }` makes `Dog` a class that builds on `Animal`. A class has at most one
+parent class; it is the first name after the colon, and any other names are traits (see below).
+
+```lizard
+class Animal {
+    pub name: string
+    pub fn speak(self) => "..."
+    pub fn intro(self) => $"I am {self.name} and I say {self.speak()}"
+}
+class Dog : Animal {
+    pub breed: string = "mixed"
+    pub override fn speak(self) => "Woof"
+}
+println(Dog("Rex", breed: "Husky").intro())    # I am Rex and I say Woof
+```
+
+* The parent must exist when the `class` statement runs. A name that is not a class or a trait is
+  `'x' is not a class or a trait`; a builtin type is `cannot inherit from a builtin type`; an
+  error kind is `inheriting from an error kind is not supported yet`.
+* **Fields:** the parent's first, then the child's. The constructor takes the `pub` fields of the
+  parent (from the root down) and then the child's: `Dog("Rex", breed: "Husky")`. A child cannot
+  declare a field its parent has (`Dog redeclares field 'name' of Animal`), and a name cannot
+  change kind (`'x' is a field of Animal and cannot be redeclared as a function`).
+* **Creating an object:** the fields are set from the arguments, then every default (the parent's
+  first), then each `init` runs from the root down to the class of the object (never write
+  `super.init()`), then a check that no field is missing. Every default is set before any `init`.
+* **Visibility:** code in a class sees the private members of the class and of its ancestors, never
+  of its descendants. A child may write the parent's `pub read` fields. The message names the class
+  that declared the member.
+* **Lookup** goes from the class of the object up through its parents, then to the default
+  functions of traits, then to the builtin methods and global functions. Static functions and
+  constants are inherited (`Dog.NAME`). `Animal.speak(dog)` runs the `Animal` version on a `Dog`.
+* `==` between objects still needs the very same class: a `Dog` and an `Animal` are never equal
+  (unless `operator ==` says so). `copy` keeps the class, and `with` makes an object of the same
+  class and runs the `init` chain again.
+* A type `a: Animal` accepts a `Dog` and a `Puppy`, in parameters, results, `let` and fields.
+
+## `override` and `super`
+
+`override` is written after `pub`: `pub override fn speak(self)`, `override get area(self)`. It is
+for functions, static functions and properties.
+
+* It is **required** when the parent (or an ancestor, or a ready-made function of a trait) already
+  has the name: `Dog.speak() hides Animal.speak(); add 'override'`. It is allowed, not required, for
+  a function that a trait only requires.
+* With nothing to replace: `Dog.speek() overrides nothing (did you mean 'speak'?)`.
+* The same number of parameters (`must take the same parameters as Animal.speak() (expected 0, got
+  1)`), the same kind (`Dog.area is a property but Animal.area is a function`) and a visibility that
+  is not smaller (`Dog.speak() cannot be private because Animal.speak() is public`). A private
+  member of an ancestor may be overridden.
+* Not for fields, constants or `init` (every `init` runs).
+
+`super.name(args)` runs the parent's version, with the same `self`. The search starts at the parent
+of the class **where the code is written**, not at the class of the object, so with
+`Puppy : Dog : Animal`, `super.speak()` inside `Dog` is `Animal.speak` even for a `Puppy`.
+`super.name` without parentheses reads a property. It works in methods, properties and lambdas
+inside them. Elsewhere: `'super' can only be used inside a method`, `'super' cannot be used in a
+static function`, `Animal has no parent class, so 'super' has nothing to refer to`, `the parent of
+Dog has no method 'x'`, `'super' must be followed by .name`, `init() runs automatically;
+super.init() is not needed`, `'super' cannot be used in a trait`.
+
+## `is` and `is not`
+
+```lizard
+println(d is Animal)        # true for a Dog, a Puppy, an Animal
+println(d is not Puppy)
+println(5 is int, nil is Dog, [1] is int[])
+if shape is Circle and shape.r > 0 { ... }
+```
+
+The right side is a type, read the same way as an annotation, and `x is T` is true exactly when
+`x` would be accepted by `: T`. A value that is not an object is simply not a class or a trait
+(`false`). It sits at the level of `==` and does not chain with it (`a is B == c` needs
+parentheses). `is` is a word only after an expression on its line: a variable called `is` still
+works. A name that is not a type: `'foo' is not a type`. Patterns in `switch` are not included.
+
+## Traits
+
+A trait is a promise: what a class must provide, plus ready-made functions that use it.
+
+```lizard
+trait Shape {
+    fn area(self)                      # no body: a class must write it
+    get label(self)                    # a property it must have
+    fn describe(self) => $"{self.label}: {self.area()}"     # a default
+}
+class Square : Shape {
+    pub side: int
+    pub fn area(self) => self.side * self.side
+    pub get label(self) => "square"
+}
+```
+
+* A trait may extend traits (`trait Greeter : Named`). A trait cannot have fields, constants,
+  static functions, `init` or operators (`a trait cannot have fields`, ...). Everything in a trait
+  is public. A trait is not created: `Shape is a trait and cannot be created; use a class that
+  implements it`. `println(Shape)` is `<trait Shape>`.
+* A function with no body in a class: `this function needs a body (only a trait can leave it out)`.
+* **The contract**, checked when the `class` statement runs: `Circle does not implement 'area'
+  required by Shape`; the same parameters; public (`Circle.area() must be public because Shape
+  requires it`); a required `get` is met by a `get`, not by a field. A parent class can supply what
+  a trait requires.
+* A **default** is part of the class that uses the trait and runs on the real object, so
+  `self.area()` finds the class's own `area`. Its code is not inside any class: it sees only public
+  members. A function of the class chain wins over a default; replacing a default needs
+  `override`.
+* **Two traits, one name:** `Circle gets 'describe' from both Shape and Describable; define
+  describe() in Circle to choose`. The same trait reached by two paths is no conflict, and a trait
+  that extends another wins over it.
+* A trait is a type: `fn show(s: Shape)`, `x is Shape`.
+
+## Operators
+
+```lizard
+class Vec {
+    pub x: int
+    pub y: int
+    pub operator +(self, other) => Vec(self.x + other.x, self.y + other.y)
+    pub operator -(self) => Vec(-self.x, -self.y)          # unary: only self
+    pub operator *(self, k) => Vec(self.x * k, self.y * k)
+    pub operator <(self, other) => self.x < other.x
+}
+```
+
+Definable: `+ - * / % == <` (and the unary `-`); `operator equal` is `operator ==`. Others are
+refused: `operator '>' cannot be defined; define '<' and '>', '<=' and '>=' follow from it`,
+`'!=' follows from '=='`, `operator '??' cannot be defined`. A wrong number of parameters:
+`operator + takes 'self' and one other value`.
+
+* `a + b` runs `operator +` of **a**'s class (or an ancestor's) with `(a, b)`. There is no reversed
+  form: `2 * vec` is an error that says `Vec defines '*' only when it is on the left; write vec *
+  2`. Without the operator: `operator '+' is not defined for Vec`.
+* `==` runs `operator ==` of the left operand and **replaces** the content comparison for the class
+  and its descendants, everywhere equality is used (`in`, `switch`, nested arrays and dicts). It
+  must return a bool. `!=` is its opposite. This is deliberately lopsided: `5 == vec` is `false`
+  and does not call anything.
+* `a < b` runs `a`'s `operator <`; `a > b` is `b < a` (so it runs `b`'s), `a <= b` is `a < b or
+  a == b`, `a >= b` is `b < a or a == b`. The result must be a bool. `sort`, `min` and `max` of
+  an array of objects use `<`; `sort` leaves the array untouched if the operator fails.
+* `+=`, `-=`, `*=` ... use the same operators, also on `obj.field` and `arr[i]`.
+* Operators are inherited; redefining one needs `override`. A private operator works only inside
+  the class. An error inside an operator has a trace line like `Vec.+`. They run as ordinary calls:
+  they use fuel and the depth limit.
+* Numbers and strings do not go through any of this: the hook is only in the slow path, reached
+  when an operand is an object.
 
 ## Error kinds
 
@@ -186,20 +340,69 @@ Choices made where the specification was open:
   (through field 'next' of Node)`. Objects as dict keys: `a Point cannot be a dict key` (the existing wording).
 * **Array types** use the existing syntax `int[]`, not `[int]`.
 * **Printing.** A function prints `<fn Point.origin>` and a bound method `<method Point.sum>`.
-* **Class names in types** are matched by name. Two classes with the same name are one type.
-* **Unknown names.** In a file that declares a class, `x.name()` first asks the object. Calls
-  whose receiver is an object are typed `any`, and so are field reads (`e.message` too), because
-  the static types of builtin methods and error fields cannot be trusted there. Files without a class compile
-  exactly as before.
-* **Nested calls.** The constructor, `init`, field defaults, getters and `to_string` run through a
-  nested call of the interpreter, so they share the limit of 128 nested callbacks. Ordinary
-  method calls use normal frames and are not limited this way.
-* **Where "inside the class" comes from.** Each function carries the name of the class it was
-  compiled in (`LzFunction.owner`); closures inside inherit it. `lz_class_sees` is the one place
-  to widen for subclasses.
+* **Class names in types** are matched by class identity (see above), never by name.
+* **Unknown names.** `x.name()`, `x.field` and `Name(x: 3)` compile in any file: the callee
+  decides what a name means when it runs. Where the receiver is an object, or its type is not
+  known (a parameter, a result from another file), the compiler assumes the object may be an
+  instance and types the result `any`; a receiver whose type is known not to be an object keeps the
+  older handling. A VM that has already compiled a class treats every receiver this way. A global
+  made by `error E` has no known type at compile time, so `a.cause = a` on it is a run-time error
+  (`cannot assign to field 'cause' of error`). A callee that takes no named arguments says so at run
+  time (`len(): builtin functions do not take named arguments`).
+* **Nested calls.** The constructor, `init`, field defaults, getters, `to_string` and operator
+  hooks run through a nested call of the interpreter (`lz_vm_call_value`). The count limit is the
+  frame limit (2048), so runaway recursion ends with the ordinary depth error. Because each nesting
+  also uses the C stack (about 1-2 KiB, about 3 KiB under AddressSanitizer), a second guard
+  compares the real stack pointer with the end of the thread's stack (192 KiB kept back) and
+  reports `stack overflow: callbacks nested too deeply for the C stack`. A VM needs more than
+  about 640 KiB of stack to run at all. Moving these calls into plain VM frames was not done: it
+  needs a state machine for the construction phases in both engines.
+* **Printing depth.** A `to_string` that prints itself ends with `stack overflow: value is nested
+  too deeply to print`, which is a limit error like the others.
+* **Where "inside the class" comes from.** Each function carries the id of the class it was
+  compiled in (`LzFunction.owner_id`, and the name in `owner` for messages); closures inside
+  inherit it. `lz_class_sees` resolves the id through a registry of live classes (sorted by id), so
+  it can tell whether that class derives from the one that declares a member.
+* **Class layout.** A class object is built at compile time and linked at run time, when its
+  `class` statement runs (`OP_CLASS_LINK`, one per name in the head, then `OP_CLASS_INIT`, which
+  checks overrides, traits and constants). The field slots of a child start after the parent's;
+  `field_refs` maps a slot to the class and member that declare it, and the constructor's
+  parameters are slots.
+* **Member lookup** walks the chain each time. A table cached per class, with a version number to
+  invalidate it, is planned together with `extend`, which is what needs the invalidation.
+* **Type checks of classes** are made when the code runs: the compiler cannot know a hierarchy that
+  is built at run time, so `let d: Dog = Cat()` is a run-time type error, not a compile error.
+* **Operators** are methods named by their symbol (`"+"`, `"-@"` for the unary minus ...), so
+  inheritance, `override` and visibility need no special case. Equality inside nested comparisons
+  has no VM argument, so the VM that is comparing is kept in a static for the length of the
+  comparison (`lz_class_equal_scope_begin/end`): not safe for two VMs on two threads at once.
+* **Trait members** live in the trait's class object (`is_trait`); a requirement is a member with
+  `is_required`; defaults are found by `lz_class_lookup` after the class chain.
+* **Errors at declaration** are run-time errors of the `class` statement, placed on the offending
+  declaration (one source position, not two labels).
+* **`is`** compiles to `OP_IS` with the type table of the chunk, so functions that use it run in
+  the reference interpreter's slow path under `ge` (the same as for the other class opcodes).
 * **Fields** are limited to 64 per class (a bitmask tracks the ones without a value).
 * **Constants** are dropped when the VM releases its roots, because a constant may hold an
   object of its own class (a cycle that would otherwise be reported as a leak).
+
+## Limits
+
+* **`pub read` is shallow.** It forbids assigning the field from outside the class, nothing more:
+  the array or dict a field holds can still be changed through its methods.
+
+  ```lizard
+  class Bag {
+      pub read items: int[] = []
+  }
+  let b = Bag()
+  b.items = []        # error: 'items' is read-only outside Bag
+  b.items.push(1)     # allowed: the array itself is not protected
+  ```
+
+  If outsiders must not change a collection, keep it private and offer methods
+  (`pub fn add(self, x: int)`, `pub fn count(self) => len(self.items)`) instead of exposing it.
+* At most 64 fields per class and 64 classes per file.
 
 ## Memory and cycles
 
@@ -223,13 +426,38 @@ compiled by the JIT** (like functions with `try`); they run on GE. Calling a met
 value from JIT-compiled code works through the generic call path. The JIT is not asked to emit
 code for classes in stage 1.
 
-## Planned (stages 2 and 3)
+## Messages of stage 2
 
-Parsed today and rejected with `... is not supported yet`: `class A : B`, `override`, `operator`,
-`trait`, `extend`, `super`, `pub class`. The design leaves room: `LzClass.parent`, `lz_class_sees`
-(visibility for subclasses), the type check in `lz_type_matches`/`lz_type_assignable` (subtypes),
-the member table (members from `extend`), and members that can be exported by modules.
+| Situation | Message |
+|---|---|
+| more than one parent class, or not first | `a class can have only one parent class, and it must come first` |
+| parent is not a class or trait | `'x' is not a class or a trait` |
+| parent is a builtin type | `cannot inherit from a builtin type` |
+| parent is an error kind | `inheriting from an error kind is not supported yet` |
+| field declared again | `Dog redeclares field 'name' of Animal` |
+| forgot `override` | `Dog.speak() hides Animal.speak(); add 'override'` |
+| `override` with nothing to replace | `Dog.speek() overrides nothing (did you mean 'speak'?)` |
+| different parameters | `Dog.speak() must take the same parameters as Animal.speak() (expected 0, got 1)` |
+| smaller visibility | `Dog.speak() cannot be private because Animal.speak() is public` |
+| `super` outside a method | `'super' can only be used inside a method` |
+| `super` without a parent | `Animal has no parent class, so 'super' has nothing to refer to` |
+| trait contract missing | `Circle does not implement 'area' required by Shape` |
+| two traits, one name | `Circle gets 'describe' from both Shape and Describable; define describe() in Circle to choose` |
+| creating a trait | `Shape is a trait and cannot be created; use a class that implements it` |
+| no operator | `operator '+' is not defined for Vec` |
+| operator on the right | `Vec defines '*' only when it is on the left; write vec * 2` |
+| forbidden operator | `operator '>' cannot be defined; define '<' and '>', '<=' and '>=' follow from it` |
+
+## Planned (stage 3)
+
+Still parsed and refused with `... is not supported yet`: `extend`, `pub class`, and `trait` or
+`operator` written inside a trait's body (`operators in traits are not supported yet`). The design
+leaves room: member lookup is one function (`lz_class_lookup`) where a per-class cache with
+invalidation can go, the member table can take members from `extend` and from modules, and class
+identity (`LzClass.id`) does not depend on global names.
 
 Stage 3 opens reference cycles through objects. Today's refusal is in `lz_instance_store`
 (`lz_containers_would_cycle` with an object target); relaxing it also needs the skink to start
-from object stores, as it does for closures.
+from object stores, as it does for closures. Also left for later: the constructor, `init`, getters
+and operators in plain VM frames (see "Nested calls"), JIT for methods, patterns of `is` in
+`switch`, `error` as a class.

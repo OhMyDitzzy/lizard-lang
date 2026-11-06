@@ -277,7 +277,8 @@ static void test_constructors(void) {
     check_output("error E\ntry { E(\"m\", cause: 5) } catch TypeError as t { println(t.kind) }\n", "TypeError\n");
     check_output("error E\ntry { E(\"a\", \"b\") } catch ArityError as t { println(t.kind) }\n", "ArityError\n");
     /* `cause` and `data` are read only. */
-    check_compile_error("error E\nlet a = E(\"m\")\na.cause = a\n", "", 3, 9);
+    /* The kind is declared at run time, so `a` has no known type: the check is made when it runs. */
+    check_run_error("error E\nlet a = E(\"m\")\na.cause = a\n", "cannot assign to field 'cause' of error");
 }
 
 static void test_fields_and_chain(void) {

@@ -120,7 +120,16 @@ typedef enum LzOpCode {
                             or finds a function of that name (mode 1: [receiver][nil]) */
     LZ_OP_GET_FIELD_W, /* u16 constant name: like GET_FIELD, for a value that is about to be changed in place
                           (`o.items[i] = v`): a read-only field of another class is refused */
-    LZ_OP_CLASS_INIT   /* u16 constant (a class): run the initialisers of its constants, once */
+    LZ_OP_CLASS_INIT,  /* u16 constant (a class): run the initialisers of its constants, once */
+    LZ_OP_IS,          /* u16 type index: replace the top value by whether it matches that type
+                          (the test of an annotation `: T`, as a bool) */
+    LZ_OP_SUPER,       /* u16 constant name, u8 mode: `super.name` in a method. Mode 0 (a call): [self][nil]
+                          becomes [self][the parent's method]; mode 1 (a property): [self] becomes the
+                          value of the parent's property. The search starts at the parent of the class
+                          the code is written in, not at the class of self. */
+    LZ_OP_CLASS_LINK   /* u16 constant (a class), u16 constant (the parent's name), u8 role: pops the
+                          parent class (or trait) named in the head `class A : B, C` and joins it to
+                          the class; role 0 is the first entry, 1 a later one */
 } LzOpCode;
 
 #define LZ_CONSTANTS_MAX 65536

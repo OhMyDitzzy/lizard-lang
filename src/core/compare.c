@@ -1,11 +1,20 @@
 #include "lizard/compare.h"
 
+#include "lizard/class.h"
+
 static bool is_number(const LzValue *value) {
     return value->type == LZ_VAL_INT || value->type == LZ_VAL_FLOAT;
 }
 
 LzStatus lz_compare_order(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right,
                           LzValue *result) {
+    if (lz_value_is_instance(left) || lz_value_is_instance(right)) {
+        bool handled = false;
+        LzStatus status = lz_class_order_operator(vm, op, left, right, result, &handled);
+        if (handled) {
+            return status;
+        }
+    }
     if (!is_number(left) || !is_number(right)) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operands must be numbers");
     }

@@ -103,16 +103,28 @@ struct LzVM {
     /* Classes (see class.h). */
     char error_help[192];        /* "help:" line for the run-time error in vm->error, or empty */
     LzStatus text_status;        /* a script to_string/to_debug that failed while a value was being written */
+    uint64_t next_class_id;      /* the last LzClass.id handed out */
+    struct LzClass **class_registry; /* every live class, sorted by id (weak): see lz_class_by_id */
+    size_t class_registry_count;
+    size_t class_registry_capacity;
     bool has_classes;            /* some class was declared: method calls must look at the receiver's class */
     LzObject *native_with;       /* the natives behind x.with(...) and x.copy() of an instance (retained, lazy) */
     LzObject *native_copy;
+    uintptr_t c_stack_floor;     /* lowest C stack address a nested callback may reach (see call.c) */
+    uintptr_t c_stack_lo;        /* the thread stack the floor was measured on: [lo, hi); asking the system is slow */
+    uintptr_t c_stack_hi;
     LzSkink skink; /* cycle collector, see skink.h; last so the JIT's field offsets stay put */
 };
 
 #define LZ_FUEL_UNLIMITED UINT64_MAX
 
-/* Deepest chain of callbacks run by natives (map inside map ...): each one nests the C stack. */
-#define LZ_NATIVE_DEPTH_MAX 128
+/*
+ * Deepest chain of callbacks run by natives and by classes (map inside map, a getter that reads a
+ * getter, a constructor whose init builds another object ...): each one nests the C stack. The
+ * count is the same as the frame limit, so a runaway recursion ends with the ordinary depth error
+ * either way. The byte budget below protects the C stack itself (see lz_vm_call_value).
+ */
+#define LZ_NATIVE_DEPTH_MAX LZ_FRAMES_MAX
 
 void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err);
 

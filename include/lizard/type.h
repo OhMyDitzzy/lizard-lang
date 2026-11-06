@@ -60,6 +60,12 @@ typedef struct LzType {
      * must be an instance of, or NULL for an instance of any class (what `any` accepts).
      */
     const LzString *class_name;
+    /*
+     * With class_name: the identity of that class (LzClass.id), 0 for an instance of any class.
+     * Two classes with one name (a class defined again) have different ids and never match each
+     * other. It is a number and never dereferenced, so a class that is gone cannot dangle here.
+     */
+    uint64_t class_id;
 } LzType;
 
 typedef enum LzAssign {

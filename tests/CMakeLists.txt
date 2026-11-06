@@ -98,7 +98,7 @@ lz_add_ge_variant(fuzz_compile)
 # to machine code on first sight (LZ_JIT=eager). Without a JIT on the platform these are
 # plain GE runs.
 foreach(name test_engine fuzz_engine test_bits_ge test_run_ge test_limits_ge test_array_ge test_compiler_ge
-        test_loops_ge test_for_ge test_in_ge test_switch_ge test_try_ge test_error_types_ge test_if_expr_ge fuzz_run_ge fuzz_compile_ge test_skink_ge)
+        test_loops_ge test_for_ge test_in_ge test_switch_ge test_try_ge test_error_types_ge test_if_expr_ge fuzz_run_ge fuzz_compile_ge test_skink_ge test_classes_ge)
     add_test(NAME ${name}_jit COMMAND ${name})
     set_tests_properties(${name}_jit PROPERTIES ENVIRONMENT "LZ_JIT=eager")
 endforeach()

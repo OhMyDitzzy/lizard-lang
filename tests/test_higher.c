@@ -197,7 +197,7 @@ static void test_callback_errors(void) {
     check_fails("println(map([1, 2], 5))\n", LZ_ERR_RUNTIME, "expected a function", 0);
     check_fails("println(map(5, fn(x) => x))\n", LZ_ERR_RUNTIME, "expected an array", 0);
     check_fails("fn deep(n) { return map([n], fn(x) => deep(x + 1)) }\ndeep(0)\n",
-                LZ_ERR_STACK_OVERFLOW, "callbacks nested too deeply", 0);
+                LZ_ERR_STACK_OVERFLOW, "too many nested calls", 0);
 
     /* The stack trace goes through the callback to the call that started it. */
     Program program;

@@ -23,6 +23,9 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->error_offset = LZ_NO_OFFSET;
     vm->native_call_offset = LZ_NO_OFFSET;
     vm->native_depth = 0;
+    vm->c_stack_floor = 0;
+    vm->c_stack_lo = 0;
+    vm->c_stack_hi = 0;
     vm->trace_fixed = false;
     vm->trace_count = 0;
     vm->trace_total = 0;
@@ -39,6 +42,10 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->error_help[0] = '\0';
     vm->text_status = LZ_OK;
     vm->has_classes = false;
+    vm->next_class_id = 0;
+    vm->class_registry = NULL;
+    vm->class_registry_count = 0;
+    vm->class_registry_capacity = 0;
     vm->native_with = NULL;
     vm->native_copy = NULL;
     lz_skink_init(&vm->skink);
@@ -121,6 +128,8 @@ void lz_vm_free(LzVM *vm) {
     lz_writer_flush(&vm->err);
     lz_vm_release_roots(vm);
     lz_heap_destroy(&vm->heap);
+    free(vm->class_registry);
+    vm->class_registry = NULL;
 }
 
 LzString *lz_vm_intern(LzVM *vm, const char *chars, size_t length) {

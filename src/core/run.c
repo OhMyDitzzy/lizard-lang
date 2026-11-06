@@ -96,6 +96,11 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
         lz_value_describe(value, &actual_out);
     } else {
         (void)lz_writer_write_cstr(&actual_out, lz_value_kind_name(value));
+        if (lz_value_is_instance(value) && (type->kinds & LZ_KIND_INSTANCE) != 0 && type->class_id != 0 &&
+            type->class_name == lz_value_as_instance(value)->cls->name) {
+            /* Same name, different class: it was defined again, and this object is from before. */
+            (void)lz_writer_write_cstr(&actual_out, " (made by an earlier definition of that class)");
+        }
     }
 
     char what[160];
@@ -105,8 +110,9 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
         if (frame->closure != NULL && frame->closure->function->owner == type->class_name &&
             frame->closure->function->param_count > 0 &&
             strcmp(frame->closure->function->param_names[0]->data, "self") == 0) {
-            LzStatus own = lz_vm_set_error(vm, LZ_ERR_TYPE, "%s() needs a %s as its first argument, got %s",
+            LzStatus own = lz_vm_set_error(vm, LZ_ERR_TYPE, "%s() needs %s %s as its first argument, got %s",
                                            lz_function_display_name(frame->closure->function),
+                                           strchr("AEIOUaeiou", type->class_name->data[0]) != NULL ? "an" : "a",
                                            type->class_name->data, actual.data != NULL ? actual.data : "?");
             lz_buffer_free(&expected);
             lz_buffer_free(&actual);
@@ -729,9 +735,9 @@ static LzStatus error_is_op(LzVM *vm, uint8_t kind) {
     return push(vm, lz_value_bool(is));
 }
 
-static const LzString *current_owner(const LzVM *vm) {
+static uint64_t current_owner(const LzVM *vm) {
     const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
-    return frame->closure != NULL ? frame->closure->function->owner : NULL;
+    return frame->closure != NULL ? frame->closure->function->owner_id : 0;
 }
 
 /* GET_FIELD_KEEP and the object case of GET_FIELD. */
@@ -809,7 +815,76 @@ static LzStatus class_init_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     if (!lz_value_is_class(constant)) {
         return malformed(vm, "class expected");
     }
-    return lz_class_run_consts(vm, lz_value_as_class(constant));
+    LzClass *cls = lz_value_as_class(constant);
+    status = lz_class_finish(vm, cls);
+    if (status != LZ_OK) {
+        return status;
+    }
+    return lz_class_run_consts(vm, cls);
+}
+
+static LzStatus super_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
+    LzString *name = NULL;
+    LzStatus status = read_name(vm, chunk, ip, &name);
+    if (status != LZ_OK) {
+        return status;
+    }
+    if (*ip >= chunk->count) {
+        return malformed(vm, "truncated operand");
+    }
+    int mode = chunk->code[(*ip)++];
+    size_t need = mode == 0 ? 2 : 1;
+    if (vm->stack_count < need) {
+        return malformed(vm, "stack underflow");
+    }
+    return lz_vm_super_lookup(vm, current_owner(vm), name, mode, vm->stack_count - need);
+}
+
+/* The head `class A : B, C` after the name is bound: `B` is on the stack. */
+static LzStatus class_link_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
+    const LzValue *constant = NULL;
+    LzStatus status = read_constant(vm, chunk, ip, &constant);
+    if (status != LZ_OK) {
+        return status;
+    }
+    if (!lz_value_is_class(constant)) {
+        return malformed(vm, "class expected");
+    }
+    LzString *parent_name = NULL;
+    status = read_name(vm, chunk, ip, &parent_name);
+    if (status != LZ_OK) {
+        return status;
+    }
+    if (*ip >= chunk->count) {
+        return malformed(vm, "truncated operand");
+    }
+    uint8_t role = chunk->code[(*ip)++];
+    if (vm->stack_count == 0) {
+        return malformed(vm, "stack underflow");
+    }
+    LzClass *cls = lz_value_as_class(constant);
+    const LzValue *top = &vm->stack[vm->stack_count - 1];
+    if (lz_value_is_class(top)) {
+        LzClass *other = lz_value_as_class(top);
+        if (cls->is_trait) {
+            status = other->is_trait ? lz_class_add_trait(vm, cls, other)
+                                     : lz_vm_set_error(vm, LZ_ERR_RUNTIME, "a trait can only extend other traits");
+        } else if (other->is_trait) {
+            status = lz_class_add_trait(vm, cls, other);
+        } else if (role != 0) {
+            status = lz_vm_set_error(vm, LZ_ERR_RUNTIME,
+                                     "a class can have only one parent class, and it must come first");
+        } else {
+            status = lz_class_link(vm, cls, other);
+        }
+    } else if (top->type == LZ_VAL_OBJECT && top->as.object->type == LZ_OBJ_NATIVE &&
+               lz_native_error_kind((const LzNative *)top->as.object, NULL)) {
+        status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "inheriting from an error kind is not supported yet");
+    } else {
+        status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "'%s' is not a class or a trait", parent_name->data);
+    }
+    pop(vm);
+    return status;
 }
 
 /* `e.message`, `e.kind`, `e.trace`, `e.cause`, `e.data`: the fields of an error, read only. */
@@ -1354,6 +1429,22 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         }
         break;
     }
+    case LZ_OP_IS: {
+        uint16_t index;
+        if (!read_u16(chunk, &ip, &index)) {
+            status = malformed(vm, "truncated operand");
+        } else if (index >= chunk->type_count) {
+            status = malformed(vm, "type index out of range");
+        } else if (vm->stack_count == 0) {
+            status = malformed(vm, "stack underflow");
+        } else {
+            LzValue *top = &vm->stack[vm->stack_count - 1];
+            bool matches = lz_type_matches(&chunk->types[index], top);
+            lz_value_release(&vm->heap, top);
+            *top = lz_value_bool(matches);
+        }
+        break;
+    }
     case LZ_OP_CHECK_PARAM: {
         uint16_t slot;
         uint16_t index;
@@ -1574,6 +1665,12 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         break;
     case LZ_OP_CLASS_INIT:
         status = class_init_op(vm, chunk, &ip);
+        break;
+    case LZ_OP_CLASS_LINK:
+        status = class_link_op(vm, chunk, &ip);
+        break;
+    case LZ_OP_SUPER:
+        status = super_op(vm, chunk, &ip);
         break;
     case LZ_OP_DUP:
         if (vm->stack_count == 0) {

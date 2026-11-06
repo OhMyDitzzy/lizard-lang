@@ -104,6 +104,7 @@ typedef struct FuncState {
     size_t saved_local_count;
     bool saved_terminated;
     bool static_member;   /* a function without `self` in a class body: `self` is not available */
+    bool method_member;   /* a method or property of a class (it has `self`): `super` is available */
 } FuncState;
 
 typedef struct LoopFrame LoopFrame;
@@ -200,7 +201,13 @@ typedef struct Parser {
     bool member_pending;      /* the next compile_function is a member of that class */
     bool member_static;       /* ...and it has no `self` */
     bool in_default;          /* compiling a field default or a constant initialiser */
+    size_t class_parent_count; /* parents named in the head of the class being compiled */
+    bool is_rhs;              /* parsing the type after `is`: an unknown name is "not a type" */
+    bool in_trait;            /* the body being compiled is a trait's */
+    bool last_bodiless;       /* the member function just compiled had no body (a trait's requirement) */
     LzString *classes[64];    /* the classes declared so far: valid names in a type */
+    uint64_t class_ids[64];   /* their identities (LzClass.id), parallel to classes */
+    uint64_t current_class_id; /* identity of the class whose body is being compiled, or 0 */
     size_t class_count;
 } Parser;
 
@@ -261,6 +268,7 @@ typedef struct Expr {
     bool base_member; /* ...an index whose container came from a member: base_pos is that GET_FIELD */
     size_t base_pos;
     bool is_member; /* the expression is `a.name`: its last instruction is a GET_FIELD at op_pos */
+    bool from_equality; /* the result of `==` or `!=` (`is` does not chain with them) */
     LzToken start;  /* the first token of the expression, for an error about the whole of it */
 } Expr;
 
@@ -837,6 +845,7 @@ static Expr expr_of(LzType type) {
     expr.array_value = false;
     expr.is_call = false;
     expr.is_member = false;
+    expr.from_equality = false;
     expr.base_member = false;
     expr.base_pos = 0;
     memset(&expr.start, 0, sizeof expr.start);
@@ -1195,9 +1204,26 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
             for (size_t i = 0; i < parser->class_count; i++) {
                 if (parser->classes[i] == id) {
                     *out = lz_type_of_kinds(LZ_KIND_INSTANCE);
-                    out->class_name = id; /* stage 2: a subclass will match too */
+                    out->class_name = id; /* a subclass will match too (stage 2) */
+                    out->class_id = parser->class_ids[i];
                     return true;
                 }
+            }
+            /* A class made by an earlier source in this VM: the binding of the name right now. */
+            const LzValue *bound = lz_table_get(&parser->vm->globals, id);
+            if (bound != NULL && lz_value_is_class(bound)) {
+                *out = lz_type_of_kinds(LZ_KIND_INSTANCE);
+                out->class_name = id;
+                out->class_id = lz_value_as_class(bound)->id;
+                return true;
+            }
+            if (bound != NULL) {
+                error_with_name(parser, &token, "'", "' is not a type");
+                return false;
+            }
+            if (parser->is_rhs) {
+                error_with_name(parser, &token, "'", "' is not a type");
+                return false;
             }
             LzSuggestions close = suggest_types(parser, &token);
             error_with_name_suggest(parser, &token, "unknown type '", "'", "not a known type",
@@ -1675,6 +1701,100 @@ static int resolve_upvalue(Parser *parser, FuncState *fs, Symbol *symbol) {
 }
 
 /* The expression that reads the variable named by `token`. */
+static Expr call_args(Parser *parser, Expr callee, bool receiver);
+
+/*
+ * `super.name(args)` and `super.name`: the parent's method or property, with `self` as the
+ * receiver. `super` stands for the parent of the class the code is written in, found when it runs.
+ */
+static Expr super_expr(Parser *parser, const LzToken *token) {
+    if (parser->in_trait) {
+        error_at(parser, token, "'super' cannot be used in a trait");
+        return any_expr();
+    }
+    bool method = false;
+    bool static_function = false;
+    for (const FuncState *f = parser->fs; f != NULL && !method; f = f->enclosing) {
+        if (f->method_member) {
+            method = true;
+        } else if (f->static_member) {
+            static_function = true;
+            break;
+        }
+    }
+    if (parser->class_name == NULL || parser->in_default || (!method && !static_function)) {
+        error_at(parser, token, "'super' can only be used inside a method");
+        return any_expr();
+    }
+    if (static_function) {
+        error_at(parser, token, "'super' cannot be used in a static function");
+        return any_expr();
+    }
+    if (parser->class_parent_count == 0) {
+        char message[160];
+        (void)snprintf(message, sizeof message, "%s has no parent class, so 'super' has nothing to refer to",
+                       parser->class_name->data);
+        error_at(parser, token, message);
+        return any_expr();
+    }
+    if (!check(parser, LZ_TOKEN_DOT)) {
+        error_at(parser, token, "'super' must be followed by .name");
+        return any_expr();
+    }
+    advance(parser);
+    if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+        error_at_current(parser, "expected a method or property name after 'super.'");
+        return any_expr();
+    }
+    advance(parser);
+    LzToken member = parser->previous;
+    LzString *member_name = intern_token(parser, &member);
+    if (member_name == NULL) {
+        return any_expr();
+    }
+    bool calls = check(parser, LZ_TOKEN_LEFT_PAREN);
+    if (member_name->length == 4 && memcmp(member_name->data, "init", 4) == 0) {
+        error_at(parser, &member, "init() runs automatically; super.init() is not needed");
+        return any_expr();
+    }
+    if (!calls && (check(parser, LZ_TOKEN_EQUAL) || is_compound(parser->current.type))) {
+        error_at_current(parser, "cannot assign through 'super'");
+        return any_expr();
+    }
+    /* `self`: a parameter of the method, or captured by a lambda inside it. */
+    LzString *self_name = lz_vm_intern(parser->vm, "self", 4);
+    Symbol *self_symbol = self_name != NULL ? find_symbol(parser, self_name) : NULL;
+    if (self_symbol == NULL || self_symbol->kind != SYMBOL_LOCAL) {
+        error_at(parser, token, "'super' can only be used inside a method");
+        return any_expr();
+    }
+    if (self_symbol->owner == parser->fs) {
+        emit_op_at(parser, LZ_OP_GET_LOCAL, token->offset);
+        emit_u16_at(parser, self_symbol->slot, token->offset);
+    } else {
+        int index = resolve_upvalue(parser, parser->fs, self_symbol);
+        emit_op_at(parser, LZ_OP_GET_UPVALUE, token->offset);
+        emit_u16_at(parser, (uint16_t)(index < 0 ? 0 : index), token->offset);
+    }
+    uint16_t name_index = make_constant(parser, lz_value_object(&member_name->base));
+    if (!calls) {
+        emit_op_at(parser, LZ_OP_SUPER, member.offset);
+        emit_u16_at(parser, name_index, member.offset);
+        emit_byte_at(parser, 1, member.offset);
+        return any_expr();
+    }
+    emit_op_at(parser, LZ_OP_NIL, member.offset);
+    emit_op_at(parser, LZ_OP_SUPER, member.offset);
+    emit_u16_at(parser, name_index, member.offset);
+    emit_byte_at(parser, 0, member.offset);
+    emit_op_at(parser, LZ_OP_SWAP, member.offset);
+    advance(parser); /* the '(' */
+    Expr result = call_args(parser, any_expr(), true);
+    Expr any = any_expr();
+    any.is_call = result.is_call;
+    return any;
+}
+
 static Expr variable_at(Parser *parser, const LzToken *token) {
     LzString *name = intern_token(parser, token);
     if (name == NULL) {
@@ -1682,6 +1802,9 @@ static Expr variable_at(Parser *parser, const LzToken *token) {
     }
 
     Symbol *symbol = find_symbol(parser, name);
+    if (symbol == NULL && name->length == 5 && memcmp(name->data, "super", 5) == 0) {
+        return super_expr(parser, token);
+    }
     if (symbol != NULL) {
         switch (symbol->kind) {
         case SYMBOL_LOCAL:
@@ -1814,7 +1937,10 @@ static Expr unary(Parser *parser) {
 
     uint16_t numbers = (uint16_t)(lz_type_possible_kinds(&operand.type) & LZ_KINDS_NUMBER);
     if (numbers == 0) {
-        error_operator(parser, &op, &operand.type, NULL);
+        /* an object: its class may define the operator, which is looked for when this runs */
+        if ((lz_type_possible_kinds(&operand.type) & LZ_KIND_INSTANCE) == 0) {
+            error_operator(parser, &op, &operand.type, NULL);
+        }
         return any_expr();
     }
     return expr_of(lz_type_of_kinds(numbers));
@@ -2394,6 +2520,50 @@ static ParseRule rule_for(LzTokenType type) {
     }
 }
 
+static bool word_is(const Parser *parser, const LzToken *token, const char *word);
+
+/*
+ * `value is T` / `value is not T`. The right side is a type, read by the parser of annotations, and
+ * the test is the one an annotation makes, so `x is T` holds exactly when `: T` would accept x.
+ * Like `==`, it does not chain: `a is B == c` needs parentheses.
+ */
+static Expr is_(Parser *parser, Expr left, const LzToken *is_token) {
+    Expr result = expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
+    if (left.from_equality) {
+        error_at(parser, is_token, "'is' cannot follow '==' or '!='; add parentheses");
+        return result;
+    }
+    bool negate = match(parser, LZ_TOKEN_BANG);
+    skip_newlines(parser);
+    LzType type;
+    bool saved = parser->is_rhs;
+    parser->is_rhs = true;
+    bool ok = parse_type_union(parser, &type);
+    parser->is_rhs = saved;
+    if (!ok) {
+        return result;
+    }
+    uint16_t index = 0;
+    if (!lz_chunk_add_type(parser->chunk, &type, &index)) {
+        if (parser->chunk->type_count >= LZ_TYPES_MAX) {
+            error_at_previous(parser, "too many types in one chunk");
+        } else {
+            fail(parser, LZ_ERR_MEMORY);
+        }
+        return result;
+    }
+    emit_op_at(parser, LZ_OP_IS, is_token->offset);
+    emit_u16_at(parser, index, is_token->offset);
+    if (negate) {
+        emit_op_at(parser, LZ_OP_NOT, is_token->offset);
+    }
+    if (check(parser, LZ_TOKEN_EQUAL_EQUAL) || check(parser, LZ_TOKEN_BANG_EQUAL) ||
+        (check(parser, LZ_TOKEN_IDENTIFIER) && word_is(parser, &parser->current, "is"))) {
+        error_at_current(parser, "'is' cannot be chained with '==', '!=' or another 'is'; add parentheses");
+    }
+    return result;
+}
+
 static Expr parse_precedence(Parser *parser, Precedence precedence) {
     if (parser->fatal != LZ_OK) {
         return any_expr();
@@ -2418,6 +2588,14 @@ static Expr parse_precedence(Parser *parser, Precedence precedence) {
         /* A chain may continue on the next line:  xs\n  .filter(...)\n  .map(...) */
         if (check(parser, LZ_TOKEN_NEWLINE) && next_token_type(parser) == LZ_TOKEN_DOT) {
             advance(parser);
+        }
+        /* `x is T` and `x is not T`: `is` is a word only here, after an expression on its line. */
+        if (parser->fatal == LZ_OK && precedence <= PREC_EQUALITY && check(parser, LZ_TOKEN_IDENTIFIER) &&
+            word_is(parser, &parser->current, "is")) {
+            LzToken is_token = parser->current;
+            advance(parser);
+            left = is_(parser, left, &is_token);
+            continue;
         }
         if (parser->fatal != LZ_OK || precedence > rule_for(parser->current.type).precedence) {
             break;
@@ -2450,7 +2628,10 @@ static Expr arithmetic_result(Parser *parser, const LzToken *op, const Expr *lef
     bool arrays = op->type == LZ_TOKEN_PLUS && (a & LZ_KIND_ARRAY) != 0 &&
                   (b & LZ_KIND_ARRAY) != 0;
     if (!numbers && !strings && !arrays) {
-        error_operator(parser, op, &left->type, &right->type);
+        /* an object: its class may define the operator, which is looked for when this runs */
+        if (((a | b) & LZ_KIND_INSTANCE) == 0) {
+            error_operator(parser, op, &left->type, &right->type);
+        }
         return any_expr();
     }
 
@@ -2531,13 +2712,19 @@ static Expr binary(Parser *parser, Expr left) {
         }
         return expr_of(lz_type_of_kinds(LZ_KIND_INT));
     }
-    case LZ_TOKEN_EQUAL_EQUAL:
+    case LZ_TOKEN_EQUAL_EQUAL: {
         emit_op_at(parser, LZ_OP_EQUAL, op.offset);
-        return expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
-    case LZ_TOKEN_BANG_EQUAL:
+        Expr equal = expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
+        equal.from_equality = true;
+        return equal;
+    }
+    case LZ_TOKEN_BANG_EQUAL: {
         emit_op_at(parser, LZ_OP_EQUAL, op.offset);
         emit_op_at(parser, LZ_OP_NOT, op.offset);
-        return expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
+        Expr unequal = expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
+        unequal.from_equality = true;
+        return unequal;
+    }
     default:
         break;
     }
@@ -2559,7 +2746,7 @@ static Expr binary(Parser *parser, Expr left) {
 
     uint16_t a = lz_type_possible_kinds(&left.type);
     uint16_t b = lz_type_possible_kinds(&right.type);
-    if ((a & LZ_KINDS_NUMBER) == 0 || (b & LZ_KINDS_NUMBER) == 0) {
+    if (((a & LZ_KINDS_NUMBER) == 0 || (b & LZ_KINDS_NUMBER) == 0) && ((a | b) & LZ_KIND_INSTANCE) == 0) {
         error_operator(parser, &op, &left.type, &right.type);
     }
     return expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
@@ -2710,8 +2897,7 @@ static Expr call_special(Parser *parser, Expr callee, const LzToken *paren, bool
                 emit_op_at(parser, LZ_OP_ARRAY_EXTEND, offset);
                 spread = true;
             } else if (check(parser, LZ_TOKEN_IDENTIFIER) &&
-                       (next_token_type(parser) == LZ_TOKEN_EQUAL ||
-                        ((makes_error || parser->vm->has_classes) && next_token_type(parser) == LZ_TOKEN_COLON))) {
+                       (next_token_type(parser) == LZ_TOKEN_EQUAL || next_token_type(parser) == LZ_TOKEN_COLON)) {
                 advance(parser);
                 LzToken name_token = parser->previous;
                 LzString *name = intern_token(parser, &name_token);
@@ -2837,9 +3023,7 @@ static Expr call_args(Parser *parser, Expr callee, bool receiver) {
             error_types(parser, &paren, "cannot call a value of type ", &callee.type, "", NULL);
         }
     }
-    /* The function that makes errors also takes `cause: e` and `data: d`. */
-    bool makes_error = callee.native != NULL && !receiver && lz_native_error_kind(callee.native, NULL);
-    if (call_has_special_args(parser, makes_error || parser->vm->has_classes)) {
+    if (call_has_special_args(parser, true)) {
         return call_special(parser, callee, &paren, receiver);
     }
 
@@ -2872,6 +3056,17 @@ static Expr call(Parser *parser, Expr callee) {
 }
 
 /*
+ * Whether `receiver.name` may be a member of an object (or a class). A receiver whose type
+ * is known and cannot be an object keeps the older error/builtin handling; anything else,
+ * including every value of unknown type (a parameter, a result from another file), takes the
+ * conservative path and is typed `any`. A VM that has seen a class keeps that path for all
+ * receivers, as before.
+ */
+static bool receiver_may_be_object(const Parser *parser, const Expr *receiver) {
+    return parser->vm->has_classes || (lz_type_possible_kinds(&receiver->type) & LZ_KIND_INSTANCE) != 0;
+}
+
+/*
  * receiver.name(args) is name(receiver, args): the callee is looked up like any other
  * name (locals, functions of the script, builtins), pushed above the receiver, and the
  * two are swapped so the call finds [callee][receiver][args...].
@@ -2885,7 +3080,7 @@ static Expr dot_call(Parser *parser, Expr receiver) {
     LzToken name = parser->previous;
     if (!check(parser, LZ_TOKEN_LEFT_PAREN)) {
         /* `value.name` with no parentheses is a field of an error, or of an object. */
-        bool classes = parser->vm->has_classes;
+        bool classes = receiver_may_be_object(parser, &receiver);
         if (!classes && (check(parser, LZ_TOKEN_EQUAL) || is_compound(parser->current.type))) {
             error_at_current(parser, "cannot assign to a field of an error");
             return any_expr();
@@ -2933,7 +3128,7 @@ static Expr dot_call(Parser *parser, Expr receiver) {
         method = lz_table_get(&parser->vm->methods, interned);
     }
     Expr callee;
-    bool classes = parser->vm->has_classes;
+    bool classes = receiver_may_be_object(parser, &receiver);
     int lookup_mode = 0;
     if (method != NULL) {
         (void)emit_constant(parser, *method);
@@ -5321,11 +5516,13 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
     parser->member_pending = false;
     if (parser->class_name != NULL) {
         function->owner = parser->class_name; /* closures inside inherit it: "inside the class" is lexical */
+        function->owner_id = parser->current_class_id;
         lz_object_retain(&function->owner->base);
     }
 
     FuncState fs;
     fs.static_member = is_static_member;
+    fs.method_member = is_member && !is_static_member;
     fs.enclosing = parser->fs;
     fs.function = function;
     fs.first_symbol = parser->symbol_count;
@@ -5380,6 +5577,7 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
             } else if (is_self && !rest) {
                 declared = lz_type_of_kinds(LZ_KIND_INSTANCE); /* Point.sum(x) checks x is a Point */
                 declared.class_name = parser->class_name;
+                declared.class_id = parser->current_class_id;
             }
             if (match(parser, LZ_TOKEN_COLON)) {
                 (void)parse_type_union(parser, &declared);
@@ -5492,6 +5690,14 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
             returns = returns || parser->terminated;
         }
         consume(parser, LZ_TOKEN_RIGHT_BRACE, "expected '}' after function body");
+    } else if (!returns && is_member &&
+               (check(parser, LZ_TOKEN_NEWLINE) || check(parser, LZ_TOKEN_RIGHT_BRACE) ||
+                check(parser, LZ_TOKEN_SEMICOLON) || check(parser, LZ_TOKEN_EOF))) {
+        if (parser->in_trait) {
+            parser->last_bodiless = true; /* a requirement: the trait says what a class must provide */
+        } else {
+            error_at_current(parser, "this function needs a body (only a trait can leave it out)");
+        }
     } else if (!returns) {
         error_at_current(parser, "expected '{' or '=>' before function body");
     }
@@ -5584,6 +5790,7 @@ static bool compile_thunk(Parser *parser, LzString *name, uint32_t offset, LzVal
     }
     function->offset = offset;
     function->owner = parser->class_name;
+    function->owner_id = parser->current_class_id;
     lz_object_retain(&function->owner->base);
 
     FuncState fs;
@@ -5642,7 +5849,7 @@ static bool compile_thunk(Parser *parser, LzString *name, uint32_t offset, LzVal
     return ok;
 }
 
-static const char *const unsupported_member_words[] = {"override", "operator", "trait", "extend", "super"};
+static const char *const unsupported_member_words[] = {"trait", "extend", "super"};
 
 static bool is_unsupported_word(const Parser *parser, const LzToken *token) {
     for (size_t i = 0; i < sizeof unsupported_member_words / sizeof *unsupported_member_words; i++) {
@@ -5681,6 +5888,109 @@ static LzString *qualified_name(Parser *parser, const LzString *cls, const LzStr
     return lz_vm_intern(parser->vm, text, (size_t)n < sizeof text ? (size_t)n : sizeof text - 1);
 }
 
+/*
+ * `[pub] [override] operator + (self, other) ...`. The member is a method named by the symbol
+ * ("+", "-", "*", "/", "%", "==", "<"; "-@" for the unary minus), which no identifier can clash with.
+ */
+static void operator_member(Parser *parser, LzClass *cls, LzVisibility vis, bool is_override) {
+    advance(parser); /* operator */
+    if (parser->in_trait) {
+        error_at(parser, &parser->previous, "operators in traits are not supported yet");
+        return;
+    }
+    LzToken op = parser->current;
+    const char *symbol = NULL;
+    char text[48];
+    token_text(parser, &op, text, sizeof text);
+    char message[160];
+    switch (op.type) {
+    case LZ_TOKEN_PLUS:
+        symbol = "+";
+        break;
+    case LZ_TOKEN_MINUS:
+        symbol = "-";
+        break;
+    case LZ_TOKEN_STAR:
+        symbol = "*";
+        break;
+    case LZ_TOKEN_SLASH:
+        symbol = "/";
+        break;
+    case LZ_TOKEN_PERCENT:
+        symbol = "%";
+        break;
+    case LZ_TOKEN_EQUAL_EQUAL:
+        symbol = "==";
+        break;
+    case LZ_TOKEN_LESS:
+        symbol = "<";
+        break;
+    case LZ_TOKEN_GREATER:
+    case LZ_TOKEN_LESS_EQUAL:
+    case LZ_TOKEN_GREATER_EQUAL:
+        (void)snprintf(message, sizeof message,
+                       "operator '%s' cannot be defined; define '<' and '>', '<=' and '>=' follow from it", text);
+        error_at(parser, &op, message);
+        return;
+    case LZ_TOKEN_BANG_EQUAL:
+        error_at(parser, &op, "'!=' follows from '=='");
+        return;
+    case LZ_TOKEN_BANG:
+        if (next_token_type(parser) == LZ_TOKEN_EQUAL_EQUAL) {
+            error_at(parser, &op, "'!=' follows from '=='");
+            return;
+        }
+        /* fall through */
+    default:
+        (void)snprintf(message, sizeof message, "operator '%s' cannot be defined", text);
+        error_at(parser, &op, message);
+        return;
+    }
+    advance(parser); /* the operator */
+    if (!check(parser, LZ_TOKEN_LEFT_PAREN)) {
+        error_at_current(parser, "expected '(' after the operator");
+        return;
+    }
+    LzToken first_param = peek_token(parser, 1);
+    if (!word_is(parser, &first_param, "self")) {
+        error_at(parser, &op, "an operator takes 'self' first");
+        return;
+    }
+    bool unary = op.type == LZ_TOKEN_MINUS && peek_token(parser, 2).type == LZ_TOKEN_RIGHT_PAREN;
+    LzString *name = lz_vm_intern(parser->vm, unary ? "-@" : symbol, unary ? 2 : strlen(symbol));
+    if (name == NULL) {
+        fail(parser, lz_vm_out_of_memory(parser->vm));
+        return;
+    }
+    if (lz_class_find(cls, name) != NULL) {
+        (void)snprintf(message, sizeof message, "operator %s is defined twice in %s", text, cls->name->data);
+        error_at(parser, &op, message);
+        return;
+    }
+    LzMember *member = NULL;
+    if (!lz_class_add_member(cls, name, LZ_MEMBER_METHOD, vis, op.offset, &member)) {
+        fail(parser, lz_vm_out_of_memory(parser->vm));
+        return;
+    }
+    member->is_override = is_override ? 1 : 0;
+    size_t index = cls->member_count - 1;
+    LzString *full = qualified_name(parser, cls->name, name);
+    parser->member_pending = true;
+    parser->member_static = false;
+    (void)compile_function(parser, full, SIZE_MAX, op.offset);
+    parser->member_pending = false;
+    LzValue closure = lz_value_nil();
+    if (take_member_closure(parser, &closure)) {
+        cls->members[index].value = closure;
+        const LzFunction *function = lz_value_as_closure(&closure)->function;
+        if (!unary && function->param_count != 2) {
+            (void)snprintf(message, sizeof message, "operator %s takes 'self' and one other value", text);
+            error_at(parser, &op, message);
+        }
+    }
+    end_statement(parser);
+}
+
 static void class_member(Parser *parser, LzClass *cls) {
     LzToken first = parser->current;
     LzVisibility vis = LZ_VIS_PRIVATE;
@@ -5717,6 +6027,23 @@ static void class_member(Parser *parser, LzClass *cls) {
         }
     }
 
+    bool is_override = false;
+    LzToken override_token = parser->current;
+    if (word_is(parser, &override_token, "override")) {
+        LzTokenType after = next_token_type(parser);
+        if (after == LZ_TOKEN_FN || after == LZ_TOKEN_IDENTIFIER || after == LZ_TOKEN_CONST) {
+            advance(parser);
+            is_override = true;
+        }
+    }
+    if (word_is(parser, &parser->current, "operator")) {
+        LzTokenType after = next_token_type(parser);
+        if (after != LZ_TOKEN_COLON && after != LZ_TOKEN_EQUAL && after != LZ_TOKEN_NEWLINE &&
+            after != LZ_TOKEN_RIGHT_BRACE && after != LZ_TOKEN_SEMICOLON) {
+            operator_member(parser, cls, vis, is_override);
+            return;
+        }
+    }
     LzToken head = parser->current;
     LzMemberKind kind = LZ_MEMBER_FIELD;
     if (head.type == LZ_TOKEN_FN && next_token_type(parser) == LZ_TOKEN_IDENTIFIER) {
@@ -5742,7 +6069,22 @@ static void class_member(Parser *parser, LzClass *cls) {
         error_at(parser, &first, "'read' only applies to fields");
         return;
     }
+    if (is_override && (kind == LZ_MEMBER_FIELD || kind == LZ_MEMBER_CONST)) {
+        error_at(parser, &override_token, "'override' only applies to functions and properties");
+        return;
+    }
     (void)has_pub;
+    if (parser->in_trait) {
+        vis = LZ_VIS_PUB; /* what a trait offers is public, written `pub` or not */
+        if (kind == LZ_MEMBER_FIELD) {
+            error_at(parser, &head, "a trait cannot have fields");
+            return;
+        }
+        if (kind == LZ_MEMBER_CONST) {
+            error_at(parser, &head, "a trait cannot have constants yet");
+            return;
+        }
+    }
 
     if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
         error_at_current(parser, kind == LZ_MEMBER_FIELD ? "expected a field name" : "expected a name");
@@ -5825,16 +6167,35 @@ static void class_member(Parser *parser, LzClass *cls) {
     } else if (!has_self) {
         kind = LZ_MEMBER_STATIC;
     }
+    if (parser->in_trait) {
+        if (kind == LZ_MEMBER_STATIC) {
+            error_at(parser, &name_token, "a trait cannot have static functions");
+            return;
+        }
+        if (kind == LZ_MEMBER_METHOD && strcmp(name->data, "init") == 0) {
+            error_at(parser, &name_token, "a trait cannot have init()");
+            return;
+        }
+    }
     if (!lz_class_add_member(cls, name, kind, vis, name_token.offset, &member)) {
         fail(parser, lz_vm_out_of_memory(parser->vm));
         return;
+    }
+    member->is_override = is_override ? 1 : 0;
+    if (is_override && kind == LZ_MEMBER_METHOD && strcmp(name->data, "init") == 0) {
+        error_at(parser, &override_token, "init() runs automatically for every class; it cannot be 'override'");
     }
     size_t index = cls->member_count - 1;
     LzString *full = qualified_name(parser, cls->name, name);
     parser->member_pending = true;
     parser->member_static = !has_self;
+    parser->last_bodiless = false;
     (void)compile_function(parser, full, SIZE_MAX, name_token.offset);
     parser->member_pending = false;
+    if (parser->last_bodiless) {
+        cls->members[index].is_required = 1;
+        parser->last_bodiless = false;
+    }
     LzValue closure = lz_value_nil();
     if (take_member_closure(parser, &closure)) {
         cls->members[index].value = closure;
@@ -5865,7 +6226,8 @@ static void skip_class_body(Parser *parser) {
 
 static void class_declaration(Parser *parser) {
     LzToken class_token = parser->current;
-    advance(parser); /* class */
+    bool is_trait = word_is(parser, &class_token, "trait");
+    advance(parser); /* class or trait */
     if (parser->fs->function != NULL || parser->scope_depth != 0) {
         error_at(parser, &class_token, "classes can only be declared at the top level");
         skip_class_body(parser);
@@ -5884,10 +6246,33 @@ static void class_declaration(Parser *parser) {
         error_with_name(parser, &name_token, "cannot redefine builtin type '", "'");
         return;
     }
-    if (check(parser, LZ_TOKEN_COLON)) {
-        error_at_current(parser, "inheritance is not supported yet");
-        skip_class_body(parser);
-        return;
+    /* `class Dog : Animal, Named`: the names are looked up when the statement runs. */
+    LzToken parents[8];
+    size_t parent_count = 0;
+    if (match(parser, LZ_TOKEN_COLON)) {
+        do {
+            skip_newlines(parser);
+            if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+                error_at_current(parser, "expected the name of a parent class or trait");
+                skip_class_body(parser);
+                return;
+            }
+            advance(parser);
+            LzToken parent = parser->previous;
+            char parent_text[48];
+            token_text(parser, &parent, parent_text, sizeof parent_text);
+            if (builtin_type(parent_text, &ignored)) {
+                error_at(parser, &parent, "cannot inherit from a builtin type");
+                skip_class_body(parser);
+                return;
+            }
+            if (parent_count == 8) {
+                error_at(parser, &parent, "too many parents");
+                skip_class_body(parser);
+                return;
+            }
+            parents[parent_count++] = parent;
+        } while (match(parser, LZ_TOKEN_COMMA));
     }
     if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
         error_at_current(parser, "expected '{' before the class body");
@@ -5902,7 +6287,6 @@ static void class_declaration(Parser *parser) {
         error_at(parser, &name_token, "too many classes in one file");
         return;
     }
-    parser->classes[parser->class_count++] = name;
     parser->vm->has_classes = true;
 
     LzClass *cls = lz_class_new(parser->vm, name, name_token.offset);
@@ -5910,8 +6294,17 @@ static void class_declaration(Parser *parser) {
         fail(parser, lz_vm_out_of_memory(parser->vm));
         return;
     }
+    cls->is_trait = is_trait;
+    parser->class_ids[parser->class_count] = cls->id;
+    parser->classes[parser->class_count++] = name;
     LzString *saved_class = parser->class_name;
+    uint64_t saved_class_id = parser->current_class_id;
     parser->class_name = name;
+    parser->current_class_id = cls->id;
+    size_t saved_parent_count = parser->class_parent_count;
+    parser->class_parent_count = parent_count;
+    bool saved_in_trait = parser->in_trait;
+    parser->in_trait = is_trait;
 
     advance(parser); /* { */
     int body_depth = parser->bracket_depth - 1; /* the depth once the closing brace is read */
@@ -5923,6 +6316,9 @@ static void class_declaration(Parser *parser) {
         }
     }
     parser->class_name = saved_class;
+    parser->current_class_id = saved_class_id;
+    parser->class_parent_count = saved_parent_count;
+    parser->in_trait = saved_in_trait;
     if (!parser->panic) {
         consume(parser, LZ_TOKEN_RIGHT_BRACE, "expected '}' after the class body");
     }
@@ -5940,6 +6336,19 @@ static void class_declaration(Parser *parser) {
     emit_op_at(parser, LZ_OP_CONSTANT, name_token.offset);
     emit_u16_at(parser, index, name_token.offset);
     emit_named(parser, LZ_OP_DEFINE_GLOBAL, name, name_token.offset);
+    for (size_t i = 0; i < parent_count && parser->fatal == LZ_OK; i++) {
+        LzToken parent = parents[i];
+        (void)variable_at(parser, &parent);
+        LzString *parent_name = intern_token(parser, &parent);
+        if (parent_name == NULL) {
+            return;
+        }
+        uint16_t parent_index = add_constant(parser, lz_value_object(&parent_name->base), true);
+        emit_op_at(parser, LZ_OP_CLASS_LINK, parent.offset);
+        emit_u16_at(parser, index, parent.offset);
+        emit_u16_at(parser, parent_index, parent.offset);
+        emit_byte_at(parser, i == 0 ? 0 : 1, parent.offset);
+    }
     emit_op_at(parser, LZ_OP_CLASS_INIT, name_token.offset);
     emit_u16_at(parser, index, name_token.offset);
     end_statement(parser);
@@ -6479,7 +6888,8 @@ static void declaration(Parser *parser) {
         error_at_current(parser, "unexpected '}'");
         break;
     case LZ_TOKEN_IDENTIFIER:
-        if (word_is(parser, &parser->current, "class") && next_token_type(parser) == LZ_TOKEN_IDENTIFIER) {
+        if ((word_is(parser, &parser->current, "class") || word_is(parser, &parser->current, "trait")) &&
+            next_token_type(parser) == LZ_TOKEN_IDENTIFIER) {
             class_declaration(parser);
         } else if (word_is(parser, &parser->current, "pub") && next_token_type(parser) == LZ_TOKEN_IDENTIFIER &&
                    word_is(parser, &(LzToken){.type = LZ_TOKEN_IDENTIFIER, .offset = peek_token(parser, 1).offset,

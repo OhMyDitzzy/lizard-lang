@@ -1,0 +1,59 @@
+# Inheritance: a class can build on another class.
+#
+# `Dog : Animal` means a Dog is an Animal. It gets the name and the methods of Animal,
+# and can add its own or replace one with `override`.
+
+class Animal {
+    pub name: string
+    pub fn speak(self) => "..."
+    pub fn intro(self) => $"I am {self.name} and I say {self.speak()}"
+}
+
+class Dog : Animal {
+    pub breed: string = "mixed"
+    pub override fn speak(self) => "Woof"
+}
+
+class Puppy : Dog {
+    # super.speak() runs the version of the parent class
+    pub override fn speak(self) => super.speak() + "!"
+}
+
+let rex = Dog("Rex", breed: "Husky")
+println(rex.intro())
+println(rex)
+
+let bit = Puppy("Bit")
+println(bit.intro())
+
+# `is` asks what kind of thing a value is. A Puppy is a Dog and an Animal.
+println(bit is Puppy, bit is Dog, bit is Animal, rex is Puppy)
+println(rex is not Puppy)
+
+# A parameter typed Animal accepts every kind of animal.
+fn greet(a: Animal) {
+    println("Hello,", a.name)
+}
+greet(rex)
+greet(bit)
+
+# A parent class can keep things private; children can use them, outsiders cannot.
+class Account {
+    balance: int = 0
+    pub fn deposit(self, amount: int) { self.balance += amount }
+}
+
+class Savings : Account {
+    pub fn add_interest(self) { self.balance += self.balance // 10 }
+    pub fn show(self) => self.balance
+}
+
+let s = Savings()
+s.deposit(100)
+s.add_interest()
+println(s.show())
+try {
+    println(s.balance)
+} catch e {
+    println(e.message)
+}

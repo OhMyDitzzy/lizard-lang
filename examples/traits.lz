@@ -1,0 +1,69 @@
+# Traits: a promise that a class can do something.
+#
+# A trait lists what a class must provide (a function with no body) and may add
+# ready-made functions that use it. Any class can use traits, whatever its parent.
+
+trait Shape {
+    fn area(self)                    # a class must write this
+    get label(self)                  # ...and this property
+    fn describe(self) => $"{self.label} with area {self.area()}"   # comes for free
+}
+
+class Square : Shape {
+    pub side: int
+    pub fn area(self) => self.side * self.side
+    pub get label(self) => "square"
+}
+
+class Rect : Shape {
+    pub w: int
+    pub h: int
+    pub fn area(self) => self.w * self.h
+    pub get label(self) => "rectangle"
+}
+
+let shapes = [Square(3), Rect(2, 5)]
+for s in shapes {
+    println(s.describe())
+}
+
+# `describe` runs on the real object, so it finds the right `area` for each class.
+
+fn total_area(items: Shape[]) {
+    let total = 0
+    for s in items { total += s.area() }
+    return total
+}
+println(total_area(shapes))
+println(shapes[0] is Shape, 42 is Shape)
+
+# A class may replace a ready-made function, but must say so with `override`.
+class Circle : Shape {
+    pub r: int
+    pub fn area(self) => 3 * self.r * self.r
+    pub get label(self) => "circle"
+    pub override fn describe(self) => $"a round {self.label}, area about {self.area()}"
+}
+println(Circle(2).describe())
+
+# A trait can build on other traits.
+trait Named {
+    fn name(self)
+}
+
+trait Greeter : Named {
+    fn greet(self) => $"Hello, {self.name()}!"
+}
+
+class Person : Greeter {
+    pub first: string
+    pub fn name(self) => self.first
+}
+println(Person("Ada").greet())
+
+# A class that forgets something is refused when it is declared, with a clear message, e.g.:
+#
+#   class Broken : Shape {
+#       pub fn area(self) => 0
+#   }
+#   error: Broken does not implement 'label' required by Shape

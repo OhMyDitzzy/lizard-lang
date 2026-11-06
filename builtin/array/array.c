@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "lizard/array.h"
+#include "lizard/class.h"
 #include "lizard/dict.h"
 
 static const char *kind_of(const LzValue *value) {
@@ -289,6 +290,102 @@ static void merge_sort(LzValue *items, LzValue *tmp, size_t count) {
     }
 }
 
+/* `a < b` for two values, through the `operator <` of the objects. */
+static LzStatus instance_less(LzVM *vm, const LzValue *a, const LzValue *b, bool *answer) {
+    LzValue verdict = lz_value_nil();
+    bool handled = false;
+    LzStatus status = lz_class_order_operator(vm, LZ_OP_LESS, a, b, &verdict, &handled);
+    if (status == LZ_OK) {
+        *answer = verdict.as.boolean;
+    }
+    return status;
+}
+
+static bool all_instances(const LzArray *array) {
+    for (size_t i = 0; i < array->count; i++) {
+        if (!lz_value_is_instance(&array->items[i])) {
+            return false;
+        }
+    }
+    return array->count > 0;
+}
+
+/*
+ * Sorts objects with their class's `operator <`. The work is done on a copy that holds its own
+ * references (the operator is code and may change the array); the array is replaced only when the
+ * whole sort succeeded, so an error leaves it as it was. Stable, like the sort of numbers.
+ */
+static LzStatus sort_instances(LzVM *vm, LzArray *array, LzValue *result) {
+    size_t count = array->count;
+    uint64_t passes = 1;
+    for (size_t width = 1; width < count; width *= 2) {
+        passes++;
+    }
+    LzStatus status = lz_vm_charge_fuel(vm, lz_array_cost(count) * passes);
+    if (status != LZ_OK) {
+        return status;
+    }
+    size_t bytes = count * sizeof(LzValue) * 2;
+    if (!lz_heap_charge(&vm->heap, bytes)) {
+        return lz_vm_out_of_memory(vm);
+    }
+    LzValue *work = malloc(count * sizeof(LzValue) * 2);
+    if (work == NULL) {
+        lz_heap_uncharge(&vm->heap, bytes);
+        return lz_vm_out_of_memory(vm);
+    }
+    LzValue *tmp = work + count;
+    for (size_t i = 0; i < count; i++) {
+        work[i] = array->items[i];
+        lz_value_retain(&work[i]);
+    }
+    for (size_t width = 1; width < count && status == LZ_OK; width *= 2) {
+        for (size_t lo = 0; lo < count && status == LZ_OK; lo += 2 * width) {
+            size_t mid = lo + width < count ? lo + width : count;
+            size_t hi = lo + 2 * width < count ? lo + 2 * width : count;
+            size_t i = lo;
+            size_t j = mid;
+            size_t k = lo;
+            while (i < mid && j < hi && status == LZ_OK) {
+                bool right_first = false;
+                status = instance_less(vm, &work[j], &work[i], &right_first);
+                if (status == LZ_OK) {
+                    tmp[k++] = right_first ? work[j++] : work[i++];
+                }
+            }
+            if (status != LZ_OK) {
+                break;
+            }
+            while (i < mid) {
+                tmp[k++] = work[i++];
+            }
+            while (j < hi) {
+                tmp[k++] = work[j++];
+            }
+        }
+        if (status == LZ_OK) {
+            memcpy(work, tmp, count * sizeof *work);
+        }
+    }
+    if (status == LZ_OK && array->count != count) {
+        status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "sort(): the array changed while it was being sorted");
+    }
+    if (status == LZ_OK) {
+        for (size_t i = 0; i < count; i++) {
+            lz_value_release(&vm->heap, &array->items[i]);
+            array->items[i] = work[i]; /* the reference the copy held moves into the array */
+        }
+        *result = lz_value_nil();
+    } else {
+        for (size_t i = 0; i < count; i++) {
+            lz_value_release(&vm->heap, &work[i]);
+        }
+    }
+    free(work);
+    lz_heap_uncharge(&vm->heap, bytes);
+    return status;
+}
+
 LzStatus lz_builtin_sort(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
     (void)argc;
     LzArray *array = NULL;
@@ -297,6 +394,9 @@ LzStatus lz_builtin_sort(LzVM *vm, int argc, const LzValue *argv, LzValue *resul
         return status;
     }
     size_t count = array->count;
+    if (all_instances(array)) {
+        return sort_instances(vm, array, result);
+    }
     if (count < 2) {
         if (count == 1 && !is_number(&array->items[0]) && !is_string(&array->items[0])) {
             return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "sort(): cannot sort values of type %s",
@@ -479,10 +579,45 @@ LzStatus lz_builtin_sum(LzVM *vm, int argc, const LzValue *argv, LzValue *result
     return LZ_OK;
 }
 
+/* min or max of objects: only their `operator <` is used (a > b is b < a). */
+static LzStatus extreme_instances(LzVM *vm, LzArray *array, bool want_max, LzValue *result) {
+    LzStatus status = lz_vm_charge_fuel(vm, lz_array_cost(array->count));
+    if (status != LZ_OK) {
+        return status;
+    }
+    LzValue best = array->items[0];
+    lz_value_retain(&best);
+    for (size_t i = 1; i < array->count && status == LZ_OK; i++) {
+        LzValue item = array->items[i];
+        lz_value_retain(&item);
+        bool better = false;
+        status = want_max ? instance_less(vm, &best, &item, &better) : instance_less(vm, &item, &best, &better);
+        if (status == LZ_OK && better) {
+            lz_value_release(&vm->heap, &best);
+            best = item;
+        } else {
+            lz_value_release(&vm->heap, &item);
+        }
+    }
+    if (status != LZ_OK) {
+        lz_value_release(&vm->heap, &best);
+        return status;
+    }
+    *result = best; /* the reference taken above goes to the caller */
+    return LZ_OK;
+}
+
 static LzStatus extreme(LzVM *vm, const char *name, const LzValue *argv, LzOrder want,
                         LzValue *result) {
     LzArray *array = NULL;
-    LzStatus status = number_array(vm, name, &argv[0], &array);
+    LzStatus status = want_array(vm, name, &argv[0], &array);
+    if (status == LZ_OK && all_instances(array)) {
+        return extreme_instances(vm, array, want == LZ_ORDER_GREATER, result);
+    }
+    if (status != LZ_OK) {
+        return status;
+    }
+    status = number_array(vm, name, &argv[0], &array);
     if (status != LZ_OK) {
         return status;
     }

@@ -1,6 +1,7 @@
 #include "lizard/arith.h"
 
 #include "lizard/array.h"
+#include "lizard/class.h"
 
 #include <math.h>
 
@@ -290,6 +291,13 @@ LzStatus lz_arith_bit_not(LzVM *vm, const LzValue *operand, LzValue *result) {
 
 LzStatus lz_arith_binary(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right,
                          LzValue *result) {
+    if (lz_value_is_instance(left) || lz_value_is_instance(right)) {
+        bool handled = false;
+        LzStatus status = lz_class_binary_operator(vm, op, left, right, result, &handled);
+        if (handled) {
+            return status;
+        }
+    }
     switch (op) {
     case LZ_OP_BIT_AND:
     case LZ_OP_BIT_OR:
@@ -328,6 +336,13 @@ LzStatus lz_arith_binary(LzVM *vm, LzOpCode op, const LzValue *left, const LzVal
 }
 
 LzStatus lz_arith_negate(LzVM *vm, const LzValue *operand, LzValue *result) {
+    if (lz_value_is_instance(operand)) {
+        bool handled = false;
+        LzStatus status = lz_class_negate_operator(vm, operand, result, &handled);
+        if (handled) {
+            return status;
+        }
+    }
     if (operand->type == LZ_VAL_INT) {
         if (operand->as.integer == INT64_MIN) {
             return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "integer overflow");

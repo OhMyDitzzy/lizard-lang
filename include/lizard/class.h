@@ -46,6 +46,8 @@ typedef struct LzMember {
     LzString *name;   /* interned, retained */
     uint8_t kind;     /* LzMemberKind */
     uint8_t vis;      /* LzVisibility */
+    uint8_t is_override; /* written with `override` */
+    uint8_t is_required; /* in a trait: written without a body, so a class must provide it */
     uint16_t slot;    /* a field: its index in the instance */
     LzValue value;    /* method, static, getter: the closure. const: the value once initialised */
     LzValue thunk;    /* a field default or a const initialiser: a closure taking no argument, or nil */
@@ -53,17 +55,31 @@ typedef struct LzMember {
     uint32_t offset;  /* source offset of the declaration, for diagnostics */
 } LzMember;
 
+struct LzClass;
+/* Where a field of an instance is declared: the class and the member index in that class. */
+typedef struct LzFieldRef {
+    struct LzClass *cls;
+    uint16_t index;
+} LzFieldRef;
+
 typedef struct LzClass {
     LzObject base;
+    uint64_t id;              /* unique in the VM for ever: types name a class by this, not by name */
     LzString *name;           /* interned, retained */
-    struct LzClass *parent;   /* stage 2: the class this one derives from (always NULL now) */
+    struct LzClass *parent;   /* the class this one derives from (retained), or NULL; set by lz_class_link */
     LzVM *vm;                 /* the VM it belongs to (weak): instances write themselves through it */
     LzMember *members;
     size_t member_count;
     size_t member_capacity;
-    size_t field_count;
+    size_t field_count;       /* slots in an instance: the parent's fields, then this class's own */
+    size_t own_field_count;   /* the fields declared in this class's body */
     size_t param_count;       /* the fields that are arguments of the constructor, in order */
-    uint16_t params[LZ_CLASS_FIELDS_MAX]; /* member indexes */
+    uint16_t params[LZ_CLASS_FIELDS_MAX]; /* their slots: the parent's first, then this class's own */
+    LzFieldRef field_refs[LZ_CLASS_FIELDS_MAX]; /* by slot */
+    bool is_trait;            /* a trait: not created, its members are requirements and defaults */
+    struct LzClass **traits;  /* the traits named in the head (retained): of a trait, the traits it extends */
+    size_t trait_count;
+    bool linked;              /* lz_class_link has run (a class without a parent links when sealed) */
     int init_member;          /* the member `init`, or -1 */
     bool consts_ready;        /* the initialisers of the constants have run */
     uint32_t offset;
@@ -110,8 +126,37 @@ bool lz_class_add_member(LzClass *cls, LzString *name, LzMemberKind kind, LzVisi
 void lz_class_seal(LzClass *cls);
 const LzMember *lz_class_find(const LzClass *cls, const LzString *name);
 
-/* Is code that belongs to the class named `owner` (NULL: no class) inside `cls`? */
-bool lz_class_sees(const LzString *owner, const LzClass *cls);
+/*
+ * Is code written in the class with id `owner` (0: no class) inside `declaring`, the class that
+ * declares a member? It is when `owner` is that class or derives from it: code of a class sees
+ * the private members of itself and of its ancestors, never of its descendants.
+ */
+bool lz_class_sees(const LzVM *vm, uint64_t owner, const LzClass *declaring);
+/* The live class with this id, or NULL. */
+const LzClass *lz_class_by_id(const LzVM *vm, uint64_t id);
+/* Is `cls` the class with this id, or derived from it? */
+bool lz_class_is_a(const LzClass *cls, uint64_t id);
+
+/* A member found along the chain from a class up through its parents. */
+typedef struct LzFound {
+    const LzMember *member;
+    const LzClass *declared_in;
+} LzFound;
+bool lz_class_lookup(const LzClass *cls, const LzString *name, LzFound *out);
+
+/*
+ * Makes `parent` the parent of `cls` (when the `class` statement runs): lays the fields out after
+ * the parent's and checks the pair. Returns LZ_OK, or an error in vm->error.
+ */
+LzStatus lz_class_link(LzVM *vm, LzClass *cls, LzClass *parent);
+/* Adds `trait` to the traits of `cls` (the head `class A : B, T`); an error in vm->error if it is a repeat. */
+LzStatus lz_class_add_trait(LzVM *vm, LzClass *cls, LzClass *trait);
+/*
+ * Checks a class once its head is linked (when the `class` statement runs): `override` against the
+ * parent and the defaults of traits, and for a class that uses traits, that it provides what they
+ * require and that no two traits give it the same name.
+ */
+LzStatus lz_class_finish(LzVM *vm, LzClass *cls);
 
 /* The name to show for a class or instance kind. */
 const char *lz_class_display_name(const LzClass *cls);
@@ -125,17 +170,42 @@ LzStatus lz_class_construct(LzVM *vm, LzClass *cls, size_t positional, const LzV
 LzStatus lz_class_run_consts(LzVM *vm, LzClass *cls);
 
 /* x.name: the instance's field, property or bound method, or a class's constant or function. */
-LzStatus lz_vm_member_get(LzVM *vm, const LzString *owner, const LzValue *target,
+LzStatus lz_vm_member_get(LzVM *vm, uint64_t owner, const LzValue *target,
                           const LzString *name, LzValue *result, bool for_write);
 /* x.name = value. Takes no ownership of value. */
-LzStatus lz_vm_member_set(LzVM *vm, const LzString *owner, const LzValue *target,
+LzStatus lz_vm_member_set(LzVM *vm, uint64_t owner, const LzValue *target,
                           const LzString *name, const LzValue *value);
 /*
  * OP_METHOD_LOOKUP on [receiver][fallback]: replaces the fallback by the callee to use. An instance
  * or class answers with its own member; anything else keeps the fallback (mode 0) or finds it
  * as a global by name (mode 1, where no fallback could be named when the call was compiled).
  */
-LzStatus lz_vm_method_lookup(LzVM *vm, const LzString *owner, const LzString *name, int mode,
+/*
+ * `super.name` (OP_SUPER): the stack holds [self] (mode 1) or [self][nil] (mode 0) at `receiver`.
+ * The search starts at the parent of the class with id `owner`.
+ */
+LzStatus lz_vm_super_lookup(LzVM *vm, uint64_t owner, const LzString *name, int mode, size_t receiver);
+/*
+ * Operators (`operator +(self, other)`): an instance's class defines them under the names "+", "-",
+ * "*", "/", "%", "==", "<" and, for the unary minus, "-@". These are the slow paths of arithmetic,
+ * ordering and equality, reached when an operand is an instance; they return LZ_OK with
+ * *handled = false when neither operand is one (the caller goes on as before).
+ */
+LzStatus lz_class_binary_operator(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right,
+                                  LzValue *result, bool *handled);
+LzStatus lz_class_order_operator(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right,
+                                 LzValue *result, bool *handled);
+LzStatus lz_class_negate_operator(LzVM *vm, const LzValue *operand, LzValue *result, bool *handled);
+/*
+ * Equality of two values compared without a VM in hand (nested arrays, dicts, fields): when `left`
+ * is an instance whose class defines `operator ==`, the VM that is comparing (see
+ * lz_class_equal_scope) runs it and *same is its answer. Returns false when there is nothing to run.
+ * An error inside the operator is kept and handed back by lz_class_equal_scope_end.
+ */
+bool lz_class_equal_hook(const LzValue *left, const LzValue *right, bool *same);
+void lz_class_equal_scope_begin(LzVM *vm, LzVM **saved);
+LzStatus lz_class_equal_scope_end(LzVM *saved);
+LzStatus lz_vm_method_lookup(LzVM *vm, uint64_t owner, const LzString *name, int mode,
                              size_t receiver_index);
 
 /* A new bound method (a new reference). skip_first: drop the first argument of the call. */

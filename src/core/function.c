@@ -21,6 +21,7 @@ LzFunction *lz_function_new(LzHeap *heap, LzString *name) {
     function->param_names = NULL;
     function->offset = LZ_NO_OFFSET;
     function->owner = NULL;
+    function->owner_id = 0;
     function->engine_cache = NULL;
     function->engine_cache_free = NULL;
     return function;

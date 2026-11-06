@@ -577,6 +577,35 @@ Fields, methods, static functions, `get` properties, class constants, `init`, `t
 `==`, `identical`, `copy` and `with`: see [docs/CLASSES.md](docs/CLASSES.md) and
 `examples/classes.lz`.
 
+A class can build on another with `:`, replace a function with `override`, call the parent's with
+`super`, and ask `is`. A trait lists what a class must provide and may bring ready-made functions.
+`operator` lets your own classes use `+`, `-`, `<`, `==` ...
+
+```lizard
+trait Speaker {
+    fn sound(self)                                    # a class must write this
+    fn speak(self) => $"{self.name} says {self.sound()}"   # comes for free
+}
+
+class Animal {
+    pub name: string
+}
+
+class Dog : Animal, Speaker {                         # one parent class, then traits
+    pub fn sound(self) => "Woof"
+}
+
+class Puppy : Dog {
+    pub override fn sound(self) => super.sound() + "!"
+}
+
+let p = Puppy("Bit")
+println(p.speak())                  # Bit says Woof!
+println(p is Dog, p is Speaker)     # true true
+```
+
+See `examples/inheritance.lz`, `examples/traits.lz` and `examples/operators.lz`.
+
 ### Strings
 
 One literal form covers plain, raw, multi-line and template strings: `[$][r]` + quotes.
