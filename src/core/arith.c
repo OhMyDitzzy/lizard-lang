@@ -1,3 +1,4 @@
+#include "lizard/link.h"
 #include "lizard/arith.h"
 
 #include "lizard/array.h"
@@ -232,6 +233,9 @@ static const char *bit_symbol(LzOpCode op) {
 
 LzStatus lz_arith_bit_type_error(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right) {
     const char *symbol = bit_symbol(op);
+    if (lz_value_is_link(left) || (right != NULL && lz_value_is_link(right))) {
+        return lz_vm_link_error(vm);
+    }
     if (right == NULL) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operator '%s' needs an int, got %s", symbol,
                                lz_value_kind_name(left));
@@ -314,6 +318,9 @@ LzStatus lz_arith_binary(LzVM *vm, LzOpCode op, const LzValue *left, const LzVal
     if (op == LZ_OP_ADD && is_string(left) && is_string(right)) {
         return concat(vm, left, right, result);
     }
+    if (lz_value_is_link(left) || lz_value_is_link(right)) {
+        return lz_vm_link_error(vm);
+    }
     if (!is_number(left) || !is_number(right)) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME,
                                op == LZ_OP_ADD ? "operands must be two numbers or two strings (or two arrays)"
@@ -353,6 +360,9 @@ LzStatus lz_arith_negate(LzVM *vm, const LzValue *operand, LzValue *result) {
     if (operand->type == LZ_VAL_FLOAT) {
         *result = lz_value_float(-operand->as.number);
         return LZ_OK;
+    }
+    if (lz_value_is_link(operand)) {
+        return lz_vm_link_error(vm);
     }
     return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operand must be a number");
 }

@@ -10,6 +10,7 @@
 
 #include "lizard/array.h"
 #include "lizard/class.h"
+#include "lizard/link.h"
 #include "lizard/native.h"
 #include "lizard/vm.h"
 
@@ -225,7 +226,8 @@ LzStatus lz_vm_call(LzVM *vm, size_t argc, size_t resume_ip, uint32_t call_offse
         return call_native(vm, (const LzNative *)callee->as.object, argc);
     }
     if (!lz_value_is_closure(callee)) {
-        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "can only call functions");
+        return lz_value_is_link(callee) ? lz_vm_link_error(vm)
+                                        : lz_vm_set_error(vm, LZ_ERR_RUNTIME, "can only call functions");
     }
 
     LzClosure *closure = lz_value_as_closure(callee);
@@ -413,6 +415,9 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
     bool native = is_native(callee);
     bool wrapped = lz_value_is_bound(callee) || lz_value_is_class(callee);
     if (!native && !wrapped && !lz_value_is_closure(callee)) {
+        if (lz_value_is_link(callee)) {
+            return lz_vm_link_error(vm);
+        }
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "can only call functions");
     }
     uint8_t error_kind = 0;

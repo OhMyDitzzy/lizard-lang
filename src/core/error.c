@@ -121,7 +121,7 @@ LzErrorKind lz_error_classify(LzStatus status, const char *message) {
         has(message, "has no method") || has(message, "has no field") || has(message, "tested with a range must be") ||
         has(message, "expected a ") || has(message, "expected an ") ||
         has(message, "type error:") || has(message, "must be a string") ||
-        has(message, "only an error can be thrown")) {
+        has(message, "only an error can be thrown") || has(message, "a link has to be read")) {
         return LZ_ERROR_TYPE;
     }
     /* A value that is not acceptable although its type is. */

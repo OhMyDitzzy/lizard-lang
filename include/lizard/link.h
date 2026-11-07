@@ -49,7 +49,22 @@ bool lz_link_target_ok(const LzValue *value);
  * Adds a fresh cell to the table, so its target's release can find it. The object's `linked`
  * bit caches whether the table has any row for it.
  */
-void lz_link_track(LzVM *vm, LzLink *link);
+bool lz_link_track(LzVM *vm, LzLink *link);
+
+/*
+ * lz_link_track returns false when the table has no memory for the row. The cell is then not
+ * registered and its target is set to NULL, so it never dangles; the caller releases the cell
+ * and reports lz_vm_out_of_memory.
+ */
+
+/* Test hook: when N > 0, the Nth next row allocation fails (1 = the next). Decrements to 0. */
+extern int lz_link_fail_next_row;
+
+/*
+ * Checks the table's invariants against the heap (see docs/MEMORY.md, "Invariants of links"):
+ * returns false and prints the first violation to stderr. Cost: O(heap + table); tests only.
+ */
+bool lz_link_check(const struct LzVM *vm);
 
 /* The first cell of obj in the table, or NULL. Only meaningful while obj is alive. */
 LzLink *lz_link_cell_of(LzVM *vm, const LzObject *obj);
@@ -64,6 +79,13 @@ void lz_link_release_hook(void *context, LzObject *object);
 void lz_link_forget(LzVM *vm, LzLink *link);
 
 void lz_link_table_free(LzVM *vm);
+
+/*
+ * A link cell is not the object it points at. Every operation that would need the object itself
+ * (index, iterate, call, arithmetic, a builtin function, ...) refuses the cell with this TypeError;
+ * the program reads the target first (`l.target`). Always returns the error status.
+ */
+LzStatus lz_vm_link_error(struct LzVM *vm);
 
 /* The target of a link cell, or nil. *result is a new reference. */
 LzValue lz_link_deref(const LzLink *link);

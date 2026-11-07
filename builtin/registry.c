@@ -82,6 +82,14 @@ LzStatus lz_builtin_install(LzVM *vm) {
         }
 
         native->result_kinds = builtin->result_kinds;
+        /* The few builtins that are about the cell itself or only print it. */
+        native->takes_links = (builtin->fn == lz_builtin_print || builtin->fn == lz_builtin_println ||
+                               builtin->fn == lz_builtin_string || builtin->fn == lz_builtin_identical ||
+                               builtin->fn == lz_builtin_link)
+                                  ? LZ_LINKS_ANY
+                              : (builtin->fn == lz_builtin_push || builtin->fn == lz_builtin_insert)
+                                  ? LZ_LINKS_ITEMS
+                                  : LZ_LINKS_NONE;
         uint8_t error_kind;
         if (builtin->fn == lz_error_type_native &&
             lz_vm_error_kind_from_name(vm, builtin->name, strlen(builtin->name), &error_kind)) {

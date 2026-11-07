@@ -914,9 +914,10 @@ static LzStatus check_field_type(LzVM *vm, const LzClass *cls, const LzMember *m
     LzWriter actual_out = lz_writer_from_buffer(&actual);
     lz_type_describe(type, &expected_out);
     describe_actual(type, value, &actual_out);
-    LzStatus status = fail(vm, LZ_ERR_TYPE, NULL, "%s.%s expects %s, got %s", cls->name->data,
+    LzStatus status = fail(vm, LZ_ERR_TYPE, NULL, "%s.%s expects %s, got %s%s", cls->name->data,
                            member->name->data, expected.data != NULL ? expected.data : "?",
-                           actual.data != NULL ? actual.data : "?");
+                           actual.data != NULL ? actual.data : "?",
+                           lz_value_is_link(value) ? "; use .target" : "");
     lz_buffer_free(&expected);
     lz_buffer_free(&actual);
     return status;
@@ -1283,11 +1284,13 @@ LzStatus lz_instance_copy(LzVM *vm, const LzInstance *source, LzValue *result) {
             const LzLink *from = lz_value_as_link(&copy->fields[i]);
             LzLink *to = lz_link_new(&vm->heap, from->target);
             if (to == NULL) {
-                lz_instance_finalize(&vm->heap, copy); /* its fields are released, the bytes stay owned by copy */
+                lz_object_release(&vm->heap, &copy->base); /* releases its fields and frees it */
                 return lz_vm_out_of_memory(vm);
             }
-            if (from->target != NULL) {
-                lz_link_track(vm, to);
+            if (from->target != NULL && !lz_link_track(vm, to)) {
+                lz_object_release(&vm->heap, &to->base);
+                lz_object_release(&vm->heap, &copy->base);
+                return lz_vm_out_of_memory(vm);
             }
             LzValue fresh = lz_value_object(&to->base);
             lz_value_release(&vm->heap, &copy->fields[i]);
@@ -1544,8 +1547,9 @@ static LzStatus link_value_for(LzVM *vm, const LzValue *value, LzValue *cell, Lz
     if (link == NULL) {
         return lz_vm_out_of_memory(vm);
     }
-    if (target != NULL) {
-        lz_link_track(vm, link);
+    if (target != NULL && !lz_link_track(vm, link)) {
+        lz_object_release(&vm->heap, &link->base);
+        return lz_vm_out_of_memory(vm);
     }
     *made = lz_value_object(&link->base);
     *cell = *made;
@@ -1676,6 +1680,11 @@ LzStatus lz_vm_link_member_get(LzVM *vm, uint64_t owner, const LzValue *value, c
     if (target.type == LZ_VAL_NIL) {
         return lz_vm_set_error(vm, LZ_ERR_TYPE, "this link points at nothing any more (its object was freed)");
     }
+    if (!lz_value_is_instance(&target)) {
+        /* Only an instance has fields and methods to read through its link: the rest needs .target. */
+        lz_value_release(&vm->heap, &target);
+        return lz_vm_link_error(vm);
+    }
     LzStatus status = lz_vm_member_get(vm, owner, &target, name, result, false);
     lz_value_release(&vm->heap, &target);
     return status;
@@ -1789,6 +1798,16 @@ static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, 
     LzInstance *instance = lz_value_is_instance(&stand) ? lz_value_as_instance(&stand) : payload_of(&stand);
     if (instance == NULL) {
         return lz_vm_set_error(vm, LZ_ERR_TYPE, "this link points at nothing any more (its object was freed)");
+    }
+    if (lz_value_is_link(&receiver) && (strcmp(name->data, "copy") == 0 || strcmp(name->data, "with") == 0)) {
+        return lz_vm_link_error(vm); /* copying a cell would not copy the object: read .target first */
+    }
+    if (lz_value_is_link(&receiver) && lz_value_is_instance(&stand)) {
+        /* `self` is the object, never the cell: the slot takes the (retained) target. */
+        LzValue target = stand;
+        lz_value_retain(&target);
+        lz_value_release(&vm->heap, &vm->stack[receiver_index]);
+        vm->stack[receiver_index] = target;
     }
     LzClass *cls = instance->cls;
     size_t fallback = receiver_index + 1;

@@ -17,9 +17,14 @@ endif()
 option(LZ_BUILD_TESTS "Build the test suite" ON)
 option(LZ_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(LZ_ENABLE_SANITIZERS "Build with AddressSanitizer and UBSan" OFF)
+option(LZ_ENABLE_POISON "Poison and quarantine freed objects (finds use-after-free without ASan; see docs/MEMORY.md)" OFF)
 option(LZ_ENABLE_JIT "Build the JIT of the Gecko Engine (x86-64 and AArch64; ignored on other platforms)" ON)
 option(LZ_ENABLE_LTO "Enable link-time optimization when supported" OFF)
 option(LZ_STATIC "Link the lizard executable statically (no shared libc needed)" OFF)
+
+if(LZ_ENABLE_POISON)
+    add_compile_definitions(LZ_POISON)
+endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -68,4 +73,4 @@ install(DIRECTORY docs/ DESTINATION share/doc/lizard/docs FILES_MATCHING PATTERN
 install(DIRECTORY examples/ DESTINATION share/lizard/examples FILES_MATCHING PATTERN "*.lz")
 
 message(STATUS "Lizard ${PROJECT_VERSION} (${CMAKE_BUILD_TYPE})")
-message(STATUS "  tests: ${LZ_BUILD_TESTS}  sanitizers: ${LZ_ENABLE_SANITIZERS}  werror: ${LZ_WARNINGS_AS_ERRORS}  lto: ${LZ_ENABLE_LTO}")
+message(STATUS "  tests: ${LZ_BUILD_TESTS}  sanitizers: ${LZ_ENABLE_SANITIZERS}  poison: ${LZ_ENABLE_POISON}  werror: ${LZ_WARNINGS_AS_ERRORS}  lto: ${LZ_ENABLE_LTO}")

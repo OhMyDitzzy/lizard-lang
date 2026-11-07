@@ -106,6 +106,46 @@ goes, so no pointer can dangle, even when the allocator reuses the address. A ta
 with no link costs nothing beyond one bit in its header. Freeing a cell removes it from
 the table. The table is a hash, so freeing N linked objects is linear, not quadratic.
 
+## Invariants of links
+
+1. **A link cell never points at a freed object.** Every cell with a target is registered in the
+   link table (`lz_link_check` verifies this against the heap).
+2. **The hook runs at the moment the refcount reaches 0, on every path.** `lz_object_release` empties
+   the links to the object before it checks `draining`, so objects freed as children (array items,
+   fields, dict values, upvalues, Skink victims) are covered like the outermost one. The hook only
+   edits the table and the cells; it releases nothing, so it is safe in the middle of a drain.
+3. **No unregistered cell exists.** `lz_link_track` returns `false` when the row cannot be made;
+   the cell then has no target and the caller reports out of memory. `lz_link_forget` changes the
+   counts only when it finds the cell in its row.
+4. **A cell is not the object it points at.** It matches no class, array, dict, function or scalar
+   type (only `any`, and link fields, which check their target). Operators, `for`, calls, indexing
+   and builtin functions refuse it with `TypeError: a link has to be read with .target first, got
+   link`. Allowed: `.target`, `.alive`, fields and methods of a link to an instance (`self` is the
+   object), `==`, `identical`, `is`, printing, and storing it in a variable, array, dict or link
+   field. `copy()` and `with()` through a link are errors.
+5. **`lz_heap_destroy` frees objects without finalizing them.** Cells may dangle for that moment;
+   nothing reads a cell or a target afterwards (`lz_link_table_free` frees rows only).
+
+### Tools
+
+- **Poison mode:** `cmake -S . -B build-poison -DLZ_ENABLE_POISON=ON`, then `ctest`. Freed blocks are
+  filled with 0xDD and kept in a 4096-block quarantine, and `retain`/`release`/`deref` assert that
+  the object is not poisoned. `tests/poison_selftest.sh` puts the old bug back
+  (`-DLZ_TEST_REINTRODUCE_LINK_BUG1`) and expects `test_links` to fail.
+- **Model fuzzer:** `tests/fuzz_links.c` (`fuzz_links [seeds] [first-seed] [-v [max-ops]]`, or
+  `LZ_FUZZ_SEEDS`). It generates programs, predicts every `.alive` with a small model, and checks
+  `lz_link_check` and `live_objects == 0`. For objects that only a closure cycle could still hold,
+  the model accepts either answer, because Skink's schedule is not modelled.
+- **CI:** `.github/workflows/sanitizers.yml` (ASan/UBSan/LSan, poison, Valgrind) and
+  `tools/valgrind-check.sh`.
+
+### What is not proven
+
+The CI workflow and `poison_selftest.sh` were never run (no cmake on the development machine; the
+suite was built with a hand-written script). ASan/UBSan did run locally with gcc on that script's
+build and the suite passed, but not through cmake. Valgrind was not available. Skink's collection
+timing of nested closure cycles is not specified here.
+
 ## How to choose
 
 | You have | Use |

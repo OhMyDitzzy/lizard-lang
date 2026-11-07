@@ -332,7 +332,7 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
             lz_array_drop_holder(&array->items[i]);
             lz_value_release(heap, &array->items[i]);
         }
-        free(array->items);
+        lz_free_sized(array->items, array->capacity * sizeof(LzValue));
         lz_heap_uncharge(heap, array->capacity * sizeof(LzValue));
         break;
     }
@@ -343,8 +343,8 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
             lz_value_release(heap, &dict->entries[i].key);
             lz_value_release(heap, &dict->entries[i].value);
         }
-        free(dict->entries);
-        free(dict->slots);
+        lz_free_sized(dict->entries, dict->capacity * sizeof(LzDictEntry));
+        lz_free_sized(dict->slots, dict->slot_capacity * sizeof(uint32_t));
         lz_heap_uncharge(heap, dict->capacity * sizeof(LzDictEntry));
         lz_heap_uncharge(heap, dict->slot_capacity * sizeof(uint32_t));
         break;

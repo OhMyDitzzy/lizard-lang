@@ -156,8 +156,9 @@ LzStatus lz_builtin_link(LzVM *vm, int argc, const LzValue *argv, LzValue *resul
     if (link == NULL) {
         return lz_vm_out_of_memory(vm);
     }
-    if (target != NULL) {
-        lz_link_track(vm, link);
+    if (target != NULL && !lz_link_track(vm, link)) {
+        lz_object_release(&vm->heap, &link->base);
+        return lz_vm_out_of_memory(vm);
     }
     *result = lz_value_object(&link->base);
     return LZ_OK;

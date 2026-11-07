@@ -119,4 +119,7 @@ uint32_t lz_heap_next_epoch(LzHeap *heap);
 void lz_object_retain(LzObject *object);
 void lz_object_release(LzHeap *heap, LzObject *object);
 
+/* free(), except in poison mode (LZ_POISON), where the block is filled with 0xDD and quarantined. */
+void lz_free_sized(void *block, size_t size);
+
 #endif
