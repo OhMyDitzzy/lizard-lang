@@ -139,13 +139,6 @@ the table. The table is a hash, so freeing N linked objects is linear, not quadr
 - **CI:** `.github/workflows/sanitizers.yml` (ASan/UBSan/LSan, poison, Valgrind) and
   `tools/valgrind-check.sh`.
 
-### What is not proven
-
-The CI workflow and `poison_selftest.sh` were never run (no cmake on the development machine; the
-suite was built with a hand-written script). ASan/UBSan did run locally with gcc on that script's
-build and the suite passed, but not through cmake. Valgrind was not available. Skink's collection
-timing of nested closure cycles is not specified here.
-
 ## How to choose
 
 | You have | Use |
