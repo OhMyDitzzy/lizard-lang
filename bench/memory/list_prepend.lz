@@ -1,0 +1,15 @@
+# Prepending to the head of a list (an owning `next` chain drops iteratively).
+class Node {
+    pub value: int
+    pub next: Node = nil
+}
+
+let N = 100000
+let head = Node(value: 0)
+let i = 1
+while i < N {
+    head = Node(value: i, next: head)
+    i += 1
+}
+println(N)
+head = nil

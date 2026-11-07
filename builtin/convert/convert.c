@@ -1,5 +1,6 @@
 #include "convert/convert.h"
 #include "lizard/class.h"
+#include "lizard/link.h"
 
 #include <math.h>
 
@@ -134,5 +135,52 @@ LzStatus lz_builtin_identical(LzVM *vm, int argc, const LzValue *argv, LzValue *
     (void)vm;
     (void)argc;
     *result = lz_value_bool(lz_values_identical(&argv[0], &argv[1]));
+    return LZ_OK;
+}
+
+LzStatus lz_builtin_link(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
+    (void)argc;
+    if (lz_value_is_link(&argv[0])) {
+        *result = argv[0]; /* a link is never linked: link(link(x)) is link(x) */
+        lz_value_retain(result);
+        return LZ_OK;
+    }
+    if (!lz_link_target_ok(&argv[0])) {
+        return lz_vm_set_error(
+            vm, LZ_ERR_TYPE,
+            "link() needs an object that can be shared (instance, array, dict or function), got %s",
+            lz_value_kind_name(&argv[0]));
+    }
+    LzObject *target = argv[0].type == LZ_VAL_OBJECT ? argv[0].as.object : NULL;
+    LzLink *link = lz_link_new(&vm->heap, target);
+    if (link == NULL) {
+        return lz_vm_out_of_memory(vm);
+    }
+    if (target != NULL && !lz_link_track(vm, link)) {
+        lz_object_release(&vm->heap, &link->base);
+        return lz_vm_out_of_memory(vm);
+    }
+    *result = lz_value_object(&link->base);
+    return LZ_OK;
+}
+
+/* The target of a link, or nil once it is dead; a value that is not a link is returned as is. */
+LzStatus lz_builtin_target(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
+    (void)vm;
+    (void)argc;
+    if (lz_value_is_link(&argv[0])) {
+        *result = lz_link_deref(lz_value_as_link(&argv[0]));
+    } else {
+        *result = argv[0];
+        lz_value_retain(result);
+    }
+    return LZ_OK;
+}
+
+/* False once the target of a link is freed (a value that is not a link is always alive). */
+LzStatus lz_builtin_alive(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
+    (void)vm;
+    (void)argc;
+    *result = lz_value_bool(!lz_value_is_link(&argv[0]) || lz_value_as_link(&argv[0])->target != NULL);
     return LZ_OK;
 }

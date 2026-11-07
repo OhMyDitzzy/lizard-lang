@@ -104,6 +104,9 @@ bool lz_type_equal(const LzType *a, const LzType *b);
 /* Equal types hash equally, whatever the order of their literals. */
 uint32_t lz_type_hash(const LzType *type);
 bool lz_type_matches(const LzType *type, const LzValue *value);
+
+/* Like lz_type_matches, but a link cell is tested by its target (the `is` operator only). */
+bool lz_type_matches_through_link(const LzType *type, const LzValue *value);
 LzAssign lz_type_assignable(const LzType *from, const LzType *to);
 
 /* "int | string", "number", "any", "never", "\"r\" | \"w\"" */

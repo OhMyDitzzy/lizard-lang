@@ -3,6 +3,7 @@
 #include "lizard/arith.h"
 #include "lizard/array.h"
 #include "lizard/class.h"
+#include "lizard/link.h"
 #include "lizard/compare.h"
 #include "lizard/dict.h"
 #include "lizard/error.h"
@@ -119,10 +120,11 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
             return own;
         }
     }
-    LzStatus status = lz_vm_set_error(vm, LZ_ERR_TYPE, "type error: %s%sexpected %s, got %s", what,
+    LzStatus status = lz_vm_set_error(vm, LZ_ERR_TYPE, "type error: %s%sexpected %s, got %s%s", what,
                                       what[0] != '\0' ? ": " : "",
                                       expected.data != NULL ? expected.data : "?",
-                                      actual.data != NULL ? actual.data : "?");
+                                      actual.data != NULL ? actual.data : "?",
+                                      lz_value_is_link(value) ? "; use .target" : "");
     lz_buffer_free(&expected);
     lz_buffer_free(&actual);
     return status;
@@ -200,6 +202,9 @@ static LzStatus array_push(LzVM *vm) {
 }
 
 static LzStatus not_indexable(LzVM *vm, const LzValue *value) {
+    if (lz_value_is_link(value)) {
+        return lz_vm_link_error(vm);
+    }
     return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot index a value of type %s",
                            lz_value_kind_name(value));
 }
@@ -292,8 +297,9 @@ static LzStatus iter_length_op(LzVM *vm) {
     } else if (lz_value_is_dict(value)) {
         length = (int64_t)lz_value_as_dict(value)->count;
     } else {
-        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
-                               lz_value_kind_name(value));
+        return lz_value_is_link(value) ? lz_vm_link_error(vm)
+                                       : lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
+                                                         lz_value_kind_name(value));
     }
     pop(vm);
     return push(vm, lz_value_int(length));
@@ -338,8 +344,9 @@ static LzStatus iter_next_op(LzVM *vm) {
         }
         item = dict->entries[at].key; /* `for k in d` walks the keys */
     } else {
-        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
-                               lz_value_kind_name(container));
+        return lz_value_is_link(container) ? lz_vm_link_error(vm)
+                                           : lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
+                                                             lz_value_kind_name(container));
     }
 
     /*
@@ -403,8 +410,9 @@ static LzStatus iter_pair_op(LzVM *vm) {
         }
         second = array->items[at];
     } else {
-        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
-                               lz_value_kind_name(container));
+        return lz_value_is_link(container) ? lz_vm_link_error(vm)
+                                           : lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot iterate over %s",
+                                                             lz_value_kind_name(container));
     }
 
     lz_value_retain(&first);
@@ -549,6 +557,9 @@ static LzStatus in_op(LzVM *vm) {
         const LzString *hay = (const LzString *)right->as.object;
         const LzString *needle = NULL;
         if (!text_at(left, &needle)) {
+            if (lz_value_is_link(left)) {
+                return lz_vm_link_error(vm);
+            }
             return lz_vm_set_error(vm, LZ_ERR_TYPE,
                                    "the left side of 'in' must be a string when the right side "
                                    "is a string, got %s",
@@ -561,8 +572,9 @@ static LzStatus in_op(LzVM *vm) {
         }
         found = bytes_contain(hay, needle);
     } else {
-        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot use 'in' with %s",
-                               lz_value_kind_name(right));
+        return lz_value_is_link(right) ? lz_vm_link_error(vm)
+                                       : lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot use 'in' with %s",
+                                                         lz_value_kind_name(right));
     }
 
     pop(vm);
@@ -704,6 +716,9 @@ static LzStatus throw_op(LzVM *vm) {
     }
     LzValue *top = &vm->stack[vm->stack_count - 1];
     if (!lz_value_is_error(top)) {
+        if (lz_value_is_link(top)) {
+            return lz_vm_link_error(vm);
+        }
         return lz_vm_set_error(vm, LZ_ERR_TYPE,
                                "only an error can be thrown (write RuntimeError(\"oops\"))");
     }
@@ -788,6 +803,15 @@ static LzStatus set_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
             pop(vm);
             return LZ_OK;
         }
+    }
+    if (lz_value_is_link(&target)) {
+        status = lz_vm_link_member_set(vm, current_owner(vm), &target, name, &value);
+        if (status != LZ_OK) {
+            return status;
+        }
+        pop(vm);
+        pop(vm);
+        return LZ_OK;
     }
     if (!lz_value_is_instance(&target) && !lz_value_is_class(&target)) {
         return lz_vm_set_error(vm, LZ_ERR_TYPE, "cannot assign to field '%s' of %s", name->data,
@@ -970,6 +994,34 @@ static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool wr
         return malformed(vm, "stack underflow");
     }
     const LzValue *top = &vm->stack[vm->stack_count - 1];
+    if (lz_value_is_link(top)) {
+        if (write_check) {
+            return member_get_op(vm, name, false, true); /* the check wants the target's field */
+        }
+        if (name->length == 6 && memcmp(name->data, "target", 6) == 0) {
+            LzValue found = lz_link_deref(lz_value_as_link(top));
+            LzValue old = vm->stack[vm->stack_count - 1];
+            vm->stack[vm->stack_count - 1] = found;
+            lz_value_release(&vm->heap, &old);
+            return LZ_OK;
+        }
+        if (name->length == 5 && memcmp(name->data, "alive", 5) == 0) {
+            LzValue found = lz_value_bool(lz_value_as_link(top)->target != NULL);
+            LzValue old = vm->stack[vm->stack_count - 1];
+            vm->stack[vm->stack_count - 1] = found;
+            lz_value_release(&vm->heap, &old);
+            return LZ_OK;
+        }
+        LzValue found = lz_value_nil();
+        status = lz_vm_link_member_get(vm, current_owner(vm), top, name, &found);
+        if (status != LZ_OK) {
+            return status;
+        }
+        LzValue old = vm->stack[vm->stack_count - 1];
+        vm->stack[vm->stack_count - 1] = found;
+        lz_value_release(&vm->heap, &old);
+        return LZ_OK;
+    }
     if (lz_value_is_instance(top) || lz_value_is_class(top)) {
         return member_get_op(vm, name, false, write_check);
     }
@@ -978,7 +1030,11 @@ static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool wr
         LzValue result = lz_value_nil();
         bool found_ext = false;
         lz_value_retain(&target);
-        status = lz_vm_ext_get(vm, current_owner(vm), &target, name, &result, &found_ext);
+        if (lz_value_is_link(&target)) {
+            status = lz_vm_link_ext_get(vm, current_owner(vm), &target, name, &result, &found_ext);
+        } else {
+            status = lz_vm_ext_get(vm, current_owner(vm), &target, name, &result, &found_ext);
+        }
         if (status != LZ_OK) {
             lz_value_release(&vm->heap, &target);
             return status;
@@ -1209,6 +1265,9 @@ static LzStatus array_extend(LzVM *vm) {
         return malformed(vm, "array expected");
     }
     if (!lz_value_is_array(source)) {
+        if (lz_value_is_link(source)) {
+            return lz_vm_link_error(vm);
+        }
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot spread a value of type %s",
                                lz_value_kind_name(source));
     }
@@ -1549,7 +1608,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
             status = malformed(vm, "stack underflow");
         } else {
             LzValue *top = &vm->stack[vm->stack_count - 1];
-            bool matches = lz_type_matches(&chunk->types[index], top);
+            bool matches = lz_type_matches_through_link(&chunk->types[index], top);
             lz_value_release(&vm->heap, top);
             *top = lz_value_bool(matches);
         }

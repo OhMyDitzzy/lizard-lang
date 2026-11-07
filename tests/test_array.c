@@ -434,15 +434,15 @@ static void test_locals_and_loops(void) {
 static void test_aliasing_and_cycles(void) {
     check_output("let a = [1]\nlet b = a\npush(b, 2)\nprintln(a)\n", "[1, 2]\n");
     check_runtime_error("let a = []\npush(a, a)\n", LZ_ERR_RUNTIME,
-                        "cannot store an array inside itself");
+                        "a value cannot contain itself");
     check_runtime_error("let a = [1]\na[0] = a\n", LZ_ERR_RUNTIME,
-                        "cannot store an array inside itself");
+                        "a value cannot contain itself");
     check_runtime_error("let a = []\nlet b = [a]\npush(a, b)\n", LZ_ERR_RUNTIME,
-                        "cannot store an array inside itself");
+                        "a value cannot contain itself");
     check_runtime_error("let a = []\nlet b = [[a]]\ninsert(a, 0, b)\n", LZ_ERR_RUNTIME,
-                        "cannot store an array inside itself");
+                        "a value cannot contain itself");
     check_runtime_error("let a = [0]\nlet b = [a]\nlet c = [b]\nc[0][0][0] = c\n", LZ_ERR_RUNTIME,
-                        "cannot store an array inside itself");
+                        "a value cannot contain itself");
     /* Sharing without a cycle is fine, including the same array twice. */
     check_output("let a = [1]\nlet b = [a, a]\nlet c = [b, b]\na[0] = 2\nprintln(c)\n",
                  "[[[2], [2]], [[2], [2]]]\n");

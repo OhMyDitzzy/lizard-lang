@@ -9,6 +9,7 @@ add_library(lizard_core STATIC
     core/debug.c
     core/format.c
     core/function.c
+    core/link.c
     core/memory.c
     core/number.c
     core/native.c

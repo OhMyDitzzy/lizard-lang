@@ -48,6 +48,7 @@ typedef struct LzMember {
     uint8_t vis;      /* LzVisibility */
     uint8_t is_override; /* written with `override` */
     uint8_t is_required; /* in a trait: written without a body, so a class must provide it */
+    uint8_t is_link;  /* a field declared `link`: it holds a link cell, not the object it reads as */
     uint16_t slot;    /* a field: its index in the instance */
     LzValue value;    /* method, static, getter: the closure. const: the value once initialised */
     LzValue thunk;    /* a field default or a const initialiser: a closure taking no argument, or nil */
@@ -215,6 +216,19 @@ LzStatus lz_vm_ext_get(LzVM *vm, uint64_t owner, const LzValue *target, const Lz
 /* x.name = value. Takes no ownership of value. */
 LzStatus lz_vm_member_set(LzVM *vm, uint64_t owner, const LzValue *target,
                           const LzString *name, const LzValue *value);
+
+/*
+ * A link read from a field can be used like the object it points at: these look the member up on
+ * the target (a dead link answers nil for a read and refuses a write).
+ */
+LzStatus lz_vm_link_member_get(LzVM *vm, uint64_t owner, const LzValue *link, const LzString *name,
+                               LzValue *result);
+LzStatus lz_vm_link_member_set(LzVM *vm, uint64_t owner, const LzValue *link, const LzString *name,
+                               const LzValue *value);
+LzStatus lz_vm_link_ext_get(LzVM *vm, uint64_t owner, const LzValue *link, const LzString *name,
+                           LzValue *result, bool *found);
+/* The value a link stands for (nil when dead): *target is a new reference, *is_link says if any was made. */
+LzStatus lz_vm_link_target(LzVM *vm, const LzValue *value, LzValue *target, bool *is_link);
 /*
  * OP_METHOD_LOOKUP on [receiver][fallback]: replaces the fallback by the callee to use. An instance
  * or class answers with its own member; anything else keeps the fallback (mode 0) or finds it

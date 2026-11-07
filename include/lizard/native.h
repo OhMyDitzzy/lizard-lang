@@ -16,6 +16,8 @@
  */
 typedef LzStatus (*LzNativeFn)(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 
+enum { LZ_LINKS_NONE = 0, LZ_LINKS_ITEMS = 1, LZ_LINKS_ANY = 2 };
+
 typedef struct LzNative {
     LzObject base;
     LzString *name;
@@ -23,6 +25,9 @@ typedef struct LzNative {
     int min_args;
     int max_args;
     uint16_t result_kinds; /* what a call can return; LZ_KINDS_ANY when unknown */
+    uint8_t takes_links;   /* link cells among the arguments: LZ_LINKS_NONE (refused by lz_native_call),
+                              LZ_LINKS_ITEMS (only argv[0] is checked: the builtin stores the others,
+                              as push and insert do), LZ_LINKS_ANY */
     const void *data;      /* private to whoever made the native (a method dispatcher keeps its group here) */
 } LzNative;
 

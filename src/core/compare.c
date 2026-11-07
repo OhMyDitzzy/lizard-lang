@@ -1,6 +1,7 @@
 #include "lizard/compare.h"
 
 #include "lizard/class.h"
+#include "lizard/link.h"
 
 static bool is_number(const LzValue *value) {
     return value->type == LZ_VAL_INT || value->type == LZ_VAL_FLOAT;
@@ -14,6 +15,9 @@ LzStatus lz_compare_order(LzVM *vm, LzOpCode op, const LzValue *left, const LzVa
         if (handled) {
             return status;
         }
+    }
+    if (lz_value_is_link(left) || lz_value_is_link(right)) {
+        return lz_vm_link_error(vm);
     }
     if (!is_number(left) || !is_number(right)) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operands must be numbers");

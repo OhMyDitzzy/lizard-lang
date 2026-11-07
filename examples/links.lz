@@ -1,0 +1,30 @@
+# Links: references that do not own their target.
+#
+# An owning field that pointed back at the parent would be a cycle, and a cycle is refused
+# when stored. A `link` field is the way to keep the parent pointer: it adds no ownership,
+# so root -> child stays a tree, and the child can read its parent safely.
+
+class Node {
+    pub name: string
+    pub link parent: Node = nil
+    pub children: Node[] = []
+}
+
+let root = Node(name: "root")
+let kid = Node(name: "kid", parent: root)
+root.children.push(kid)
+println($"{kid.name} -> {kid.parent.name}")
+println(len(root.children))
+
+# A standalone link: it knows whether its target is still alive.
+let l = link(root)
+println(l.alive)
+println(l.target)
+println(l)
+
+# A watcher that does not keep the object it watches alive.
+let watched = Node(name: "temp")
+let watch = link(watched)
+watched = nil
+println(watch.alive)
+println(watch.target)

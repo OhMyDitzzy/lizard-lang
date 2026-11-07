@@ -7,6 +7,7 @@
 #include "lizard/array.h"
 #include "lizard/dict.h"
 #include "lizard/format.h"
+#include "lizard/link.h"
 
 /* ---- methods that need no file of their own ---- */
 
@@ -222,6 +223,11 @@ static LzStatus dispatch(LzVM *vm, int argc, const LzValue *argv, LzValue *resul
     const LzNative *self = vm->current_native;
     const LzMethod *first = (const LzMethod *)self->data;
     uint16_t kind = lz_kind_of(&argv[0]);
+    if (lz_value_is_link(&argv[0])) {
+        /* Only the methods every value has (to_string, to_debug) take a link cell; they are
+         * marked takes_links, and every row of theirs serves every kind, nil included. */
+        kind = LZ_KIND_NIL;
+    }
 
     for (const LzMethod *m = first; m < methods + METHOD_COUNT && same_group(m, first); m++) {
         if ((m->kinds & kind) == 0) {
@@ -273,6 +279,11 @@ LzStatus lz_method_install(LzVM *vm) {
             return lz_vm_out_of_memory(vm);
         }
         native->data = first;
+        native->takes_links = (strcmp(first->name, "to_string") == 0 || strcmp(first->name, "to_debug") == 0)
+                                  ? LZ_LINKS_ANY
+                              : (strcmp(first->name, "push") == 0 || strcmp(first->name, "insert") == 0)
+                                  ? LZ_LINKS_ITEMS
+                                  : LZ_LINKS_NONE;
 
         /* What a call can return: what the rows return, unless another function can answer too. */
         uint16_t kinds = 0;

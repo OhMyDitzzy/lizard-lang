@@ -248,7 +248,8 @@ check() {
         esac
         # shellcheck disable=SC2086
         "$LZ" $mode $extra --heap-stats "$dir/$name.lz" >"$dir/$name.$tag.out" 2>"$dir/$name.$tag.err"
-        grep -E '^(heap|skink):' "$dir/$name.$tag.err" >"$dir/$name.$tag.stats"
+        # The timing line is wall-clock, so it can never be identical across engines: keep it out of the comparison.
+        grep -E '^(heap|skink|link):' "$dir/$name.$tag.err" | grep -v 'pause' >"$dir/$name.$tag.stats"
         if ! cmp -s "$dir/$name.$tag.out" "$dir/$name.expected"; then
             fail "$name $mode: output is '$(head -c 80 "$dir/$name.$tag.out")', expected '$expected'"
             ok=0

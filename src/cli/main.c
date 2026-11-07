@@ -88,6 +88,10 @@ static void print_heap_stats(const LzHeap *heap) {
 }
 
 static void print_skink_stats(const LzSkinkStats *stats) {
+    if (stats->link_live > 0 || stats->link_cancelled > 0) {
+        fprintf(stderr, "link: %llu cells alive, %llu emptied when their target was freed\n",
+                (unsigned long long)stats->link_live, (unsigned long long)stats->link_cancelled);
+    }
     if (stats->suspects == 0 && stats->watched == 0 && stats->full_passes == 0) {
         return;
     }
@@ -104,6 +108,11 @@ static void print_skink_stats(const LzSkinkStats *stats) {
         fprintf(stderr, "skink: %llu full passes (%llu before --max-heap refused an allocation), %llu bytes freed\n",
                 (unsigned long long)stats->full_passes, (unsigned long long)stats->reclaims,
                 (unsigned long long)stats->reclaimed);
+    }
+    if (stats->trial_ns > 0 || stats->worst_trial_ns > 0) {
+        fprintf(stderr, "skink: worst trial pause %.3f ms (%.3f ms total), worst full pass %.3f ms (%.3f ms total)\n",
+                (double)stats->worst_trial_ns / 1e6, (double)stats->trial_ns / 1e6,
+                (double)stats->worst_full_ns / 1e6, (double)stats->full_ns / 1e6);
     }
 }
 
@@ -310,6 +319,7 @@ static int run_script(const char *script_path, bool heap_stats, bool trace_memor
     }
     /* The final sweep only makes the report of what is left alive exact: skip it when nobody asked. */
     vm.skink.final_sweep = heap_stats || trace_memory;
+    vm.skink.timing = heap_stats; /* the clock is read only when the report is wanted */
 
     LzChunk chunk;
     lz_chunk_init(&chunk);
@@ -363,6 +373,8 @@ static int run_script(const char *script_path, bool heap_stats, bool trace_memor
     lz_vm_release_roots(&vm);
     if (heap_stats) {
         print_heap_stats(&vm.heap);
+        vm.skink.stats.link_live = vm.link_count;
+        vm.skink.stats.link_cancelled = vm.link_cancelled;
         print_skink_stats(&vm.skink.stats);
     }
     lz_vm_free(&vm);

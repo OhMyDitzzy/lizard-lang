@@ -1,0 +1,13 @@
+# An array of N instances: the array grows by doubling, so it must stay linear.
+class Item {
+    pub value: int
+}
+
+let N = 100000
+let items: Item[] = []
+let i = 0
+while i < N {
+    items.push(Item(value: i))
+    i += 1
+}
+println(len(items))

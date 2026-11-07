@@ -41,11 +41,15 @@ order is `[k0 k1 k2]` minus one, and a key removed and stored again goes to the
 end. A dict counts as a holder for the cycle check, and it can reach a closure,
 so it is a Skink suspect only when its key or value type does not rule one out.
 
-Reference counting cannot free a cycle, so storing an array inside itself,
-directly or through other arrays, is a runtime error. Each array counts how many
-arrays hold it (`holders`); an array held by nobody cannot be inside the value
-being stored, so the check is free in the common case, and otherwise walks only
-arrays that contain arrays, once each (`mark` plus a heap epoch).
+Reference counting cannot free a cycle, so storing an array, a dict or an object
+inside itself, directly or through other containers, is a runtime error. Each
+array counts how many arrays hold it (`holders`); an array held by nobody cannot
+be inside the value being stored, so the check is free in the common case, and
+otherwise walks only arrays that contain arrays, once each (`mark` plus a heap
+epoch). A non-owning `link` breaks ownership instead: it is a leaf object with no
+holders and no edges, so the cycle walks, Skink and the finalizer never follow it;
+a target's release empties every cell that points at it through the VM's link
+table (see `link.h` and `docs/MEMORY.md`).
 
 A cycle can still be built through a closure and one of its upvalues (an array
 that holds a closure which captured that array, a closure that captures the

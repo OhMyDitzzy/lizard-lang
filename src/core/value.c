@@ -5,6 +5,7 @@
 #include "lizard/class.h"
 #include "lizard/dict.h"
 #include "lizard/function.h"
+#include "lizard/link.h"
 #include "lizard/native.h"
 
 #include <inttypes.h>
@@ -299,6 +300,21 @@ static bool write_object(const LzObject *object, const LzWriter *writer) {
         return lz_writer_write_cstr(writer, "<function code>");
     case LZ_OBJ_UPVALUE:
         return lz_writer_write_cstr(writer, "<upvalue>");
+    case LZ_OBJ_LINK: {
+        const LzLink *link = (const LzLink *)object;
+        if (link->target == NULL) {
+            return lz_writer_write_cstr(writer, "nil"); /* the object it pointed at is gone */
+        }
+        LzValue target = lz_value_object(link->target);
+        if (lz_value_is_instance(&target)) {
+            const LzInstance *instance = lz_value_as_instance(&target);
+            return lz_writer_write_cstr(writer, "<link ") &&
+                   lz_writer_write(writer, instance->cls->name->data, instance->cls->name->length) &&
+                   lz_writer_write_cstr(writer, ">");
+        }
+        return lz_writer_write_cstr(writer, "<link ") && lz_value_write(&target, writer) &&
+               lz_writer_write_cstr(writer, ">");
+    }
     }
     return false;
 }
@@ -316,7 +332,7 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
             lz_array_drop_holder(&array->items[i]);
             lz_value_release(heap, &array->items[i]);
         }
-        free(array->items);
+        lz_free_sized(array->items, array->capacity * sizeof(LzValue));
         lz_heap_uncharge(heap, array->capacity * sizeof(LzValue));
         break;
     }
@@ -327,8 +343,8 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
             lz_value_release(heap, &dict->entries[i].key);
             lz_value_release(heap, &dict->entries[i].value);
         }
-        free(dict->entries);
-        free(dict->slots);
+        lz_free_sized(dict->entries, dict->capacity * sizeof(LzDictEntry));
+        lz_free_sized(dict->slots, dict->slot_capacity * sizeof(uint32_t));
         lz_heap_uncharge(heap, dict->capacity * sizeof(LzDictEntry));
         lz_heap_uncharge(heap, dict->slot_capacity * sizeof(uint32_t));
         break;
@@ -382,6 +398,9 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
         }
         break;
     }
+    case LZ_OBJ_LINK:
+        lz_link_forget(heap->on_link_freed_context, (LzLink *)object); /* the cell leaves the table */
+        break;
     }
 }
 
@@ -480,6 +499,11 @@ static bool equal_leaf(const LzValue *left, const LzValue *right) {
             const LzString *second = (const LzString *)b;
             return first->length == second->length &&
                    memcmp(first->data, second->data, first->length) == 0;
+        }
+        if (a->type == LZ_OBJ_LINK || b->type == LZ_OBJ_LINK) {
+            /* Two links are equal when they point at the same object; a link and its target are not. */
+            return a->type == LZ_OBJ_LINK && b->type == LZ_OBJ_LINK &&
+                   ((const LzLink *)a)->target == ((const LzLink *)b)->target;
         }
         return false;
     }

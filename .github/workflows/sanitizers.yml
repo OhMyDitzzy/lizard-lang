@@ -1,0 +1,28 @@
+name: sanitizers
+on: [push, pull_request]
+jobs:
+  asan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DLZ_ENABLE_SANITIZERS=ON
+      - run: cmake --build build
+      - run: ctest --test-dir build --output-on-failure --timeout 600
+  poison:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: cmake -S . -B build-poison -G Ninja -DCMAKE_BUILD_TYPE=Debug -DLZ_ENABLE_POISON=ON
+      - run: cmake --build build-poison
+      - run: ctest --test-dir build-poison --output-on-failure --timeout 600
+      - run: sh tests/poison_selftest.sh build-poison-selftest
+  valgrind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build valgrind
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build
+      - run: sh tools/valgrind-check.sh build

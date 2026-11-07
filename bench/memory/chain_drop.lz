@@ -1,0 +1,14 @@
+# Dropping a long owning chain at once: release is iterative, so no deep C stack.
+class Node {
+    pub next: Node = nil
+}
+
+let N = 100000
+let head = Node()
+let i = 0
+while i < N {
+    head = Node(next: head)
+    i += 1
+}
+println(i)
+head = nil

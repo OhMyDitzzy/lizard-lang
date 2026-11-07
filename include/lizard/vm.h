@@ -116,6 +116,16 @@ struct LzVM {
     bool has_classes;            /* some class was declared: method calls must look at the receiver's class */
     LzObject *native_with;       /* the natives behind x.with(...) and x.copy() of an instance (retained, lazy) */
     LzObject *native_copy;
+    /*
+     * The link table (see link.h): a hash of target -> the cells that point at it. A target that
+     * dies sets object->linked and asks lz_link_target_freed so those cells are emptied before
+     * the memory goes away; a cell that dies first removes itself from its row.
+     */
+    struct LzLinkRow **link_buckets;
+    size_t link_bucket_count;
+    size_t link_count;           /* cells in the table */
+    size_t link_targets;         /* rows: targets that have at least one live cell */
+    size_t link_cancelled;       /* cells emptied so far because their target was freed */
     uintptr_t c_stack_floor;     /* lowest C stack address a nested callback may reach (see call.c) */
     uintptr_t c_stack_lo;        /* the thread stack the floor was measured on: [lo, hi); asking the system is slow */
     uintptr_t c_stack_hi;

@@ -8,6 +8,47 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+/*
+ * Poison mode (cmake -DLZ_ENABLE_POISON=ON, defines LZ_POISON): a block that is freed is first
+ * filled with 0xDD and parked in a quarantine ring instead of going back to malloc, so that its
+ * address is not reused and a stale pointer reads 0xDD (refcount 0xDDDDDDDD, type out of range),
+ * which the asserts in lz_object_retain / lz_object_release / lz_link_deref catch. This finds
+ * use-after-free without ASan. The ring is flushed by lz_heap_destroy.
+ */
+#ifdef LZ_POISON
+#define LZ_QUARANTINE_SIZE 4096
+static _Thread_local void *quarantine_ring[LZ_QUARANTINE_SIZE];
+static _Thread_local size_t quarantine_next;
+
+static void quarantine_flush(void) {
+    for (size_t i = 0; i < LZ_QUARANTINE_SIZE; i++) {
+        free(quarantine_ring[i]);
+        quarantine_ring[i] = NULL;
+    }
+    quarantine_next = 0;
+}
+
+static void quarantine_put(void *block, size_t size) {
+    memset(block, 0xDD, size);
+    free(quarantine_ring[quarantine_next]); /* the oldest block leaves the quarantine */
+    quarantine_ring[quarantine_next] = block;
+    quarantine_next = (quarantine_next + 1) % LZ_QUARANTINE_SIZE;
+}
+#endif
+
+/* Frees a block of `size` bytes (poison mode: poisons and quarantines it instead). */
+void lz_free_sized(void *block, size_t size) {
+#ifdef LZ_POISON
+    if (block != NULL) {
+        quarantine_put(block, size);
+    }
+#else
+    (void)size;
+    free(block);
+#endif
+}
 
 void lz_heap_init(LzHeap *heap) {
     heap->head = NULL;
@@ -28,8 +69,17 @@ void lz_heap_init(LzHeap *heap) {
     heap->alloc_period = 0;
     heap->alloc_countdown = 0;
     heap->in_hook = false;
+    heap->on_link_freed = NULL;
+    heap->on_link_freed_context = NULL;
 }
 
+/*
+ * Invariant: objects still alive here are freed directly, without finalize and without telling
+ * the link table, so link cells (which may be among these objects, or may already be freed in
+ * this loop) can point at freed memory. That is safe only because nothing runs afterwards that
+ * reads a cell or a target: lz_vm_free calls lz_link_table_free next, which frees rows only and
+ * never dereferences a row's target or a cell. Do not add code after lz_heap_destroy that does.
+ */
 void lz_heap_destroy(LzHeap *heap) {
     LzObject *object = heap->head;
     while (object != NULL) {
@@ -39,13 +89,19 @@ void lz_heap_destroy(LzHeap *heap) {
                     (int)object->type, object->size, (unsigned)object->refcount);
         }
         if (object->type == LZ_OBJ_ARRAY) {
-            free(((LzArray *)object)->items);
+            lz_free_sized(((LzArray *)object)->items, ((LzArray *)object)->capacity * sizeof(LzValue));
         } else if (object->type == LZ_OBJ_FUNCTION) {
             lz_function_free_storage(heap, (LzFunction *)object, false);
         }
+#ifdef LZ_POISON
+        memset(object, 0xDD, object->size);
+#endif
         free(object);
         object = next;
     }
+#ifdef LZ_POISON
+    quarantine_flush();
+#endif
     heap->head = NULL;
     heap->live_objects = 0;
     heap->live_bytes = 0;
@@ -103,6 +159,7 @@ void *lz_heap_alloc(LzHeap *heap, LzObjType type, size_t size) {
     object->refcount = 1;
     object->type = type;
     object->trial = 0;
+    object->linked = 0;
     if (heap->head != NULL) {
         heap->head->prev = object;
     }
@@ -155,16 +212,38 @@ uint32_t lz_heap_next_epoch(LzHeap *heap) {
     return ++heap->epoch;
 }
 
+#ifdef LZ_POISON
+#define LZ_ASSERT_LIVE(object)                                                                     \
+    do {                                                                                           \
+        assert((object)->refcount != 0xDDDDDDDDu && (object)->refcount > 0);                       \
+        assert((unsigned)(object)->type <= (unsigned)LZ_OBJ_LINK);                                 \
+    } while (0)
+#else
+#define LZ_ASSERT_LIVE(object) assert((object)->refcount > 0)
+#endif
+
 void lz_object_retain(LzObject *object) {
-    assert(object->refcount > 0);
+    LZ_ASSERT_LIVE(object);
     object->refcount++;
 }
 
 void lz_object_release(LzHeap *heap, LzObject *object) {
-    assert(object->refcount > 0);
+    LZ_ASSERT_LIVE(object);
     if (--object->refcount != 0) {
         return;
     }
+
+    /*
+     * The object is dead. Empty the links to it now, before anything else, whether this is the
+     * outermost release or one queued while draining: a queued object is finalized and freed
+     * later, so a link must not be left pointing at it in between or afterwards. The hook only
+     * edits the link table and the cells (it releases no object), so it is safe mid-drain.
+     */
+#ifndef LZ_TEST_REINTRODUCE_LINK_BUG1
+    if (object->linked && heap->on_link_freed != NULL) {
+        heap->on_link_freed(heap->on_link_freed_context, object);
+    }
+#endif
 
     if (object->prev != NULL) {
         object->prev->next = object->next;
@@ -193,14 +272,20 @@ void lz_object_release(LzHeap *heap, LzObject *object) {
         heap->pending = object;
         return;
     }
+#ifdef LZ_TEST_REINTRODUCE_LINK_BUG1
+    /* The old bug, for tests/poison_selftest.sh: only the outermost release told the table. */
+    if (object->linked && heap->on_link_freed != NULL) {
+        heap->on_link_freed(heap->on_link_freed_context, object);
+    }
+#endif
     heap->draining = true;
     lz_object_finalize(heap, object);
-    free(object);
+    lz_free_sized(object, object->size);
     while (heap->pending != NULL) {
         LzObject *dead = heap->pending;
         heap->pending = dead->next;
         lz_object_finalize(heap, dead);
-        free(dead);
+        lz_free_sized(dead, dead->size);
     }
     heap->draining = false;
 }

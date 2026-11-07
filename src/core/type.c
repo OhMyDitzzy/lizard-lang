@@ -4,6 +4,7 @@
 #include "lizard/array.h"
 #include "lizard/class.h"
 #include "lizard/dict.h"
+#include "lizard/link.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -37,9 +38,10 @@ uint16_t lz_kind_of(const LzValue *value) {
             return LZ_KIND_FUNCTION;
         case LZ_OBJ_INSTANCE:
             return LZ_KIND_INSTANCE;
+        case LZ_OBJ_LINK:
         case LZ_OBJ_FUNCTION:
         case LZ_OBJ_UPVALUE:
-            return 0; /* internal objects are never values a script can hold */
+            return 0; /* no kind of its own: a link is tested by its target, the rest are internal */
         }
         return 0;
     }
@@ -74,6 +76,9 @@ const char *lz_kind_name(uint16_t kind) {
 }
 
 const char *lz_value_kind_name(const LzValue *value) {
+    if (lz_value_is_link(value)) {
+        return "link";
+    }
     if (lz_value_is_instance(value)) {
         return lz_value_as_instance(value)->cls->name->data;
     }
@@ -154,6 +159,11 @@ static bool literal_from_value(const LzValue *value, LzLiteral *out) {
 }
 
 LzType lz_type_of_value(const LzValue *value) {
+    if (value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_LINK) {
+        /* A link is described as what it points at (or as nil when its target is gone). */
+        LzValue target = lz_link_deref((const LzLink *)value->as.object);
+        return lz_type_of_value(&target);
+    }
     LzType type = lz_type_of_kinds(0);
     LzLiteral literal;
     if (literal_from_value(value, &literal)) {
@@ -340,6 +350,19 @@ uint32_t lz_type_hash(const LzType *type) {
 #define INSTANCE_KIND_UNLIKELY(kind) ((kind) == LZ_KIND_INSTANCE)
 #endif
 
+/* The `is` operator: a link is tested by its target (no target, no match). Anything else as usual. */
+bool lz_type_matches_through_link(const LzType *type, const LzValue *value) {
+    if (lz_value_is_link(value)) {
+        const LzLink *link = lz_value_as_link(value);
+        if (link->target == NULL) {
+            return false;
+        }
+        LzValue target = lz_value_object(link->target);
+        return lz_type_matches(type, &target);
+    }
+    return lz_type_matches(type, value);
+}
+
 bool lz_type_matches(const LzType *type, const LzValue *value) {
     if (lz_value_is_array(value)) {
         if ((type->kinds & LZ_KIND_ARRAY) == 0) {
@@ -380,6 +403,16 @@ bool lz_type_matches(const LzType *type, const LzValue *value) {
     if (value_kind == LZ_KIND_ERROR && (type->kinds & LZ_KIND_INSTANCE) != 0 && type->class_id != 0) {
         /* an error of a class that has this trait (or this class as a parent) */
         return lz_error_is_class((const LzError *)value->as.object, type->class_id);
+    }
+    if (value_kind == 0 && value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_LINK) {
+        /*
+         * A link cell is not the object it points at: it fits no class, array, dict, function or
+         * scalar type (a typed parameter, variable, array item or plain field would otherwise be
+         * handed a cell where code expects an instance). Only `any` takes it, because `any` makes
+         * no promise about the value. A link FIELD checks its target instead (class.c), and
+         * `link(x) is Node` asks lz_type_matches_through_link.
+         */
+        return (type->kinds & LZ_KINDS_ANY) == LZ_KINDS_ANY && type->class_id == 0;
     }
     if (INSTANCE_KIND_UNLIKELY(value_kind)) {
         return (type->kinds & LZ_KIND_INSTANCE) != 0 &&

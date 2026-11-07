@@ -487,6 +487,8 @@ Choices made where the specification was open:
   If outsiders must not change a collection, keep it private and offer methods
   (`pub fn add(self, x: int)`, `pub fn count(self) => len(self.items)`) instead of exposing it.
 * At most 64 fields per class and 64 classes per file.
+* `link` is not for strings or scalars (they are not shared objects): `link(5)` and `link("s")`
+  are a `TypeError`. `Table` and `region` are planned, not available yet.
 
 ## Memory and cycles
 
@@ -494,10 +496,28 @@ Objects are counted like arrays: an object is a container node in every cycle me
 
 * A cycle that goes only through objects, arrays and dicts is **refused when stored**, with the
   field named: `a.next = b` after `b.next = a`. `a.items.push(a)` keeps the existing array
-  message.
+  message. The help line points at `link` (§ below).
 * A cycle through a closure (a method that stores a lambda capturing `self` in a field, or a
   stored bound method `self.f = self.method`) is collected by the skink collector, which
   treats objects and bound methods as nodes.
+* A `pub link parent: Node = nil` field holds a **non-owning** reference: it neither raises the
+  target's count nor closes a cycle. Use it for a pointer back to the owner, an observer or a
+  cache entry. Reading the field gives the target, or `nil` once the target was freed; `link(x)`
+  builds a standalone link with `.target` and `.alive`. A link can point at an instance, an
+  array, a dict, a closure or a function, never at a string or a number.
+
+  ```lizard
+  class Node {
+      pub name: string
+      pub link parent: Node = nil
+      pub children: Node[] = []
+  }
+  let root = Node(name: "root")
+  let kid = Node(name: "kid", parent: root)   # no cycle: the link does not hold root
+  root.children.push(kid)
+  ```
+
+  See `docs/MEMORY.md` for ownership, the collector and how to choose.
 * Failed constructions (wrong arguments, `init` throwing) and objects held by closures leave no
   live objects; the tests check `live_objects == 0` and run under ASan/UBSan/LSan.
 
@@ -536,9 +556,8 @@ code for classes in stage 1.
 
 Still parsed and refused with `... is not supported yet`: `pub class`, and `trait` or `operator`
 written inside a trait's body (`operators in traits are not supported yet`). Stage 3a added
-`extend` and `error` as a class (above). Left for later: stage 3b (reference cycles through
-objects: the refusal is in `lz_instance_store`, and the skink would start from object stores as it
-does for closures), the constructor, `init`, getters and operators in plain VM frames (see "Nested
-calls"), JIT for methods, patterns of `is` in `switch`, modules, `extend` of a trait, and a
-per-class method cache (member lookup is one function, `lz_class_lookup`; `vm->ext_version`
-changes with every `extend`).
+`extend` and `error` as a class (above). Left for later: a full cycle collector (the refusal of cycles through arrays, dicts and owning
+fields stays; `link` covers the back-pointer case, see `docs/MEMORY.md`), `Table` and `region`, the
+constructor, `init`, getters and operators in plain VM frames (see "Nested calls"), JIT for
+methods, patterns of `is` in `switch`, modules, `extend` of a trait, and a per-class method cache
+(member lookup is one function, `lz_class_lookup`; `vm->ext_version` changes with every `extend`).

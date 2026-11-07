@@ -468,7 +468,7 @@ or a second positional one, is an error (`unexpected named argument` at compile 
 `e.data` (`nil` when none was given), read only like the others; a container in `data` is shared, not
 copied. An error and what it carries follow the rule of arrays and dicts: a store that would make a
 cycle through an error, such as putting the error in the dict that is its `data`, is refused
-(`cannot store a dict inside itself (reference cycles are not supported)`, a `ValueError`).
+(`a value cannot contain itself; for a pointer back to the owner, use a link field`, a `ValueError`).
 
 **Errors are values.** `e.message` and `e.kind` are strings and `e.trace` is an array of strings
 `name (file:line:column)`, innermost first, as many frames as an uncaught error reports (16).
@@ -615,6 +615,16 @@ println(p is Dog, p is Speaker)     # true true
 ```
 
 See `examples/inheritance.lz`, `examples/traits.lz` and `examples/operators.lz`.
+
+### Links: back-pointers without cycles
+
+An owning field cannot point back at the object that owns it: a store that would close a cycle is
+refused. A field declared `pub link parent: Node = nil` is the way to keep a back-pointer, an
+observer or a cache entry. A link does not own its target (it does not raise its count and does not
+take part in the cycle check), so `root.children.push(kid)` stays a tree even though `kid.parent`
+is `root`; reading `kid.parent` gives `root`, or `nil` once `root` was freed. `link(x)` builds a
+standalone link with `.target` and `.alive`. Links work for instances, arrays, dicts, closures and
+functions, not for strings or scalars. See `examples/links.lz` and [docs/MEMORY.md](docs/MEMORY.md).
 
 ### Strings
 
