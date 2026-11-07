@@ -28,6 +28,8 @@ void lz_heap_init(LzHeap *heap) {
     heap->alloc_period = 0;
     heap->alloc_countdown = 0;
     heap->in_hook = false;
+    heap->on_link_freed = NULL;
+    heap->on_link_freed_context = NULL;
 }
 
 void lz_heap_destroy(LzHeap *heap) {
@@ -103,6 +105,7 @@ void *lz_heap_alloc(LzHeap *heap, LzObjType type, size_t size) {
     object->refcount = 1;
     object->type = type;
     object->trial = 0;
+    object->linked = 0;
     if (heap->head != NULL) {
         heap->head->prev = object;
     }
@@ -192,6 +195,9 @@ void lz_object_release(LzHeap *heap, LzObject *object) {
         object->next = heap->pending;
         heap->pending = object;
         return;
+    }
+    if (object->linked && heap->on_link_freed != NULL) {
+        heap->on_link_freed(heap->on_link_freed_context, object); /* empty the links to it first */
     }
     heap->draining = true;
     lz_object_finalize(heap, object);

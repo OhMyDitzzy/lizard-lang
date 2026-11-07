@@ -1,0 +1,19 @@
+# The same big structure put N times into a container that is kept alive: sharing must not copy.
+class Item {
+    pub value: int
+}
+
+let N = 2000
+let big: Item[] = []
+let i = 0
+while i < 1000 {
+    big.push(Item(value: i))
+    i += 1
+}
+let outer = []
+i = 0
+while i < N {
+    outer.push(big)
+    i += 1
+}
+println(len(outer))

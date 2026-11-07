@@ -8,10 +8,12 @@ struct LzVM;
 /*
  * Skink, the cycle collector of Lizard.
  *
- * Reference counting frees everything except cycles. In Lizard a cycle can only
- * be built through a closure and one of its upvalues (an array that holds itself
- * is refused when it is stored), and the usual moment it closes is when a frame
- * returns and the captured variable moves from the stack into the upvalue. Skink
+ * Reference counting frees everything except cycles. In Lizard a cycle cannot be
+ * built by storing a value into itself (an array, a dict and an instance field all
+ * refuse it, and a `link` field does not own its target), so the only cycles left
+ * are those a closure and one of its upvalues form, and the usual moment such a
+ * cycle closes is when a frame returns and the captured variable moves from the
+ * stack into the upvalue. Skink
  * looks for garbage exactly there, like a lizard shedding its tail where it
  * breaks off, and never scans the whole heap:
  *
@@ -100,6 +102,16 @@ typedef struct LzSkinkStats {
     uint64_t full_nodes;   /* objects those passes visited: each one once per pass, however many upvalues share it */
     uint64_t reclaims;     /* of the full passes, those that ran before --max-heap refused an allocation */
     uint64_t reclaimed;    /* heap bytes freed by full passes while the program ran */
+    /*
+     * Timing: filled only when the CLI asked for heap statistics (LzSkink.timing), because reading
+     * the clock on every trial would make the collector measurable in the program's own time.
+     */
+    uint64_t trial_ns;      /* total time spent in trials since the last one that ran longer */
+    uint64_t worst_trial_ns; /* the longest single trial */
+    uint64_t full_ns;       /* total time spent in full passes */
+    uint64_t worst_full_ns; /* the longest single full pass */
+    uint64_t link_live;     /* link cells alive at the end of the program */
+    uint64_t link_cancelled; /* link cells emptied because their target was freed */
 } LzSkinkStats;
 
 typedef struct LzSkink {
@@ -111,6 +123,8 @@ typedef struct LzSkink {
      * destroyed whole does not need. On by default; the CLI turns it off unless the report is wanted.
      */
     bool final_sweep;
+    /* Read the clock around trials and full passes so the report can show the worst pause. */
+    bool timing;
     size_t pending_count;
     LzUpvalue *pending[LZ_SKINK_PENDING_MAX]; /* every entry owns one reference */
     uint64_t ticks;

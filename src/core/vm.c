@@ -1,5 +1,6 @@
 #include "lizard/vm.h"
 #include "lizard/class.h"
+#include "lizard/link.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -53,6 +54,11 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->class_registry_capacity = 0;
     vm->native_with = NULL;
     vm->native_copy = NULL;
+    vm->link_buckets = NULL;
+    vm->link_bucket_count = 0;
+    vm->link_count = 0;
+    vm->link_targets = 0;
+    vm->link_cancelled = 0;
     lz_skink_init(&vm->skink);
     vm->heap.reclaim = lz_skink_reclaim; /* before --max-heap refuses an allocation */
     vm->heap.reclaim_context = vm;
@@ -60,6 +66,8 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->heap.on_alloc_context = vm;
     vm->heap.alloc_period = LZ_SKINK_ALLOC_PERIOD;
     vm->heap.alloc_countdown = LZ_SKINK_ALLOC_PERIOD;
+    vm->heap.on_link_freed = lz_link_release_hook; /* a dying link target empties the links to it */
+    vm->heap.on_link_freed_context = vm;
 }
 
 void lz_vm_set_heap_limit(LzVM *vm, size_t bytes) {
@@ -135,6 +143,7 @@ void lz_vm_free(LzVM *vm) {
     lz_writer_flush(&vm->err);
     lz_vm_release_roots(vm);
     lz_heap_destroy(&vm->heap);
+    lz_link_table_free(vm);
     free(vm->class_registry);
     vm->class_registry = NULL;
 }

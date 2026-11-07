@@ -132,7 +132,7 @@ LzErrorKind lz_error_classify(LzStatus status, const char *message) {
         has(message, "square root of a negative") || has(message, "cannot compare nan") ||
         has(message, "cannot sort nan") || has(message, "array is empty") ||
         has(message, "too long") || has(message, "too large") || has(message, "too many") ||
-        has(message, "inside itself") || has(message, "changed size during iteration") ||
+        has(message, "cannot contain itself") || has(message, "changed size during iteration") ||
         has(message, "remove(): ")) {
         return LZ_ERROR_VALUE;
     }

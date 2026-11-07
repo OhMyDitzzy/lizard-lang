@@ -1,0 +1,25 @@
+# A tree of N instances, each with a link back to its parent: growing N must stay linear.
+class Node {
+    pub link parent: Node = nil
+    pub children: Node[] = []
+}
+
+let N = 100000
+let nodes = [Node()]
+let i = 1
+let next = 0
+while len(nodes) < N {
+    let parent = nodes[next]
+    next += 1
+    let a = Node(parent: parent)
+    parent.children.push(a)
+    nodes.push(a)
+    if len(nodes) < N {
+        let b = Node(parent: parent)
+        parent.children.push(b)
+        nodes.push(b)
+    }
+    i += 1
+}
+println(len(nodes))
+nodes = nil

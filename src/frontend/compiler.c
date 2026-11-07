@@ -6071,6 +6071,24 @@ static void class_member(Parser *parser, LzClass *cls) {
             is_override = true;
         }
     }
+    /*
+     * `pub link name: T` marks a field whose value is a non-owning reference. `link` is a word
+     * only when a name follows it, so a field named `link` keeps working.
+     */
+    bool is_link = false;
+    LzToken link_token = parser->current;
+    if (word_is(parser, &link_token, "link")) {
+        LzTokenType next = next_token_type(parser);
+        /*
+         * A name after `link` makes it the modifier (`link x: T`, `link get x()`); `link fn` and
+         * `link const` are not fields, and the member check below rejects them with one message.
+         * Anything else (`link: int`, `link`) keeps `link` as the field's own name.
+         */
+        if (next == LZ_TOKEN_IDENTIFIER || next == LZ_TOKEN_FN || next == LZ_TOKEN_CONST) {
+            advance(parser);
+            is_link = true;
+        }
+    }
     if (word_is(parser, &parser->current, "operator")) {
         LzTokenType after = next_token_type(parser);
         if (after != LZ_TOKEN_COLON && after != LZ_TOKEN_EQUAL && after != LZ_TOKEN_NEWLINE &&
@@ -6106,6 +6124,10 @@ static void class_member(Parser *parser, LzClass *cls) {
     }
     if (read_only && kind != LZ_MEMBER_FIELD) {
         error_at(parser, &first, "'read' only applies to fields");
+        return;
+    }
+    if (is_link && kind != LZ_MEMBER_FIELD) {
+        error_at(parser, &link_token, "a link can only be a field");
         return;
     }
     if (is_override && (kind == LZ_MEMBER_FIELD || kind == LZ_MEMBER_CONST)) {
@@ -6172,6 +6194,7 @@ static void class_member(Parser *parser, LzClass *cls) {
             return;
         }
         size_t index = cls->member_count - 1;
+        cls->members[index].is_link = is_link ? 1 : 0;
         if (match(parser, LZ_TOKEN_COLON)) {
             LzType declared;
             if (parse_type_union(parser, &declared)) {

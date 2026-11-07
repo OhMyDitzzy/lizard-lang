@@ -271,8 +271,8 @@ LzStatus lz_dict_check_store(LzVM *vm, LzDict *dict, const LzValue *value) {
         }
         if (cycle > 0) {
             return lz_vm_set_error(vm, LZ_ERR_RUNTIME,
-                                   "cannot store a dict inside itself (reference cycles are not "
-                                   "supported)");
+                                   "a value cannot contain itself; for a pointer back to the owner, use a "
+                                   "link field (pub link parent: Node = nil)");
         }
     }
     if (!lz_dict_value_fits(dict, value)) {

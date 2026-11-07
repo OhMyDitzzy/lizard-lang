@@ -14,7 +14,8 @@ typedef enum LzObjType {
     LZ_OBJ_ERROR,    /* an error value: a kind, a message and a trace, see lizard/error.h */
     LZ_OBJ_CLASS,    /* a class declared with `class`, see lizard/class.h */
     LZ_OBJ_INSTANCE, /* an object made by calling a class */
-    LZ_OBJ_BOUND     /* a method tied to its receiver (`p.sum`), see lizard/class.h */
+    LZ_OBJ_BOUND,    /* a method tied to its receiver (`p.sum`), see lizard/class.h */
+    LZ_OBJ_LINK      /* a non-owning reference to another object, see lizard/link.h */
 } LzObjType;
 
 /*
@@ -34,6 +35,12 @@ typedef struct LzObject {
      * it ends and before it frees anything.
      */
     uint32_t trial;
+    /*
+     * Set while this object is a live link target, so that its release can tell the VM's link
+     * table to drop the reference before the memory goes away. Lives in the padding after
+     * `trial`, so no JIT offset moves.
+     */
+    uint8_t linked;
 } LzObject;
 
 #define LZ_HEAP_UNLIMITED SIZE_MAX
@@ -76,6 +83,12 @@ typedef struct LzHeap {
     uint32_t alloc_period;
     uint32_t alloc_countdown;
     bool in_hook; /* a hook is running: neither is re-entered */
+    /*
+     * Optional: called with an object whose `linked` bit is set, just before it is finalized,
+     * so the VM can empty the links that point at it while its memory is still valid.
+     */
+    void (*on_link_freed)(void *context, LzObject *object);
+    void *on_link_freed_context;
 } LzHeap;
 
 void lz_heap_init(LzHeap *heap);

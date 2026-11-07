@@ -1,3 +1,7 @@
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "lizard/skink.h"
 
 #include "lizard/array.h"
@@ -8,6 +12,7 @@
 
 #include <assert.h>
 #include <stddef.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -156,6 +161,7 @@ static bool is_node(const LzObject *object) {
     case LZ_OBJ_NATIVE:
     case LZ_OBJ_FUNCTION:
     case LZ_OBJ_CLASS:
+    case LZ_OBJ_LINK: /* a link owns nothing: its target dies on its own, the cell is emptied then */
         break;
     }
     return false;
@@ -192,6 +198,7 @@ static bool may_join_cycle(const LzValue *value) {
     case LZ_OBJ_NATIVE:
     case LZ_OBJ_FUNCTION:
     case LZ_OBJ_UPVALUE:
+    case LZ_OBJ_LINK:
         break;
     }
     return false;
@@ -218,6 +225,7 @@ static size_t slot_count(const LzObject *node) {
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
     case LZ_OBJ_FUNCTION:
+    case LZ_OBJ_LINK:
         break;
     }
     return 0;
@@ -304,6 +312,7 @@ static bool each_edge(Trial *trial, LzObject *node, EdgeFn visit) {
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
     case LZ_OBJ_FUNCTION:
+    case LZ_OBJ_LINK:
         break;
     }
     return true;
@@ -559,6 +568,7 @@ static void clear_edges(LzVM *vm, LzObject *node) {
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
     case LZ_OBJ_FUNCTION:
+    case LZ_OBJ_LINK:
         break;
     }
 }
@@ -632,11 +642,32 @@ static TrialResult trial_from(LzVM *vm, LzUpvalue *suspect, size_t *freed) {
     return finish_trial(vm, &trial, freed);
 }
 
+/* Nanoseconds on a monotonic clock, or 0 when nobody is timing. */
+static uint64_t trial_now(const LzSkink *skink) {
+    if (!skink->timing) {
+        return 0;
+    }
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+        return 0;
+    }
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
 static void run_trial(LzVM *vm, LzUpvalue *root) {
     LzSkinkStats *stats = &vm->skink.stats;
     stats->trials++;
     size_t freed = 0;
-    switch (trial_from(vm, root, &freed)) {
+    uint64_t started = trial_now(&vm->skink);
+    TrialResult result = trial_from(vm, root, &freed);
+    if (vm->skink.timing) {
+        uint64_t took = trial_now(&vm->skink) - started;
+        stats->trial_ns += took;
+        if (took > stats->worst_trial_ns) {
+            stats->worst_trial_ns = took;
+        }
+    }
+    switch (result) {
     case TRIAL_FREED:
         stats->cycles++;
         stats->objects += freed;
@@ -778,6 +809,7 @@ static bool full_pass_once(LzVM *vm, bool during_run) {
     if (!watching(skink)) {
         return true; /* nothing to look at: no pass, no memory, no statistics */
     }
+    uint64_t started = trial_now(skink);
     Trial trial;
     if (!trial_init_growable(&trial, skink, 1024)) {
         return false;
@@ -813,6 +845,13 @@ static bool full_pass_once(LzVM *vm, bool during_run) {
     if (result == TRIAL_FREED) {
         skink->stats.cycles++;
         skink->stats.objects += freed;
+    }
+    if (skink->timing) {
+        uint64_t took = trial_now(skink) - started;
+        skink->stats.full_ns += took;
+        if (took > skink->stats.worst_full_ns) {
+            skink->stats.worst_full_ns = took;
+        }
     }
     /* What is left was just looked at thoroughly: let it back off to the slowest schedule. */
     for (size_t level = 0; level + 1 < LZ_SKINK_LEVELS; level++) {
@@ -863,6 +902,7 @@ static void grow_pass(LzVM *vm) {
 void lz_skink_init(LzSkink *skink) {
     skink->enabled = true;
     skink->final_sweep = true;
+    skink->timing = false;
     skink->pending_count = 0;
     skink->ticks = 0;
     skink->closed_any = false;

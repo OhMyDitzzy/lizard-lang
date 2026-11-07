@@ -8,6 +8,7 @@
 #include "lizard/array.h"
 #include "lizard/dict.h"
 #include "lizard/error.h"
+#include "lizard/link.h"
 #include "lizard/native.h"
 #include "lizard/suggest.h"
 
@@ -892,6 +893,9 @@ static LzStatus check_field_type(LzVM *vm, const LzClass *cls, const LzMember *m
                                  const LzValue *value) {
     const LzType *type = &member->type;
     bool fits;
+    if (member->is_link && value->type == LZ_VAL_NIL) {
+        return LZ_OK; /* a link field may always be nil: it means "points at nothing" */
+    }
     if (lz_value_is_array(value)) {
         LzStatus charged = lz_vm_charge_fuel(vm, lz_array_cost(lz_value_as_array(value)->count));
         if (charged != LZ_OK) {
@@ -918,9 +922,34 @@ static LzStatus check_field_type(LzVM *vm, const LzClass *cls, const LzMember *m
     return status;
 }
 
+static LzStatus link_value_for(LzVM *vm, const LzValue *value, LzValue *cell, LzValue *made);
+
 LzStatus lz_instance_store(LzVM *vm, LzInstance *instance, const LzMember *member,
                            const LzValue *value) {
     LzClass *cls = instance->cls;
+    if (member->is_link) {
+        /* The type is checked against the target, never the cell; links do not make cycles. */
+        LzValue cell = lz_value_nil();
+        LzValue made = lz_value_nil();
+        LzStatus status = link_value_for(vm, value, &cell, &made);
+        if (status != LZ_OK) {
+            return status;
+        }
+        LzValue target = lz_value_is_link(&cell) ? lz_link_deref(lz_value_as_link(&cell)) : lz_value_nil();
+        status = check_field_type(vm, cls, member, &target);
+        lz_value_release(&vm->heap, &target);
+        if (status != LZ_OK) {
+            lz_value_release(&vm->heap, &cell);
+            lz_value_release(&vm->heap, &made);
+            return status;
+        }
+        LzValue old = instance->fields[member->slot];
+        instance->fields[member->slot] = cell;
+        instance->unset &= ~((uint64_t)1 << member->slot);
+        lz_value_release(&vm->heap, &old);
+        lz_value_release(&vm->heap, &made); /* the field keeps its own reference */
+        return LZ_OK;
+    }
     LzStatus status = check_field_type(vm, cls, member, value);
     if (status != LZ_OK) {
         return status;
@@ -936,7 +965,9 @@ LzStatus lz_instance_store(LzVM *vm, LzInstance *instance, const LzMember *membe
             return lz_vm_out_of_memory(vm);
         }
         if (cycle > 0) {
-            return fail(vm, LZ_ERR_RUNTIME, "a value cannot contain itself; keep an id or a name instead",
+            return fail(vm, LZ_ERR_RUNTIME,
+                        "a value cannot contain itself; for a pointer back to the owner, use a link "
+                        "field (pub link parent: Node = nil)",
                         "cannot store: this would create a reference cycle (through field '%s' of %s)",
                         member->name->data, cls->name->data);
         }
@@ -1245,6 +1276,24 @@ LzStatus lz_instance_copy(LzVM *vm, const LzInstance *source, LzValue *result) {
         lz_value_retain(&copy->fields[i]);
         lz_note_container_store(&vm->heap, &copy->fields[i]);
     }
+    /* A link field gets a fresh cell pointing at the same target, so the two objects do not share one. */
+    for (size_t i = 0; i < source->cls->field_count; i++) {
+        const LzMember *member = field_at(source->cls, (uint16_t)i);
+        if (member->is_link && lz_value_is_link(&copy->fields[i])) {
+            const LzLink *from = lz_value_as_link(&copy->fields[i]);
+            LzLink *to = lz_link_new(&vm->heap, from->target);
+            if (to == NULL) {
+                lz_instance_finalize(&vm->heap, copy); /* its fields are released, the bytes stay owned by copy */
+                return lz_vm_out_of_memory(vm);
+            }
+            if (from->target != NULL) {
+                lz_link_track(vm, to);
+            }
+            LzValue fresh = lz_value_object(&to->base);
+            lz_value_release(&vm->heap, &copy->fields[i]);
+            copy->fields[i] = fresh;
+        }
+    }
     copy->unset = source->unset;
     *result = lz_value_object(&copy->base);
     return LZ_OK;
@@ -1440,12 +1489,67 @@ static LzObject *make_native(LzVM *vm, const char *name, LzNativeFn fn, int max_
 
 /* ---- member access ---- */
 
+/*
+ * A link field stores a cell, not the object; reading it gives the target (or nil once the
+ * target is gone). Everywhere else in class.c the cell is the field's value, which is just an
+ * object with no edges of its own.
+ */
 static LzStatus read_field(LzVM *vm, const LzInstance *instance, const LzMember *member, LzValue *out) {
     if (((instance->unset >> member->slot) & 1u) != 0) {
         return unset_error(vm, instance->cls, member);
     }
     *out = instance->fields[member->slot];
     lz_value_retain(out);
+    if (member->is_link && lz_value_is_link(out)) {
+        LzValue target = lz_link_deref(lz_value_as_link(out));
+        lz_value_release(&vm->heap, out);
+        *out = target;
+    }
+    return LZ_OK;
+}
+
+/*
+ * The cell a link field should hold for `value`: the value itself when it is already a link,
+ * link(nil) for nil, and a fresh cell otherwise. *made receives a reference the caller owns when
+ * a cell was made (and must release), else nil. Fails with the TypeError of link().
+ */
+static LzStatus link_value_for(LzVM *vm, const LzValue *value, LzValue *cell, LzValue *made) {
+    *made = lz_value_nil();
+    if (lz_value_is_link(value)) {
+        *cell = *value;
+        lz_value_retain(cell); /* the caller releases both `cell` (stored) and `made` */
+        return LZ_OK;
+    }
+    LzObject *target = NULL;
+    if (value->type == LZ_VAL_OBJECT && LZ_OBJ_LINK != value->as.object->type) {
+        switch (value->as.object->type) {
+        case LZ_OBJ_INSTANCE:
+        case LZ_OBJ_ARRAY:
+        case LZ_OBJ_DICT:
+        case LZ_OBJ_CLOSURE:
+        case LZ_OBJ_FUNCTION:
+            target = value->as.object;
+            break;
+        default:
+            break;
+        }
+    }
+    if (target == NULL && value->type != LZ_VAL_NIL) {
+        return lz_vm_set_error(
+            vm, LZ_ERR_TYPE,
+            "link() needs an object that can be shared (instance, array, dict or function), got %s",
+            lz_value_kind_name(value));
+    }
+    LzLink *link = lz_link_new(&vm->heap, target);
+    if (link == NULL) {
+        return lz_vm_out_of_memory(vm);
+    }
+    if (target != NULL) {
+        lz_link_track(vm, link);
+    }
+    *made = lz_value_object(&link->base);
+    *cell = *made;
+    lz_value_retain(cell); /* the caller releases both: `cell` stays in the field, `made` is dropped */
     return LZ_OK;
 }
 
@@ -1548,6 +1652,54 @@ LzStatus lz_vm_ext_get(LzVM *vm, uint64_t owner, const LzValue *target, const Lz
     return LZ_OK;
 }
 
+/*
+ * A link stands in for its target when a method or an extension is looked up on it, so `n.parent`
+ * (a link field) can call the methods of the object it points at.
+ */
+static bool as_link_target(const LzValue *value, LzValue *target) {
+    if (!lz_value_is_link(value)) {
+        return false;
+    }
+    *target = lz_link_deref(lz_value_as_link(value));
+    return true;
+}
+
+LzStatus lz_vm_link_target(LzVM *vm, const LzValue *value, LzValue *target, bool *is_link) {
+    (void)vm;
+    *is_link = as_link_target(value, target);
+    return LZ_OK;
+}
+
+LzStatus lz_vm_link_member_get(LzVM *vm, uint64_t owner, const LzValue *value, const LzString *name,
+                               LzValue *result) {
+    LzValue target = lz_link_deref(lz_value_as_link(value));
+    if (target.type == LZ_VAL_NIL) {
+        return lz_vm_set_error(vm, LZ_ERR_TYPE, "this link points at nothing any more (its object was freed)");
+    }
+    LzStatus status = lz_vm_member_get(vm, owner, &target, name, result, false);
+    lz_value_release(&vm->heap, &target);
+    return status;
+}
+
+LzStatus lz_vm_link_member_set(LzVM *vm, uint64_t owner, const LzValue *value, const LzString *name,
+                               const LzValue *assigned) {
+    LzValue target = lz_link_deref(lz_value_as_link(value));
+    if (target.type == LZ_VAL_NIL) {
+        return lz_vm_set_error(vm, LZ_ERR_TYPE, "this link points at nothing any more (its object was freed)");
+    }
+    LzStatus status = lz_vm_member_set(vm, owner, &target, name, assigned);
+    lz_value_release(&vm->heap, &target);
+    return status;
+}
+
+LzStatus lz_vm_link_ext_get(LzVM *vm, uint64_t owner, const LzValue *value, const LzString *name,
+                           LzValue *result, bool *found) {
+    LzValue target = lz_link_deref(lz_value_as_link(value));
+    LzStatus status = lz_vm_ext_get(vm, owner, &target, name, result, found);
+    lz_value_release(&vm->heap, &target);
+    return status;
+}
+
 LzStatus lz_vm_member_set(LzVM *vm, uint64_t owner, const LzValue *target,
                           const LzString *name, const LzValue *value) {
     if (lz_value_is_class(target)) {
@@ -1624,7 +1776,20 @@ static LzStatus install_copy_with(LzVM *vm, const LzString *name, size_t fallbac
 static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, int mode,
                                 size_t receiver_index) {
     LzValue receiver = vm->stack[receiver_index];
-    LzInstance *instance = lz_value_is_instance(&receiver) ? lz_value_as_instance(&receiver) : payload_of(&receiver);
+    /*
+     * A method called through a link runs on the target's class, but `self` stays the link in the
+     * receiver slot, so a method that reads its own fields goes through the link like any caller.
+     */
+    LzValue stand = receiver;
+    if (lz_value_is_link(&stand)) {
+        /* No retain: the lookup only borrows the target, and it owns nothing when it returns. */
+        const LzLink *cell = (const LzLink *)stand.as.object;
+        stand = cell->target != NULL ? lz_value_object(cell->target) : lz_value_nil();
+    }
+    LzInstance *instance = lz_value_is_instance(&stand) ? lz_value_as_instance(&stand) : payload_of(&stand);
+    if (instance == NULL) {
+        return lz_vm_set_error(vm, LZ_ERR_TYPE, "this link points at nothing any more (its object was freed)");
+    }
     LzClass *cls = instance->cls;
     size_t fallback = receiver_index + 1;
     LzFound hit;
@@ -1685,6 +1850,17 @@ static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, 
 
 static LzStatus class_callee(LzVM *vm, uint64_t owner, const LzString *name, size_t receiver_index) {
     LzValue receiver = vm->stack[receiver_index];
+    if (lz_value_is_link(&receiver)) {
+        /* The class is the target; `self` for a static is the class itself, so the slot becomes it. */
+        LzValue target = lz_link_deref(lz_value_as_link(&receiver));
+        if (target.type == LZ_VAL_NIL) {
+            return lz_vm_set_error(vm, LZ_ERR_TYPE, "this link points at nothing any more (its object was freed)");
+        }
+        lz_value_retain(&target);
+        lz_value_release(&vm->heap, &vm->stack[receiver_index]);
+        vm->stack[receiver_index] = target;
+        receiver = target;
+    }
     LzClass *cls = lz_value_as_class(&receiver);
     LzFound found;
     if (!lz_class_lookup(cls, name, &found)) {
@@ -1984,6 +2160,26 @@ LzStatus lz_vm_super_lookup(LzVM *vm, uint64_t owner, const LzString *name, int 
 LzStatus lz_vm_method_lookup(LzVM *vm, uint64_t owner, const LzString *name, int mode,
                              size_t receiver_index) {
     const LzValue *receiver = &vm->stack[receiver_index];
+    if (lz_value_is_link(receiver)) {
+        /* A method call goes to the target's class; the receiver slot keeps the link, which a
+         * field of one of its methods may still read. A dead link has no methods. */
+        LzValue target = lz_link_deref(lz_value_as_link(receiver));
+        if (target.type != LZ_VAL_OBJECT) {
+            if (mode != 0) {
+                return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "this link points at nothing any more (its object was freed)");
+            }
+            return LZ_OK;
+        }
+        bool is_instance = lz_value_is_instance(&target);
+        bool is_class = lz_value_is_class(&target);
+        lz_value_release(&vm->heap, &target);
+        if (is_instance) {
+            return instance_callee(vm, owner, name, mode, receiver_index);
+        }
+        if (is_class) {
+            return class_callee(vm, owner, name, receiver_index);
+        }
+    }
     if (lz_value_is_instance(receiver)) {
         return instance_callee(vm, owner, name, mode, receiver_index);
     }

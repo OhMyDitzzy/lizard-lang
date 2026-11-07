@@ -377,8 +377,8 @@ LzStatus lz_array_check_store(LzVM *vm, LzArray *array, const LzValue *value) {
         }
         if (cycle > 0) {
             return lz_vm_set_error(vm, LZ_ERR_RUNTIME,
-                                   "cannot store an array inside itself (reference cycles are not "
-                                   "supported)");
+                                   "a value cannot contain itself; for a pointer back to the owner, use a "
+                                   "link field (pub link parent: Node = nil)");
         }
         if (array->element != NULL) {
             charged = lz_vm_charge_fuel(vm, lz_array_cost(lz_value_as_array(value)->count));

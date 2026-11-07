@@ -357,13 +357,13 @@ static void test_annotations(void) {
 
 static void test_cycles(void) {
     check_run_error("let d = {}\nd[\"self\"] = d\n",
-                    "cannot store a dict inside itself (reference cycles are not supported)", NULL);
+                    "a value cannot contain itself", NULL);
     check_run_error("let d = {}\nlet e = {\"d\": d}\nd[\"e\"] = e\n",
-                    "cannot store a dict inside itself", NULL);
+                    "a value cannot contain itself", NULL);
     check_run_error("let xs = []\nlet d = {\"xs\": xs}\npush(xs, d)\n",
-                    "cannot store", NULL);
+                    "a value cannot contain itself", NULL);
     check_run_error("let d = {}\nlet e = d\nlet f = {}\nf[\"x\"] = e\ne[\"y\"] = f\n",
-                    "cannot store a dict inside itself", NULL);
+                    "a value cannot contain itself", NULL);
     /* A shared (not cyclic) dict is fine. */
     check_output("let inner = {\"a\": 1}\nlet d = {\"x\": inner, \"y\": inner}\nprintln(d)\n",
                  "{\"x\": {\"a\": 1}, \"y\": {\"a\": 1}}\n");

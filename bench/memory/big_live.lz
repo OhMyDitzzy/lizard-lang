@@ -1,0 +1,17 @@
+# A big live heap that keeps allocating, so the growth full pass of the skink runs.
+class Item {
+    pub value: int
+}
+
+let live: Item[] = []
+let i = 0
+while i < 200000 {
+    live.push(Item(value: i))
+    i += 1
+}
+let j = 0
+while j < 200000 {
+    let drop = Item(value: j)
+    j += 1
+}
+println(len(live))

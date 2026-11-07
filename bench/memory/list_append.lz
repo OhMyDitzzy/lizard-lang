@@ -1,0 +1,16 @@
+# Appending to the tail of a list: each push is O(1), so total time must be linear.
+class Node {
+    pub value: int
+    pub link prev: Node = nil
+}
+
+let N = 100000
+let head = Node(value: 0)
+let tail = head
+let i = 1
+while i < N {
+    let n = Node(value: i, prev: tail)
+    tail = n
+    i += 1
+}
+println(N)

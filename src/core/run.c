@@ -3,6 +3,7 @@
 #include "lizard/arith.h"
 #include "lizard/array.h"
 #include "lizard/class.h"
+#include "lizard/link.h"
 #include "lizard/compare.h"
 #include "lizard/dict.h"
 #include "lizard/error.h"
@@ -789,6 +790,15 @@ static LzStatus set_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
             return LZ_OK;
         }
     }
+    if (lz_value_is_link(&target)) {
+        status = lz_vm_link_member_set(vm, current_owner(vm), &target, name, &value);
+        if (status != LZ_OK) {
+            return status;
+        }
+        pop(vm);
+        pop(vm);
+        return LZ_OK;
+    }
     if (!lz_value_is_instance(&target) && !lz_value_is_class(&target)) {
         return lz_vm_set_error(vm, LZ_ERR_TYPE, "cannot assign to field '%s' of %s", name->data,
                                lz_value_kind_name(&target));
@@ -970,6 +980,34 @@ static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool wr
         return malformed(vm, "stack underflow");
     }
     const LzValue *top = &vm->stack[vm->stack_count - 1];
+    if (lz_value_is_link(top)) {
+        if (write_check) {
+            return member_get_op(vm, name, false, true); /* the check wants the target's field */
+        }
+        if (name->length == 6 && memcmp(name->data, "target", 6) == 0) {
+            LzValue found = lz_link_deref(lz_value_as_link(top));
+            LzValue old = vm->stack[vm->stack_count - 1];
+            vm->stack[vm->stack_count - 1] = found;
+            lz_value_release(&vm->heap, &old);
+            return LZ_OK;
+        }
+        if (name->length == 5 && memcmp(name->data, "alive", 5) == 0) {
+            LzValue found = lz_value_bool(lz_value_as_link(top)->target != NULL);
+            LzValue old = vm->stack[vm->stack_count - 1];
+            vm->stack[vm->stack_count - 1] = found;
+            lz_value_release(&vm->heap, &old);
+            return LZ_OK;
+        }
+        LzValue found = lz_value_nil();
+        status = lz_vm_link_member_get(vm, current_owner(vm), top, name, &found);
+        if (status != LZ_OK) {
+            return status;
+        }
+        LzValue old = vm->stack[vm->stack_count - 1];
+        vm->stack[vm->stack_count - 1] = found;
+        lz_value_release(&vm->heap, &old);
+        return LZ_OK;
+    }
     if (lz_value_is_instance(top) || lz_value_is_class(top)) {
         return member_get_op(vm, name, false, write_check);
     }
@@ -978,7 +1016,11 @@ static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool wr
         LzValue result = lz_value_nil();
         bool found_ext = false;
         lz_value_retain(&target);
-        status = lz_vm_ext_get(vm, current_owner(vm), &target, name, &result, &found_ext);
+        if (lz_value_is_link(&target)) {
+            status = lz_vm_link_ext_get(vm, current_owner(vm), &target, name, &result, &found_ext);
+        } else {
+            status = lz_vm_ext_get(vm, current_owner(vm), &target, name, &result, &found_ext);
+        }
         if (status != LZ_OK) {
             lz_value_release(&vm->heap, &target);
             return status;
