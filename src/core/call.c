@@ -480,12 +480,20 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
     if (is_with) {
         vm->native_call_offset = call_offset;
         LzValue made = lz_value_nil();
-        if (count != 1 || !lz_value_is_instance(&vm->stack[callee_index + 1])) {
+        bool on_error = lz_value_is_error(&vm->stack[callee_index + 1]);
+        if (count != 1 || (!on_error && !lz_value_is_instance(&vm->stack[callee_index + 1]))) {
             drop_values(vm, named, named_count);
-            return lz_vm_set_error(vm, LZ_ERR_ARITY, "with() takes named fields, like p.with(x: 10)");
+            return lz_vm_set_error(vm, LZ_ERR_ARITY,
+                                   on_error ? "with() takes named fields, like e.with(needed: 5)"
+                                            : "with() takes named fields, like p.with(x: 10)");
         }
-        status = lz_instance_with(vm, lz_value_as_instance(&vm->stack[callee_index + 1]), named_count,
-                                  names->data, names->length, named, &made);
+        if (on_error) {
+            status = lz_error_with(vm, (const LzError *)vm->stack[callee_index + 1].as.object, named_count,
+                                   names->data, names->length, named, &made);
+        } else {
+            status = lz_instance_with(vm, lz_value_as_instance(&vm->stack[callee_index + 1]), named_count,
+                                      names->data, names->length, named, &made);
+        }
         drop_values(vm, named, named_count);
         if (status != LZ_OK) {
             return status;

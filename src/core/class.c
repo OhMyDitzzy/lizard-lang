@@ -1072,6 +1072,21 @@ static LzStatus construct_impl(LzVM *vm, LzClass *cls, size_t positional, const 
                     "%s is a trait and cannot be created; use a class that implements it", cls->name->data);
     }
     if (positional > cls->param_count) {
+        if (core != NULL) {
+            /* An error counts its message as the first argument: E takes at most 2 arguments (message, n), got 3 */
+            char list[256] = "message";
+            size_t used = strlen(list);
+            for (size_t i = 0; i < cls->param_count; i++) {
+                const LzString *field = field_at(cls, cls->params[i])->name;
+                if (used + field->length + 3 >= sizeof list) {
+                    (void)snprintf(list + used, sizeof list - used, ", ...");
+                    break;
+                }
+                used += (size_t)snprintf(list + used, sizeof list - used, ", %s", field->data);
+            }
+            return fail(vm, LZ_ERR_ARITY, NULL, "%s takes at most %zu argument%s (%s), got %zu", cls->name->data,
+                        cls->param_count + 1, cls->param_count + 1 == 1 ? "" : "s", list, positional + 1);
+        }
         return fail(vm, LZ_ERR_ARITY, NULL, "%s takes at most %zu argument%s, got %zu", cls->name->data,
                     cls->param_count, cls->param_count == 1 ? "" : "s", positional);
     }
@@ -1109,6 +1124,7 @@ static LzStatus construct_impl(LzVM *vm, LzClass *cls, size_t positional, const 
     if (core != NULL) {
         core->payload = instance; /* the creation reference moves to the error */
         instance->owner_error = &core->base;
+        instance->holders++; /* the error holds its payload, which the cycle check must see */
     }
     LzStatus status = LZ_OK;
     for (size_t i = 0; i < cls->param_count && status == LZ_OK; i++) {
@@ -1273,8 +1289,131 @@ LzStatus lz_instance_with(LzVM *vm, const LzInstance *source, size_t named_count
     return LZ_OK;
 }
 
+/* A new error with the message, kind, cause and data of `source` and a copy of its payload: no trace, no init. */
+static LzStatus error_clone(LzVM *vm, const LzError *source, LzError **out) {
+    LzError *error = NULL;
+    LzStatus status = lz_error_new(vm, source->kind, source->message->data, source->message->length, &error);
+    if (status != LZ_OK) {
+        return status;
+    }
+    lz_error_set_extra(vm, error, &source->cause, &source->data);
+    if (source->payload != NULL) {
+        const LzInstance *from = source->payload;
+        LzInstance *copy = instance_alloc(vm, from->cls);
+        if (copy == NULL) {
+            lz_object_release(&vm->heap, &error->base);
+            return lz_vm_out_of_memory(vm);
+        }
+        for (size_t i = 0; i < from->cls->field_count; i++) {
+            copy->fields[i] = from->fields[i];
+            lz_value_retain(&copy->fields[i]);
+            lz_note_container_store(&vm->heap, &copy->fields[i]);
+        }
+        copy->unset = from->unset;
+        error->payload = copy; /* the creation reference moves to the error */
+        copy->owner_error = &error->base;
+        copy->holders++;
+    }
+    *out = error;
+    return LZ_OK;
+}
+
+LzStatus lz_error_copy(LzVM *vm, const LzError *source, LzValue *result) {
+    LzError *error = NULL;
+    LzStatus status = error_clone(vm, source, &error);
+    if (status != LZ_OK) {
+        return status;
+    }
+    *result = lz_value_object(&error->base);
+    return LZ_OK;
+}
+
+LzStatus lz_error_with(LzVM *vm, const LzError *source, size_t named_count, const char *names,
+                       size_t names_length, const LzValue *named, LzValue *result) {
+    LzError *error = NULL;
+    LzStatus status = error_clone(vm, source, &error);
+    if (status != LZ_OK) {
+        return status;
+    }
+    LzClass *cls = error->payload != NULL ? error->payload->cls : NULL;
+    bool seen[LZ_CLASS_FIELDS_MAX] = {false};
+    bool seen_message = false;
+    bool seen_cause = false;
+    bool seen_data = false;
+    for (size_t k = 0; k < named_count && status == LZ_OK; k++) {
+        LzString *name = NULL;
+        if (name_at(vm, names, names_length, k, &name) == NULL) {
+            status = lz_vm_out_of_memory(vm);
+            break;
+        }
+        const LzValue *value = &named[k];
+        if (strcmp(name->data, "message") == 0) {
+            if (seen_message) {
+                status = fail(vm, LZ_ERR_ARITY, NULL, "'message' was given twice");
+            } else if (value->type != LZ_VAL_OBJECT || value->as.object->type != LZ_OBJ_STRING) {
+                status = lz_vm_set_error(vm, LZ_ERR_TYPE, "the message of an error must be a string");
+            } else {
+                seen_message = true;
+                LzString *old = error->message;
+                error->message = (LzString *)value->as.object;
+                lz_object_retain(&error->message->base);
+                lz_object_release(&vm->heap, &old->base);
+            }
+        } else if (strcmp(name->data, "cause") == 0) {
+            if (seen_cause) {
+                status = fail(vm, LZ_ERR_ARITY, NULL, "'cause' was given twice");
+            } else if (value->type != LZ_VAL_NIL && !lz_value_is_error(value)) {
+                status = lz_vm_set_error(vm, LZ_ERR_TYPE, "the cause of an error must be an error or nil");
+            } else {
+                seen_cause = true;
+                LzValue old = error->cause;
+                lz_value_retain(value);
+                error->cause = *value;
+                lz_value_release(&vm->heap, &old);
+            }
+        } else if (strcmp(name->data, "data") == 0) {
+            if (seen_data) {
+                status = fail(vm, LZ_ERR_ARITY, NULL, "'data' was given twice");
+            } else {
+                seen_data = true;
+                LzValue old = error->data;
+                lz_value_retain(value);
+                error->data = *value;
+                lz_note_container_store(&vm->heap, &error->data);
+                lz_value_release(&vm->heap, &old);
+            }
+        } else if (cls == NULL) {
+            status = fail(vm, LZ_ERR_ARITY, NULL, "%s has no field '%s'", error->kind_name->data, name->data);
+        } else {
+            size_t param = 0;
+            status = param_of(vm, cls, name, &param, cls->name->data);
+            if (status != LZ_OK) {
+                break;
+            }
+            if (seen[param]) {
+                status = fail(vm, LZ_ERR_ARITY, NULL, "'%s' was given twice", name->data);
+                break;
+            }
+            seen[param] = true;
+            status = lz_instance_store(vm, error->payload, field_at(cls, cls->params[param]), value);
+        }
+    }
+    if (status == LZ_OK && error->payload != NULL) {
+        status = finish_instance(vm, error->payload);
+    }
+    if (status != LZ_OK) {
+        lz_object_release(&vm->heap, &error->base);
+        return status;
+    }
+    *result = lz_value_object(&error->base);
+    return LZ_OK;
+}
+
 static LzStatus native_copy_fn(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
     (void)argc;
+    if (lz_value_is_error(&argv[0])) {
+        return lz_error_copy(vm, (const LzError *)argv[0].as.object, result);
+    }
     if (!lz_value_is_instance(&argv[0])) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "copy() needs an object");
     }
@@ -1283,8 +1422,10 @@ static LzStatus native_copy_fn(LzVM *vm, int argc, const LzValue *argv, LzValue 
 
 static LzStatus native_with_fn(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
     (void)argc;
-    (void)argv;
     (void)result;
+    if (lz_value_is_error(&argv[0])) {
+        return fail(vm, LZ_ERR_ARITY, NULL, "with() takes named fields, like e.with(needed: 5)");
+    }
     return fail(vm, LZ_ERR_ARITY, NULL, "with() takes named fields, like p.with(x: 10)");
 }
 
@@ -1466,6 +1607,20 @@ static LzStatus set_bound_callee(LzVM *vm, size_t index, const LzValue *callee, 
     return set_callee(vm, index, lz_value_object(&bound->base));
 }
 
+/* The natives behind x.with(...) and x.copy(), made when first needed. */
+static LzStatus install_copy_with(LzVM *vm, const LzString *name, size_t fallback) {
+    bool is_with = strcmp(name->data, "with") == 0;
+    LzObject **slot = is_with ? &vm->native_with : &vm->native_copy;
+    if (*slot == NULL) {
+        *slot = is_with ? make_native(vm, "with", native_with_fn, 255) : make_native(vm, "copy", native_copy_fn, 1);
+        if (*slot == NULL) {
+            return lz_vm_out_of_memory(vm);
+        }
+    }
+    lz_object_retain(*slot);
+    return set_callee(vm, fallback, lz_value_object(*slot));
+}
+
 static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, int mode,
                                 size_t receiver_index) {
     LzValue receiver = vm->stack[receiver_index];
@@ -1507,18 +1662,8 @@ static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, 
         }
     }
     /* Not a member: with() and copy() belong to every instance, then the builtin methods. */
-    bool is_with = strcmp(name->data, "with") == 0;
-    if (is_with || strcmp(name->data, "copy") == 0) {
-        LzObject **slot = is_with ? &vm->native_with : &vm->native_copy;
-        if (*slot == NULL) {
-            *slot = is_with ? make_native(vm, "with", native_with_fn, 1)
-                            : make_native(vm, "copy", native_copy_fn, 1);
-            if (*slot == NULL) {
-                return lz_vm_out_of_memory(vm);
-            }
-        }
-        lz_object_retain(*slot);
-        return set_callee(vm, fallback, lz_value_object(*slot));
+    if (strcmp(name->data, "with") == 0 || strcmp(name->data, "copy") == 0) {
+        return install_copy_with(vm, name, fallback);
     }
     if (mode == 0) {
         return LZ_OK; /* the fallback compiled with the call: a builtin method or a function of that name */
@@ -1866,6 +2011,9 @@ LzStatus lz_vm_method_lookup(LzVM *vm, uint64_t owner, const LzString *name, int
             return set_callee(vm, receiver_index + 1, callee);
         }
     }
+    if (lz_value_is_error(receiver) && (strcmp(name->data, "with") == 0 || strcmp(name->data, "copy") == 0)) {
+        return install_copy_with(vm, name, receiver_index + 1); /* every error has them */
+    }
     if (mode == 0) {
         return LZ_OK;
     }
@@ -1943,12 +2091,7 @@ bool lz_error_is_class(const LzError *error, uint64_t id) {
     if (error->payload == NULL) {
         return false;
     }
-    for (const LzClass *c = error->payload->cls; c != NULL; c = c->parent) {
-        if (c->id == id) {
-            return true;
-        }
-    }
-    return false;
+    return lz_class_is_a(error->payload->cls, id);
 }
 
 static bool builtin_error_field(const char *name) {
@@ -1969,6 +2112,13 @@ LzStatus lz_error_class_bind(LzVM *vm, LzClass *cls, uint8_t kind, uint8_t paren
         LzStatus status = lz_class_link(vm, cls, parent);
         if (status != LZ_OK) {
             return status;
+        }
+    }
+    if (cls->trait_count > 0) {
+        /* traits in the head: their contracts and conflicts are checked as for a class */
+        LzStatus checked = lz_class_finish(vm, cls);
+        if (checked != LZ_OK) {
+            return checked;
         }
     }
     LzStatus bound = lz_vm_error_set_class(vm, kind, cls);

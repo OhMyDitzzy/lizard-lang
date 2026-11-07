@@ -255,24 +255,11 @@ static bool walk_push(CycleWalk *walk, const LzObject *container) {
 
 /*
  * Looks at one value met on the way: a container is the target, or is opened later (once per
- * walk); an error leads to its cause and its data, a chain of errors one after the other.
+ * walk); an error leads to its cause, its data and its payload, a chain of errors one after the other.
  * The causes of an error were made before it, so that chain ends; the containers it leads to
  * are stamped, so none is opened twice.
  */
-static void walk_value(CycleWalk *walk, const LzValue *value, uint64_t *work) {
-    while (lz_value_is_error(value)) {
-        const LzError *error = (const LzError *)value->as.object;
-        (*work)++;
-        walk_value(walk, &error->data, work);
-        if (walk->result != 0) {
-            return;
-        }
-        value = &error->cause;
-    }
-    if (!lz_value_is_container(value)) {
-        return;
-    }
-    LzObject *inner = value->as.object;
+static void walk_object(CycleWalk *walk, LzObject *inner) {
     if (inner == walk->target) {
         walk->result = 1;
         return;
@@ -283,6 +270,29 @@ static void walk_value(CycleWalk *walk, const LzValue *value, uint64_t *work) {
     }
     *mark = walk->epoch;
     (void)walk_push(walk, inner);
+}
+
+static void walk_value(CycleWalk *walk, const LzValue *value, uint64_t *work) {
+    while (lz_value_is_error(value)) {
+        const LzError *error = (const LzError *)value->as.object;
+        (*work)++;
+        walk_value(walk, &error->data, work);
+        if (walk->result != 0) {
+            return;
+        }
+        if (error->payload != NULL) {
+            /* the fields of an error of a class live in its payload, a container like any instance */
+            walk_object(walk, &error->payload->base);
+            if (walk->result != 0) {
+                return;
+            }
+        }
+        value = &error->cause;
+    }
+    if (!lz_value_is_container(value)) {
+        return;
+    }
+    walk_object(walk, value->as.object);
 }
 
 int lz_containers_would_cycle(LzHeap *heap, const LzValue *value, const LzObject *target,

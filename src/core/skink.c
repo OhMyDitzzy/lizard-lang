@@ -550,6 +550,7 @@ static void clear_edges(LzVM *vm, LzObject *node) {
             LzInstance *payload = error->payload;
             error->payload = NULL;
             payload->owner_error = NULL;
+            payload->holders--;
             lz_object_release(&vm->heap, &payload->base);
         }
         break;

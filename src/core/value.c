@@ -343,6 +343,7 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
         lz_value_release(heap, &error->cause);
         if (error->payload != NULL) {
             error->payload->owner_error = NULL;
+            error->payload->holders--;
             lz_object_release(heap, &error->payload->base);
         }
         lz_drop_container_holder(&error->data);

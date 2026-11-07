@@ -266,6 +266,12 @@ bool lz_values_identical(const LzValue *a, const LzValue *b);
 
 /* Methods every instance has: with(...) and copy(). */
 LzStatus lz_instance_copy(LzVM *vm, const LzInstance *source, LzValue *result);
+/* copy() of an error: the message, kind, cause, data and fields; no trace, and init does not run. */
+LzStatus lz_error_copy(LzVM *vm, const struct LzError *source, LzValue *result);
+/* with() of an error: a copy with the named message, cause, data and fields replaced; init runs. */
+LzStatus lz_error_with(LzVM *vm, const struct LzError *source, size_t named_count, const char *names,
+                       size_t names_length, const LzValue *named, LzValue *result);
+
 LzStatus lz_instance_with(LzVM *vm, const LzInstance *source, size_t named_count, const char *names,
                           size_t names_length, const LzValue *named, LzValue *result);
 

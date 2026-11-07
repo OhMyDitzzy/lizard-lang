@@ -395,8 +395,24 @@ statement runs, so it is not hoisted, while a declaration without a body is, as 
 class is not a global value: `Name(...)` is the kind's constructor. `is_kind` (a bitset of the
 ancestor kinds in each error) lets type checks run without the VM.
 
-Not done: a trait in the head of an `error`, `with`/`copy` of an error with fields, `==` on the
-fields.
+* **Traits:** `error E : RuntimeError, Describe` takes the first name as the parent error kind and
+  the rest as traits. The contract is checked when the statement runs (`E does not implement 'x'
+  required by T`), defaults are methods of the error, `e is Describe` is true, and two traits
+  giving the same name conflict as in a `class`.
+* **`copy()` and `with()`:** `e.copy()` is a new error of the same kind with the message, the
+  fields, `cause` and `data` copied; it has no `trace` and `init` does not run. `e.with(needed: 5)`
+  copies, replaces the named `pub` fields (and `message`, `cause:`, `data:`), then runs `init`;
+  it has no `trace` either. Positional arguments are an `ArityError`. Both work on errors with
+  fields, plain errors and builtin kinds (`ValueError("x").with(message: "y")`).
+* **Constructor arity** counts the message: `E takes at most 2 arguments (message, needed), got 3`.
+* **Limit:** a script can have 256 error kinds, the 8 builtin ones included; one more is
+  `too many error kinds (limit is 256)`.
+* **Cycles:** an error counts as a holder of its payload, and the cycle check opens the payload,
+  `data` and `cause`. `self.items = [self]` in a method of an error class is refused with the usual
+  `cannot store: this would create a reference cycle` message. `e.data` and `e.cause` cannot be
+  assigned, so they cannot close a cycle later.
+
+Not done: `==` on the fields.
 
 ## Decisions
 

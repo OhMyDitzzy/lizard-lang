@@ -3153,6 +3153,11 @@ static Expr dot_call(Parser *parser, Expr receiver) {
     }
     Expr callee;
     bool classes = receiver_may_be_object(parser, &receiver);
+    if (!classes && (lz_type_possible_kinds(&receiver.type) & LZ_KIND_ERROR) != 0 && interned != NULL &&
+        ((interned->length == 4 && memcmp(interned->data, "with", 4) == 0) ||
+         (interned->length == 4 && memcmp(interned->data, "copy", 4) == 0))) {
+        classes = true; /* every error has copy() and with(): the run-time lookup finds them */
+    }
     int lookup_mode = 0;
     if (method != NULL) {
         (void)emit_constant(parser, *method);
@@ -6859,7 +6864,7 @@ static bool at_error_declaration(const Parser *parser) {
  * defaults and `init` are code). The kind itself is declared by the prescan, as without a body.
  */
 static void error_class_body(Parser *parser, const LzToken *name_token, uint8_t kind, bool has_body,
-                             bool parent_class) {
+                             bool parent_class, const LzToken *traits, size_t trait_count) {
     LzString *name = intern_token(parser, name_token);
     if (name == NULL) {
         return;
@@ -6914,6 +6919,19 @@ static void error_class_body(Parser *parser, const LzToken *name_token, uint8_t 
     uint16_t index = add_constant(parser, lz_value_object(&cls->base), true);
     lz_object_release(&parser->vm->heap, &cls->base);
     uint16_t name_index = add_constant(parser, lz_value_object(&name->base), true);
+    for (size_t i = 0; i < trait_count && parser->fatal == LZ_OK; i++) {
+        LzToken trait = traits[i];
+        (void)variable_at(parser, &trait);
+        LzString *trait_name = intern_token(parser, &trait);
+        if (trait_name == NULL) {
+            return;
+        }
+        uint16_t trait_index = add_constant(parser, lz_value_object(&trait_name->base), true);
+        emit_op_at(parser, LZ_OP_CLASS_LINK, trait.offset);
+        emit_u16_at(parser, index, trait.offset);
+        emit_u16_at(parser, trait_index, trait.offset);
+        emit_byte_at(parser, 1, trait.offset);
+    }
     emit_op_at(parser, LZ_OP_ERROR_CLASS, name_token->offset);
     emit_u16_at(parser, index, name_token->offset);
     emit_u16_at(parser, name_index, name_token->offset);
@@ -6937,6 +6955,8 @@ static void error_declaration(Parser *parser) {
     LzToken parent_token;
     memset(&parent_token, 0, sizeof parent_token);
     bool has_parent = false;
+    LzToken traits[8];
+    size_t trait_count = 0;
     if (match(parser, LZ_TOKEN_COLON)) {
         if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
             error_at_current(parser, "expected the name of a parent error type after ':'");
@@ -6945,6 +6965,26 @@ static void error_declaration(Parser *parser) {
         advance(parser);
         parent_token = parser->previous;
         has_parent = true;
+        /* `error E : Parent, T1, T2`: the first is the error parent, the rest are traits. */
+        while (match(parser, LZ_TOKEN_COMMA)) {
+            skip_newlines(parser);
+            if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+                error_at_current(parser, "expected the name of a trait");
+                if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+                    skip_class_body(parser);
+                }
+                return;
+            }
+            advance(parser);
+            if (trait_count == 8) {
+                error_at(parser, &parser->previous, "too many parents");
+                if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+                    skip_class_body(parser);
+                }
+                return;
+            }
+            traits[trait_count++] = parser->previous;
+        }
     }
     if (nested) {
         error_at(parser, &keyword, "an 'error' declaration is only allowed at the top level");
@@ -7021,7 +7061,7 @@ static void error_declaration(Parser *parser) {
     }
     case ERROR_DECL_LIMIT: {
         char message[96];
-        (void)snprintf(message, sizeof message, "too many error types (limit %d)",
+        (void)snprintf(message, sizeof message, "too many error kinds (limit is %d)",
                        LZ_ERROR_TYPES_MAX);
         error_at(parser, &name_token, message);
         if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
@@ -7040,8 +7080,8 @@ static void error_declaration(Parser *parser) {
     bool has_body = check(parser, LZ_TOKEN_LEFT_BRACE);
     bool parent_class = ((parser->error_class_kinds[parent_kind / 64] >> (parent_kind % 64)) & 1u) != 0 ||
                         lz_vm_error_class(parser->vm, parent_kind) != NULL;
-    if (known && (has_body || parent_class)) {
-        error_class_body(parser, &name_token, kind, has_body, parent_class);
+    if (known && (has_body || parent_class || trait_count > 0)) {
+        error_class_body(parser, &name_token, kind, has_body, parent_class, traits, trait_count);
         return;
     }
     end_statement(parser);

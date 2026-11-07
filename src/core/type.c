@@ -377,6 +377,10 @@ bool lz_type_matches(const LzType *type, const LzValue *value) {
         size_t bit = (size_t)(type->class_id - 1);
         return bit < 256 && ((error->is_kind[bit / 64] >> (bit % 64)) & 1u) != 0;
     }
+    if (value_kind == LZ_KIND_ERROR && (type->kinds & LZ_KIND_INSTANCE) != 0 && type->class_id != 0) {
+        /* an error of a class that has this trait (or this class as a parent) */
+        return lz_error_is_class((const LzError *)value->as.object, type->class_id);
+    }
     if (INSTANCE_KIND_UNLIKELY(value_kind)) {
         return (type->kinds & LZ_KIND_INSTANCE) != 0 &&
                (type->class_id == 0 || lz_class_is_a(lz_value_as_instance(value)->cls, type->class_id));

@@ -182,6 +182,85 @@ static void test_privacy(void) {
                     "'hid' is private");
 }
 
+/* The message and the help line of the first failure of a program. */
+static void check_private(const char *text, const char *message, const char *help) {
+    Program program;
+    run(&program, text, 0);
+    bool ok = program.compile_status == LZ_OK && program.run_status != LZ_OK &&
+              strstr(program.vm.error, message) != NULL && strstr(program.vm.error_help, help) != NULL;
+    if (!ok) {
+        fprintf(stderr, "program:\n%s\nexpected [%s] with help [%s]; got status %d [%s] help [%s]\n", text, message,
+                help, (int)program.run_status, program.vm.error, program.vm.error_help);
+    }
+    LZ_CHECK(ok);
+    finish(&program);
+}
+
+static void test_privacy_in_extend(void) {
+    /* an ordinary class: a private field, a private method, a private getter, a private write */
+    const char *point = "class Point {\n pub x: int\n y: int = 3\n fn hid(self) => 1\n get tw(self) => self.y * 2\n}\n";
+    char text[1024];
+    const char *help = "an extension can only use the public members of Point";
+    (void)snprintf(text, sizeof text, "%sextend Point { pub fn peek(self) => self.y }\nPoint(1).peek()\n", point);
+    check_private(text, "'y' is private to Point", help);
+    (void)snprintf(text, sizeof text, "%sextend Point { pub fn peek(self) => self.hid() }\nPoint(1).peek()\n", point);
+    check_private(text, "'hid' is private to Point", help);
+    (void)snprintf(text, sizeof text, "%sextend Point { pub fn peek(self) => self.tw }\nPoint(1).peek()\n", point);
+    check_private(text, "'tw' is private to Point", help);
+    (void)snprintf(text, sizeof text, "%sextend Point { pub fn poke(self) { self.y = 9 } }\nPoint(1).poke()\n", point);
+    check_private(text, "'y' is private to Point", help);
+    (void)snprintf(text, sizeof text, "%sextend Point { pub fn peek(self) => self.with(y: 1) }\nPoint(1).peek()\n", point);
+    check_run_error(text, "private");
+    /* the public members are fine, and so is the class's own code */
+    (void)snprintf(text, sizeof text,
+                   "%sextend Point { pub fn dbl(self) => self.x * 2 }\nprintln(Point(4).dbl())\n", point);
+    check_output(text, "8\n");
+
+    /* a class of errors */
+    const char *bank = "error Broke : RuntimeError {\n pub needed: int\n secret: int = 7\n fn hid(self) => 1\n"
+                       " get tw(self) => self.secret * 2\n}\n";
+    const char *ehelp = "an extension can only use the public members of Broke";
+    (void)snprintf(text, sizeof text, "%sextend Broke { pub fn peek(self) => self.secret }\nBroke(\"m\", 1).peek()\n", bank);
+    check_private(text, "'secret' is private to Broke", ehelp);
+    (void)snprintf(text, sizeof text, "%sextend Broke { pub fn peek(self) => self.hid() }\nBroke(\"m\", 1).peek()\n", bank);
+    check_private(text, "'hid' is private to Broke", ehelp);
+    (void)snprintf(text, sizeof text, "%sextend Broke { pub fn peek(self) => self.tw }\nBroke(\"m\", 1).peek()\n", bank);
+    check_private(text, "'tw' is private to Broke", ehelp);
+    (void)snprintf(text, sizeof text, "%sextend Broke { pub fn poke(self) { self.secret = 1 } }\nBroke(\"m\", 1).poke()\n", bank);
+    check_private(text, "'secret' is private to Broke", ehelp);
+    (void)snprintf(text, sizeof text, "%sextend Broke { pub fn peek(self) => self.with(secret: 1) }\nBroke(\"m\", 1).peek()\n", bank);
+    check_run_error(text, "private");
+    (void)snprintf(text, sizeof text,
+                   "%sextend Broke { pub fn twice(self) => self.needed * 2 + len(self.message) }\nprintln(Broke(\"m\", 4).twice())\n",
+                   bank);
+    check_output(text, "9\n");
+    (void)snprintf(text, sizeof text, "%sextend Error { pub fn peek(self) => self.copy().secret }\nBroke(\"m\", 1).peek()\n", bank);
+    check_private(text, "'secret' is private to Broke", ehelp);
+    (void)snprintf(text, sizeof text, "%sextend Error { pub fn peek(self) => self.with(needed: 2).secret }\nBroke(\"m\", 1).peek()\n", bank);
+    check_private(text, "'secret' is private to Broke", ehelp);
+    /* from an extension of a parent kind, a child's private member is just as closed */
+    (void)snprintf(text, sizeof text, "%sextend RuntimeError { pub fn peek(self) => self.secret }\nBroke(\"m\", 1).peek()\n", bank);
+    check_private(text, "'secret' is private to Broke", ehelp);
+    /* and the other way round: the extension's private members are its own */
+    check_output("error E : RuntimeError { pub n: int }\nextend E {\n fn hid(self) => self.n + 1\n pub fn open(self) => self.hid()\n}\n"
+                 "println(E(\"m\", 1).open())\n",
+                 "2\n");
+    check_run_error("error E : RuntimeError { pub n: int }\nextend E {\n fn hid(self) => 1\n}\nE(\"m\", 1).hid()\n",
+                    "'hid' is private");
+
+    /* Error and a builtin kind */
+    (void)snprintf(text, sizeof text, "%sextend Error { pub fn peek(self) => self.secret }\nBroke(\"m\", 1).peek()\n", bank);
+    check_private(text, "'secret' is private to Broke", ehelp);
+    (void)snprintf(text, sizeof text, "%sextend Error { pub fn peek(self) => self.hid() }\nBroke(\"m\", 1).peek()\n", bank);
+    check_private(text, "'hid' is private to Broke", ehelp);
+    (void)snprintf(text, sizeof text,
+                   "error V : ValueError {\n pub a: int\n b: int = 2\n}\nextend ValueError { pub fn peek(self) => self.b }\nV(\"m\", 1).peek()\n");
+    check_private(text, "'b' is private to V", "an extension can only use the public members of V");
+    check_output("error Broke2 : RuntimeError { pub z: int = 1 }\nextend Error { pub fn shout(self) => self.message + \"!\" }\nprintln(ValueError(\"x\").shout(), Broke2(\"y\").shout())\n",
+                 "x! y!\n");
+    check_output("error E : RuntimeError { pub n: int }\nextend Error { pub fn pub_n(self) => self.n }\nprintln(E(\"m\", 3).pub_n())\n", "3\n");
+}
+
 static void test_inheritance(void) {
     check_output("class A { pub fn speak(self) => \"...\" }\nclass D : A { pub override fn speak(self) => \"Woof\" }\n"
                  "extend A { pub fn greet(self) => \"hi from \" + self.speak() }\nprintln(D().greet(), A().greet())\n",
@@ -283,6 +362,7 @@ static void test_errors(void) {
 int main(void) {
     test_basics();
     test_privacy();
+    test_privacy_in_extend();
     test_inheritance();
     test_conflicts();
     test_forbidden();

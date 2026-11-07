@@ -167,7 +167,7 @@ static void test_catch(void) {
 
 static void test_constructor(void) {
     check_run_error("error E : ValueError { pub n: int }\nE()\n", "E(): wrong number of arguments (0 given)");
-    check_run_error("error E : ValueError { pub n: int }\nE(\"a\", 1, 2)\n", "E takes at most 1 argument, got 2");
+    check_run_error("error E : ValueError { pub n: int }\nE(\"a\", 1, 2)\n", "E takes at most 2 arguments (message, n), got 3");
     check_run_error("error E : ValueError { pub n: int }\nE(\"a\", zz: 1)\n", "E has no field 'zz'");
     check_run_error("error E : ValueError { pub n: int }\nE(5)\n", "the message of an error must be a string");
     check_run_error("error E : ValueError { pub n: int }\nE(\"a\")\n", "n");
@@ -232,7 +232,225 @@ static void test_memory(void) {
     }
 }
 
+#define DESCRIBE "trait Describe {\n fn describe(self) => $\"<{self.message}>\"\n}\n"
+
+static void test_traits(void) {
+    check_output(DESCRIBE \
+                 "error E : RuntimeError, Describe { pub n: int }\n"
+                 "let e = E(\"m\", 3)\nprintln(e.describe(), e is Describe, e is E, e is RuntimeError, e.n)\n"
+                 "try { throw e } catch x { println(x is Describe, x.describe()) }\n"
+                 "println(ValueError(\"v\") is Describe)\n",
+                 "<m> true true true 3\ntrue <m>\nfalse\n");
+    check_output("trait Need {\n fn need(self)\n}\n"
+                 "error E : RuntimeError, Need {\n pub fn need(self) => 7\n}\nprintln(E(\"m\").need())\n", "7\n");
+    check_output("trait A {\n fn a(self) => 1\n}\ntrait B {\n fn b(self) => 2\n}\n"
+                 "error E : ValueError, A, B\nlet e = E(\"m\")\nprintln(e.a(), e.b(), e is A, e is B, e is ValueError)\n",
+                 "1 2 true true true\n");
+    check_output(DESCRIBE "error P : RuntimeError, Describe\nerror C : P\nprintln(C(\"z\").describe(), C(\"z\") is Describe)\n",
+                 "<z> true\n");
+    check_run_error("trait T {\n fn x(self)\n}\nerror E : RuntimeError, T\n", "E does not implement 'x' required by T");
+    check_run_error("trait A {\n fn x(self) => 1\n}\ntrait B {\n fn x(self) => 2\n}\nerror E : RuntimeError, A, B\n",
+                    "E gets 'x' from both A and B");
+    check_run_error("class K { }\nerror E : RuntimeError, K\n", "a class can have only one parent class");
+}
+
+static void test_arity_message(void) {
+    check_run_error("error InsufficientFunds : ValueError { pub needed: int }\nInsufficientFunds(\"m\", 1, 2)\n",
+                    "InsufficientFunds takes at most 2 arguments (message, needed), got 3");
+    /* cause and data are named, never positional, so they are not counted */
+    check_run_error("error E : ValueError { pub n: int }\nE(\"m\", 1, 2, cause: nil, data: 3)\n",
+                    "E takes at most 2 arguments (message, n), got 3");
+    check_output("error E : ValueError { pub n: int }\nprintln(E(\"m\", 1, cause: nil, data: 3).data)\n", "3\n");
+    check_run_error("error E : ValueError { }\nE(\"m\", 1)\n", "E takes at most 1 argument (message), got 2");
+}
+
+static void test_copy_and_with(void) {
+    /* with fields: everything is copied, trace is not, init does not run */
+    check_output("error F : RuntimeError {\n pub a: int\n pub b: string = \"x\"\n}\n"
+                 "fn boom() { throw F(\"hi\", 1, \"y\", cause: ValueError(\"c\"), data: [1, 2]) }\n"
+                 "try { boom() } catch e {\n let c = e.copy()\n println(c.message, c.a, c.b, c.cause.message, c.data, c is F, c is RuntimeError)\n"
+                 " println(len(e.trace) > 0, len(c.trace))\n println(c == e, c.kind)\n}\n",
+                 "hi 1 y c [1, 2] true true\ntrue 0\nfalse F\n");
+    /* the copy is independent of the original */
+    check_output("error F : RuntimeError { pub a: int }\nlet e = F(\"m\", 1)\nlet c = e.copy()\nc.a = 9\nprintln(e.a, c.a)\n", "1 9\n");
+    /* copy does not run init */
+    check_output("let n = [0]\nerror F : RuntimeError {\n pub a: int\n fn init(self) { n[0] += 1 }\n}\n"
+                 "let e = F(\"m\", 1)\nlet c = e.copy()\nprintln(n[0])\nlet d = e.with(a: 2)\nprintln(n[0], d.a, e.a)\n", "1\n2 2 1\n");
+    /* with: fields, message, cause, data */
+    check_output("error F : RuntimeError { pub a: int\n pub b: int = 0 }\nlet e = F(\"m\", 1, 2)\n"
+                 "let d = e.with(a: 5, message: \"n\", data: 7, cause: ValueError(\"c\"))\n"
+                 "println(d.message, d.a, d.b, d.data, d.cause.message, e.message, e.a, e.data, e.cause)\n",
+                 "n 5 2 7 c m 1 nil nil\n");
+    /* plain and builtin errors */
+    check_output("error P : RuntimeError\nlet p = P(\"p\", data: 1)\nprintln(p.copy().message, p.copy().data, p.copy() is P)\n"
+                 "println(p.with(message: \"q\").message, p.with(message: \"q\") is P, p.message)\n"
+                 "println(ValueError(\"x\").with(message: \"y\"), ValueError(\"x\").copy(), ValueError(\"x\").with(data: 3).data)\n",
+                 "p 1 true\nq true p\nValueError: y ValueError: x 3\n");
+    /* a kind without a body that inherits a class */
+    check_output("error F : RuntimeError { pub a: int }\nerror G : F\nlet g = G(\"m\", 4)\nprintln(g.copy().a, g.with(a: 6).a, g.with(a: 6) is G)\n",
+                 "4 6 true\n");
+    /* with runs init, and a failure in init is thrown */
+    check_output("error F : RuntimeError {\n pub a: int\n fn init(self) {\n  if self.a < 0 { throw ValueError(\"neg\") }\n }\n}\n"
+                 "let e = F(\"m\", 1)\ntry { e.with(a: -1) } catch x { println(x.message, x is ValueError, x is F) }\nprintln(e.a)\n",
+                 "neg true false\n1\n");
+    /* with checks types and names */
+    check_run_error("error F : RuntimeError { pub a: int }\nF(\"m\", 1).with(a: \"s\")\n", "a");
+    check_run_error("error F : RuntimeError { pub a: int }\nF(\"m\", 1).with(zz: 1)\n", "F has no field 'zz'");
+    check_run_error("error F : RuntimeError { pub a: int }\nF(\"m\", 1).with(message: 5)\n", "the message of an error must be a string");
+    check_run_error("error F : RuntimeError { pub a: int }\nF(\"m\", 1).with(cause: 5)\n", "the cause of an error must be an error or nil");
+    check_run_error("error F : RuntimeError { pub n: int\n priv: int = 0 }\nF(\"m\", 1).with(priv: 1)\n", "private");
+    /* positional arguments */
+    check_run_error("error F : RuntimeError { pub a: int }\nF(\"m\", 1).with(2)\n", "with() takes named fields, like e.with(needed: 5)");
+    check_run_error("error F : RuntimeError { pub a: int }\nF(\"m\", 1).with(2, a: 3)\n", "with() takes named fields, like e.with(needed: 5)");
+    check_run_error("ValueError(\"x\").with(\"y\")\n", "with() takes named fields, like e.with(needed: 5)");
+    check_output("try { ValueError(\"x\").with(\"y\") } catch e { println(e.kind, e is ArityError) }\n", "ArityError true\n");
+    /* a thrown copy gets its own trace */
+    check_output("error F : RuntimeError { pub a: int }\nfn f(e) { throw e.copy() }\ntry { f(F(\"m\", 1)) } catch x { println(x.trace[0], x.a) }\n",
+                 "f (t.lz:2:11) 1\n");
+}
+
+/* `error K0 : RuntimeError`, then each kind under the one `parent(i)` names (always a smaller i). */
+static char *kind_program(int count, int (*parent)(int), const char *tail) {
+    size_t cap = (size_t)count * 40 + strlen(tail) + 64;
+    char *text = malloc(cap);
+    LZ_CHECK(text != NULL);
+    size_t used = 0;
+    for (int i = 0; i < count; i++) {
+        int up = parent(i);
+        if (up < 0) {
+            used += (size_t)snprintf(text + used, cap - used, "error K%d : RuntimeError\n", i);
+        } else {
+            used += (size_t)snprintf(text + used, cap - used, "error K%d : K%d\n", i, up);
+        }
+    }
+    (void)snprintf(text + used, cap - used, "%s", tail);
+    return text;
+}
+
+static int chain_parent(int i) {
+    return i - 1;
+}
+
+static int branch_parent(int i) {
+    return i == 0 ? -1 : (i - 1) / 2;
+}
+
+static void test_kind_limit(void) {
+    /* 200 kinds in a chain: every ancestor matches, no descendant does */
+    {
+        char *text = kind_program(200, chain_parent,
+                                  "let e = K150(\"m\")\n"
+                                  "let up = 0\nlet down = 0\n"
+                                  "println(e is K0, e is K149, e is K150, e is K151, e is K199, e is RuntimeError, e is TypeError)\n"
+                                  "let last = K199(\"z\")\n"
+                                  "println(last is K0, last is K100, last is K198, last is K199, last is Error)\n"
+                                  "try { throw last } catch K120 as x { println(\"caught\", x.kind) }\n");
+        check_output(text, "true true true false false true false\ntrue true true true true\ncaught K199\n");
+        free(text);
+    }
+    /* 200 kinds in a binary tree: ancestors match, siblings and cousins do not */
+    {
+        char *text = kind_program(200, branch_parent,
+                                  "let e = K100(\"m\")\n"
+                                  /* 100 -> 49 -> 24 -> 11 -> 5 -> 2 -> 0 */
+                                  "println(e is K100, e is K49, e is K24, e is K11, e is K5, e is K2, e is K0)\n"
+                                  /* siblings and the other branch */
+                                  "println(e is K101, e is K99, e is K50, e is K1, e is K3, e is K6, e is K12)\n"
+                                  /* a child of K100 is K201 (does not exist); K100's own children are 201 and 202 */
+                                  "let leaf = K199(\"m\")\n"
+                                  /* 199 -> 99 -> 49 -> 24 -> 11 -> 5 -> 2 -> 0 */
+                                  "println(leaf is K99, leaf is K49, leaf is K2, leaf is K0, leaf is K100, leaf is K198)\n");
+        check_output(text,
+                     "true true true true true true true\n"
+                     "false false false false false false false\n"
+                     "true true true true false false\n");
+        free(text);
+    }
+    /* up to the limit works: 8 built-in kinds and 248 declared ones */
+    {
+        char *text = kind_program(248, chain_parent, "println(K247(\"m\") is K0, K247(\"m\") is RuntimeError)\n");
+        check_output(text, "true true\n");
+        free(text);
+    }
+    /* past it, a message, not a crash or a wrong match */
+    {
+        char *text = kind_program(249, branch_parent, "");
+        check_compile_error(text, "too many error kinds (limit is 256)");
+        free(text);
+        text = kind_program(400, chain_parent, "println(1)\n");
+        Program program;
+        run(&program, text, 0);
+        LZ_CHECK(program.compile_status == LZ_ERR_COMPILE);
+        LZ_CHECK(program.diagnostics.count > 0);
+        LZ_CHECK(strstr(program.diagnostics.items[0].message, "too many error kinds (limit is 256)") != NULL);
+        finish(&program);
+        free(text);
+    }
+}
+
+static void test_cycles(void) {
+    const char *cycle = "cannot store: this would create a reference cycle (through field 'items' of X)";
+    const char *x = "error X : RuntimeError {\n pub items: any = []\n pub fn grow(self) { self.items = [self] }\n"
+                    " pub fn grow_nested(self) { self.items = [[self]] }\n"
+                    " pub fn grow_cause(self) { self.items = X(\"n\", cause: self) }\n"
+                    " pub fn grow_data(self) { self.items = X(\"n\", data: [self]) }\n"
+                    " pub fn fine(self) { self.items = [1, [2]] }\n}\n";
+    char text[1024];
+    /* the error is `self`: an array holding it, stored in its own field, is a cycle */
+    (void)snprintf(text, sizeof text, "%slet e = X(\"m\")\ne.grow()\n", x);
+    check_run_error(text, cycle);
+    (void)snprintf(text, sizeof text, "%slet e = X(\"m\")\ne.grow_nested()\n", x);
+    check_run_error(text, cycle);
+    /* an error made with the first one as cause, stored back into it */
+    (void)snprintf(text, sizeof text, "%slet e = X(\"m\")\ne.grow_cause()\n", x);
+    check_run_error(text, cycle);
+    (void)snprintf(text, sizeof text, "%slet e = X(\"m\")\ne.grow_data()\n", x);
+    check_run_error(text, cycle);
+    /* from outside, the same */
+    (void)snprintf(text, sizeof text, "%slet e = X(\"m\")\ne.items = [e]\n", x);
+    check_run_error(text, cycle);
+    (void)snprintf(text, sizeof text, "%slet e = X(\"m\")\ne.items = e\n", x);
+    check_run_error(text, cycle);
+    (void)snprintf(text, sizeof text, "%slet e = X(\"m\")\ne.items = {\"k\": [e]}\n", x);
+    check_run_error(text, cycle);
+    /* the data and the cause of an error are given when it is made: they cannot be assigned */
+    check_run_error("error X : RuntimeError { pub n: int = 0 }\nlet e = X(\"m\")\ne.data = [e]\n", "cannot assign to field 'data' of error");
+    check_run_error("error X : RuntimeError { pub n: int = 0 }\nlet e = X(\"m\")\ne.data = e\n", "cannot assign to field 'data' of error");
+    /* a cycle caught and the error kept: nothing leaks (finish checks live_objects) */
+    (void)snprintf(text, sizeof text, "%slet e = X(\"m\")\ntry { e.grow() } catch k { println(k.message) }\nprintln(e.items)\n", x);
+    check_output(text, "cannot store: this would create a reference cycle (through field 'items' of X)\n[]\n");
+    /* the valid versions work */
+    (void)snprintf(text, sizeof text, "%slet e = X(\"m\")\ne.fine()\nprintln(e.items)\n", x);
+    check_output(text, "[1, [2]]\n");
+    (void)snprintf(text, sizeof text,
+                   "%slet a = X(\"a\")\nlet b = X(\"b\", cause: a, data: [a])\nb.items = [a, a.copy()]\n"
+                   "a.items = [1]\nprintln(b.cause.message, len(b.items), b.data[0].message)\n", x);
+    check_output(text, "a 2 a\n");
+    /* a chain of causes stored in a field of the first error's copy */
+    (void)snprintf(text, sizeof text,
+                   "%slet a = X(\"a\")\nlet b = X(\"b\", cause: a)\nlet c = a.copy()\nc.items = b\nprintln(c.items.cause.message)\n", x);
+    check_output(text, "a\n");
+    /* an error inside an instance inside the error's own field */
+    check_run_error("class Box { pub v: any }\nerror X : RuntimeError { pub items: any = []\n"
+                    " pub fn grow(self) { self.items = Box(self) } }\nlet e = X(\"m\")\ne.grow()\n",
+                    "reference cycle");
+    /* many errors made and dropped, with the heap checked at the end */
+    for (int i = 0; i < 2; i++) {
+        Program program;
+        (void)snprintf(text, sizeof text,
+                       "%sfor i in 0..2000 {\n let e = X(\"m\")\n try { e.grow() } catch k { }\n e.fine()\n}\nprintln(1)\n", x);
+        run(&program, text, 0);
+        LZ_CHECK(program.run_status == LZ_OK);
+        finish(&program);
+    }
+}
+
 int main(void) {
+    test_cycles();
+    test_kind_limit();
+    test_arity_message();
+    test_copy_and_with();
+    test_traits();
     test_spec_example();
     test_hierarchy();
     test_catch();

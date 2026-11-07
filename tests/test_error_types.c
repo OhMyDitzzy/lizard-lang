@@ -241,7 +241,7 @@ static void test_declaration_rules(void) {
         run(&program, text, 0);
         LZ_CHECK(program.compile_status == LZ_ERR_COMPILE);
         LZ_CHECK(program.diagnostics.count > 0 &&
-                 strstr(program.diagnostics.items[0].message, "too many error types (limit 256)") != NULL);
+                 strstr(program.diagnostics.items[0].message, "too many error kinds (limit is 256)") != NULL);
         finish(&program);
         free(text);
     }
