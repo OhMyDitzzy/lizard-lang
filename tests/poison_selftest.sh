@@ -12,6 +12,11 @@ set -u
 root=$(cd "$(dirname "$0")/.." && pwd)
 build=${1:-"${TMPDIR:-/tmp}/lizard-poison-selftest.$$"}
 [ -x "$root/configure" ] || { echo "no ./configure in $root: run ./autogen.sh first"; exit 2; }
+if [ -e "$root/config.status" ]; then
+    echo "$root is configured in-tree: autoconf refuses an out-of-tree configure then." >&2
+    echo "Run \`make distclean\` there, or build in a separate directory (mkdir b && cd b && ../configure)." >&2
+    exit 2
+fi
 mkdir -p "$build" || exit 2
 build=$(cd "$build" && pwd)
 (cd "$build" && "$root/configure" --enable-poison --with-build-type=debug \

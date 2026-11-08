@@ -57,7 +57,7 @@ CLEANFILES = $(check_SCRIPTS)
 
 # ---- bench ----------------------------------------------------------------------------------------
 bench: all
-	$(top_srcdir)/bench/run.sh ./lizard 3
+	bash $(top_srcdir)/bench/run.sh ./lizard 3
 .PHONY: bench
 
 # ---- install -------------------------------------------------------------------------------------
@@ -68,9 +68,11 @@ examplesdir = $(datadir)/lizard/examples
 dist_examples_DATA = $(lizard_examples)
 
 # ---- dist ----------------------------------------------------------------------------------------
-EXTRA_DIST = autogen.sh LICENSE bench builtin docs examples include mk src tests tools
+# (bench/ is copied by dist-hook: a directory named like the phony target "bench" would run it)
+EXTRA_DIST = autogen.sh LICENSE builtin docs examples include mk src tests tools
 # .buildinfo makes a build from the tarball (no git) report the commit it was cut from
 dist-hook:
+	cp -pR '$(top_srcdir)/bench' '$(distdir)/bench'
 	$(SHELL) $(top_srcdir)/tools/buildinfo.sh --srcdir='$(abs_top_srcdir)' \
 		--version='$(PACKAGE_VERSION)' --dist-info='$(distdir)/.buildinfo'
 	-find '$(distdir)' \( -name .deps -o -name '*.o' -o -name '*.a' -o -name .dirstamp \) \
