@@ -1,5 +1,6 @@
-<p align="center"><img src=".github/assets/lizard_ic.png" alt="Lizard" width="140"></p>
 # Lizard
+
+<p align="center"><img src=".github/assets/lizard_ic.png" alt="Lizard" width="140"></p>
 
 <p align="center"><b>Simple. Strict. Kind.</b></p>
 <p align="center">An interpreted programming language written in C.</p>

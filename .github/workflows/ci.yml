@@ -1,0 +1,23 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        env:
+          CC: ${{ matrix.cc == 'gcc' && 'gcc' || 'clang' }}
+          CXX: ${{ matrix.cc == 'gcc' && 'g++' || 'clang++' }}
+      - run: cmake --build build -j
+      - run: ctest --test-dir build --output-on-failure --timeout 600
