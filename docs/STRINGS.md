@@ -1,5 +1,10 @@
 # String literals
 
+A string in Lizard is text, and Lizard treats text as a sequence of characters, not
+bytes. `"héllo"` has five characters even though it takes six bytes to store. `len`
+counts code points, not bytes, and indexing gives one-character strings. Bytes that
+are not valid UTF-8 pass through unchanged.
+
 Lizard has one literal form that covers plain, multi-line, template and raw strings:
 
 ```
@@ -14,56 +19,63 @@ Lizard has one literal form that covers plain, multi-line, template and raw stri
 | `$r"{x}\n"` | raw template: interpolation, but `\n` stays two characters |
 | `"""` ... `"""` | **multi-line** (also `r"""`, `$"""`, `$r"""`) |
 
-`$` and `r` sit directly against the quote, always in the order `$r`. Single quotes work the
-same way (`'text'`, `'''...'''`).
+`$` and `r` sit directly against the quote, always in the order `$r`. Single quotes
+work the same way (`'text'`, `'''...'''`).
 
 ## Fences
 
-* One quote: a single-line string.
-* Three or more quotes followed by a line break: a multi-line string. It ends at a line that
-  holds only the same number of quotes (after indentation). `"""` in the middle of a line is
-  plain text, so a longer fence is only needed when a *line* is exactly the fence.
-* Three or more quotes followed by text on the same line: a single-line string that may hold
-  quotes; it ends at a run of exactly as many quotes. `r"""C:\"dir" """`.
-* A run of quotes longer than the fence inside the text is an error ("ambiguous quotes").
+One quote makes a single-line string. Three or more quotes followed by a line break
+make a multi-line string; it ends at a line that holds only the same number of quotes
+(after indentation). `"""` in the middle of a line is plain text, so a longer fence
+is only needed when a line is exactly the fence. Three or more quotes followed by
+text on the same line make a single-line string that may hold quotes; it ends at a
+run of exactly as many quotes — `r"""C:\"dir" """`. A run of quotes longer than the
+fence inside the text is an error ("ambiguous quotes").
 
 ## Multi-line strings
 
-```
+```lizard
 let help = """
     Usage: lizard FILE
       --color   force colour
     """
 ```
 
-* The first line break (after the opening fence) and the last one (before the closing fence)
-  are not part of the text; add a blank line before the closing fence to end with a newline.
-* The indentation of the closing fence is removed from every line. Blank lines need none. A
-  non-blank line indented less, or with different tabs/spaces, is an error pointing at it.
-* CRLF becomes LF. In a cooked string a `\` at the end of a line joins it with the next.
+The first line break (after the opening fence) and the last one (before the closing
+fence) are not part of the text; add a blank line before the closing fence to end
+with a newline. The indentation of the closing fence is removed from every line.
+Blank lines need none. A non-blank line indented less, or with different tabs or
+spaces, is an error pointing at it. CRLF becomes LF. In a cooked string a `\` at the
+end of a line joins it with the next.
 
 ## Escapes
 
-Cooked strings: `\n \t \r \0 \\ \" \' \xHH` (00–7F) and `\u{1F600}`. Raw strings have none.
-There is no `\{`: write `{{` and `}}` for literal braces (in cooked and raw templates alike).
-In a plain string, `{` and `}` are ordinary characters.
+Cooked strings use `\n \t \r \0 \\ \" \' \xHH` (00–7F) and `\u{1F600}`. Raw strings
+have none. There is no `\{` — write `{{` and `}}` for literal braces (in cooked and
+raw templates alike). In a plain string, `{` and `}` are ordinary characters.
 
-## Templates
+## Template strings
 
-```
+```lizard
 let name = "Ana"
 println($"Hello {name}!")            # Hello Ana!
 println($"{{literal}} {1 + 2}")      # {literal} 3
 println($"{names.join(", ")}")       # strings and calls inside
 ```
 
-`$"a {x} b"` means `"a " + x.to_string() + " b"`: parts are evaluated left to right, each once,
-and the result is always a `string`. A template with no `{}` is a constant. Inside `{}` you may
-write any expression (method calls, lambdas, nested strings and templates); in a multi-line
-template it may span lines. Comments are not allowed inside `{}`. A lone `{` or `}`, or `{}`, is
-an error that reminds you of `{{`/`}}`. Templates use the builtin `to_string`, `format` and
-`to_debug` directly, so a function of yours with one of those names cannot change them.
-A template cannot be used as a type.
+```text
+Hello Ana!
+{literal} 3
+```
+
+`$"a {x} b"` means `"a " + x.to_string() + " b"`: parts are evaluated left to right,
+each once, and the result is always a `string`. A template with no `{}` is a
+constant. Inside `{}` you may write any expression (method calls, lambdas, nested
+strings and templates); in a multi-line template it may span lines. Comments are not
+allowed inside `{}`. A lone `{` or `}`, or `{}`, is an error that reminds you of
+`{{`/`}}`. Templates use the builtin `to_string`, `format` and `to_debug` directly,
+so a function of yours with one of those names cannot change them. A template cannot
+be used as a type.
 
 ## Format specs: `{x:spec}`
 
@@ -91,36 +103,93 @@ spec = [[fill]align] [sign] [#] [0] [width] [group] [.precision] [type]
 | `%` | int, float | times 100, with `%` |
 | none | | text; an int is `d`; a float is its shortest form, or `f` when a precision is given |
 
-```
-$"{1234.5:,.2f}"   # 1,234.50        $"{255:#06x}"    # 0x00ff
-$"{7:03d}"         # 007             $"{"ab":*^6}"    # **ab**
-$"{0.256:.1%}"     # 25.6%           $"{65:c}"        # A
+```lizard
+println($"{1234.5:,.2f}")   # 1,234.50
+println($"{255:#06x}")      # 0x00ff
+println($"{7:03d}")         # 007
+println($"{0.256:.1%}")     # 25.6%
 ```
 
-A spec written in the source is checked when the program is compiled (the caret points at
-the wrong character, an unknown type letter in a different case is suggested). One built
-from `{w}` parts is checked when it is used. Options that do not fit are errors: a sign on
-text, `,` with `x`, `d` on a float (use `f`, or `.round()` first), a precision on an int.
-Width counts characters (code points), not screen columns, so wide characters and emoji may
-not line up. `nan` and `inf` are padded with spaces, never zeros.
+A spec written in the source is checked when the program is compiled — the caret
+points at the wrong character, and an unknown type letter in a different case is
+suggested. One built from `{w}` parts is checked when it is used. Options that do not
+fit are errors: a sign on text, `,` with `x`, `d` on a float (use `f`, or `.round()`
+first), a precision on an int. Width counts characters (code points), not screen
+columns, so wide characters and emoji may not line up. `nan` and `inf` are padded
+with spaces, never zeros.
 
 `x.format(spec)` is the same as `{x:spec}`, for specs built at run time.
 
 ## Debug form: `{x=}`
 
-`{expr=}` shows the source text of the expression, `=`, and the value; strings are quoted:
+`{expr=}` shows the source text of the expression, `=`, and the value; strings are
+quoted:
 
-```
+```lizard
 let name = "Ana"
 let n = 5
 println($"{name=} {n + 1=} {n=:>4}")    # name="Ana" n + 1=6 n=   5
 ```
 
-Spaces around `=` are kept as written (`{n = }` prints `n = 5`). `==`, `!=`, `<=`, `>=` and `=>`
-are not affected. `x.to_debug()` gives the quoted form of a value.
+Spaces around `=` are kept as written (`{n = }` prints `n = 5`). `==`, `!=`, `<=`,
+`>=` and `=>` are not affected. `x.to_debug()` gives the quoted form of a value.
 
-## Errors
+If you index a string out of range, Lizard stops you:
 
-Mistakes are reported with the usual colored report, with the caret on the exact character:
-unterminated or ambiguous fences, text before the closing fence, indentation, a lone `{`/`}`,
-`{}`, comments in `{}`, bad escapes (`\{` is explained), bad specs and options.
+```lizard fail
+let s = "hé"
+println(s[5])
+```
+
+```
+error: RangeError: index out of range
+```
+
+Check `i < len(s)` first — `len` counts code points.
+
+If you try to change a character in place:
+
+```lizard fail
+let s = "hé"
+s[0] = "H"
+```
+
+```
+error: strings are immutable
+```
+
+Strings are immutable. Build a new string instead — `$"H{s[1:]}"` or `s.replace(...)`.
+
+If you try to add a string and a number:
+
+```lizard fail
+println("age: " + 5)
+```
+
+```
+error: cannot add: string and int
+```
+
+Interpolate — `println($"age: {5}")` — or convert, `"age: " + string(5)`.
+
+Non-ASCII text and `len`:
+
+```lizard
+let s = "héllo"
+println(len(s), len("😀"), s.slice(1, 3))
+```
+
+```text
+5 1 éll
+```
+
+`len("😀")` is `1`: one code point, several bytes. `slice` positions count
+characters, like `len`.
+
+Format specs are checked at compile time when written literally, and at run time
+when built from `{w}` parts. `DESCRIBE_STRING_LIMIT` (24) truncates long strings in
+error messages and debug output — the value itself is not truncated.
+
+The `string` type and conversions are in [Types](TYPES.md). Arrays, which strings
+can be looped over like collections, are in [Collections](COLLECTIONS.md). String
+methods — `to_upper`, `split`, `slice`, and more — are in [Methods](METHODS.md).

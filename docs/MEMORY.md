@@ -162,25 +162,3 @@ skink: worst trial pause X ms (... total), worst full pass Y ms (... total)
 
 The timing lines are measured only with `--heap-stats` (reading the clock on every trial
 would otherwise cost more than the trial).
-
-## Measurements
-
-Run `bench/memory/run.sh [path/to/lizard]`. It runs each script in `bench/memory/` with
-`--heap-stats` at a size and at twice the size, and flags a growth above ~2.5x when the
-input doubles as superlinear. Work that is linear doubles.
-
-A representative run (release build, one machine):
-
-| benchmark | size N | 2N | growth |
-|---|---|---|---|
-| array_instances | ~300 ms | ~655 ms | 2.2x |
-| list_append | ~150 ms | ~260 ms | 1.7x |
-| list_prepend | ~28 ms | ~27 ms | 1.0x |
-| tree (link parent) | ~950 ms | ~1.8 s | 1.9x |
-| chain_drop | ~28 ms | ~25 ms | 0.9x |
-| shared_container | ~31 ms | ~34 ms | 1.1x |
-| big_live | ~770 ms | ~730 ms | 1.0x |
-
-All are linear within noise. The tree benchmark is what caught the first design of the
-link table (a linear scan per freed target); it was replaced by a hash of target → cells
-before it was accepted.
