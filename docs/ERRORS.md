@@ -48,9 +48,9 @@ help: make the field a link: it points at an object ...       <- help with a vis
 `--engine=ge --jit=off` and `--engine=ge --jit=eager`; all three must match. After changing a
 report, rewrite the files with
 
-    LZ_UPDATE_REPORTS=1 sh tests/reports_check.sh build/bin/lizard
+    LZ_UPDATE_REPORTS=1 sh tests/reports_check.sh ./lizard
 
-and **read every changed `.expected`** before committing. It runs in ctest as `reports_cli`.
+and **read every changed `.expected`** before committing. It runs in `make check` as `reports_cli`.
 
 ## `try`, `catch`, `finally`, `throw`
 

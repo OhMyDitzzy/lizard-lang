@@ -1,0 +1,119 @@
+# Single source of truth for the file lists: included by Makefile.am and read by
+# tools/build-plain.sh (awk). Plain make-variable syntax only: NAME = a \ b \ c
+# Paths are relative to the top of the source tree.
+
+lizard_core_SOURCES = \
+	src/core/arith.c \
+	src/core/array.c \
+	src/core/class.c \
+	src/core/dict.c \
+	src/core/call.c \
+	src/core/chunk.c \
+	src/core/compare.c \
+	src/core/debug.c \
+	src/core/format.c \
+	src/core/function.c \
+	src/core/link.c \
+	src/core/memory.c \
+	src/core/number.c \
+	src/core/native.c \
+	src/core/run.c \
+	src/core/skink.c \
+	src/core/error.c \
+	src/core/extend.c \
+	src/core/report.c \
+	src/core/source.c \
+	src/core/suggest.c \
+	src/core/table.c \
+	src/core/type.c \
+	src/core/value.c \
+	src/core/vm.c \
+	src/core/writer.c
+
+lizard_frontend_SOURCES = \
+	src/frontend/compiler.c \
+	src/frontend/lexer.c \
+	src/frontend/strlit.c
+
+lizard_engine_SOURCES = \
+	src/engine/engine.c \
+	src/engine/ge_exec.c \
+	src/engine/ge_translate.c \
+	src/engine/ge_jit.c \
+	src/engine/ge_jit_rt.c \
+	src/engine/ge_jit_x64.c \
+	src/engine/ge_jit_a64.c
+
+lizard_builtin_SOURCES = \
+	builtin/registry.c \
+	builtin/array/array.c \
+	builtin/array/higher.c \
+	builtin/method/casemap.c \
+	builtin/method/dict.c \
+	builtin/method/method.c \
+	builtin/method/number.c \
+	builtin/method/text.c \
+	builtin/convert/convert.c \
+	builtin/io/print.c
+
+lizard_utils_SOURCES = \
+	src/utils/argparse.c
+
+lizard_SOURCES = \
+	src/cli/main.c
+
+lizard_docs = \
+	README.md \
+	docs/ARCHITECTURE.md \
+	docs/CLASSES.md \
+	docs/CLI.md \
+	docs/COLLECTIONS.md \
+	docs/CONTROL_FLOW.md \
+	docs/DEVELOPING.md \
+	docs/ENGINE.md \
+	docs/ERRORS.md \
+	docs/FUNCTIONS.md \
+	docs/MEMORY.md \
+	docs/METHODS.md \
+	docs/README.md \
+	docs/STRINGS.md \
+	docs/SYNTAX.md \
+	docs/TYPES.md \
+	docs/VISION.md \
+	docs/building/README.md \
+	docs/building/cross.md \
+	docs/building/manual.md \
+	docs/building/options.md \
+	docs/building/plain.md \
+	docs/building/prerequisites.md \
+	docs/building/release.md \
+	docs/building/termux.md \
+	docs/building/troubleshooting.md
+
+lizard_examples = \
+	examples/arrays.lz \
+	examples/bits.lz \
+	examples/classes.lz \
+	examples/collatz.lz \
+	examples/compound.lz \
+	examples/dict.lz \
+	examples/error_classes.lz \
+	examples/errors.lz \
+	examples/extend.lz \
+	examples/fizzbuzz.lz \
+	examples/for.lz \
+	examples/functions.lz \
+	examples/hello.lz \
+	examples/higher.lz \
+	examples/if_expr.lz \
+	examples/inheritance.lz \
+	examples/links.lz \
+	examples/loops.lz \
+	examples/membership.lz \
+	examples/methods.lz \
+	examples/operators.lz \
+	examples/strings.lz \
+	examples/switch.lz \
+	examples/traits.lz \
+	examples/types.lz
+

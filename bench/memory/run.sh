@@ -9,7 +9,7 @@
 #
 # This lives outside bench/*.lz on purpose: the engine comparison of bench/run.sh must not pick it up.
 
-LIZARD=${1:-build/bin/lizard}
+LIZARD=${1:-./lizard}
 HERE=$(cd "$(dirname "$0")" && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT

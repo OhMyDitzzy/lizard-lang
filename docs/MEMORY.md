@@ -129,7 +129,7 @@ the table. The table is a hash, so freeing N linked objects is linear, not quadr
 
 ### Tools
 
-- **Poison mode:** `cmake -S . -B build-poison -DLZ_ENABLE_POISON=ON`, then `ctest`. Freed blocks are
+- **Poison mode:** `./configure --enable-poison`, then `make check`. Freed blocks are
   filled with 0xDD and kept in a 4096-block quarantine, and `retain`/`release`/`deref` assert that
   the object is not poisoned. `tests/poison_selftest.sh` puts the old bug back
   (`-DLZ_TEST_REINTRODUCE_LINK_BUG1`) and expects `test_links` to fail.

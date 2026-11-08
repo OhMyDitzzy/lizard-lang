@@ -10,8 +10,8 @@
 | `src/engine/` | The Gecko Engine, a faster execution engine for the same bytecode ([ENGINE.md](ENGINE.md)) |
 | `src/cli/` | The `lizard` binary: argument parsing and process entry point |
 | `builtin/` | Builtin functions and their registry, one subfolder per area (`io/`, ...) |
-| `tests/` | Unit tests, registered with CTest |
-| `cmake/` | Build helper modules |
+| `tests/` | Unit tests, listed in `tests/tests.list`, run by `make check` |
+| `mk/`, `tools/` | File lists (`mk/sources.am`) and build helper scripts; the test list is `tests/tests.list` |
 
 Dependency direction: `cli` -> `engine` -> `core` and `cli` -> `builtin` ->
 `core`. The core never includes anything from `builtin/` or `engine/`.
@@ -509,7 +509,7 @@ check and the fuel charge.
 
 To add a builtin: implement it under `builtin/<area>/`, declare it in that
 area's header, add one row to the table in `registry.c`, and add the source to
-`builtin/CMakeLists.txt`.
+`lizard_builtin_SOURCES` in `mk/sources.am`.
 
 ## Not decided yet
 

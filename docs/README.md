@@ -23,4 +23,4 @@ Read in order, from the most basic to the most advanced:
 
 ## Build
 
-- [BUILDING.md](BUILDING.md) — how to build from source
+- [building/README.md](building/README.md) — how to build from source (Autotools, or plain `sh` without them)

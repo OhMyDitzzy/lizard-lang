@@ -1,5 +1,4 @@
 CompileFlags:
-  CompilationDatabase: build
   Add: [-std=c11]
 
 Diagnostics:

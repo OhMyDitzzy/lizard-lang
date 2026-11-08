@@ -26,6 +26,7 @@
 - [docs/MEMORY.md](docs/MEMORY.md) — ownership, reference cycles, links
 - [docs/ENGINE.md](docs/ENGINE.md) — Gecko Engine, reference interpreter, JIT
 - [docs/DEVELOPING.md](docs/DEVELOPING.md) — tests, sanitizers, contributing
+- [docs/building/README.md](docs/building/README.md) — building from source (`./configure && make`, or plain `sh`)
 
 ## License
 This project is licensed under Apache-2.0, See [LICENSE](LICENSE) for more information.

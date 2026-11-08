@@ -182,7 +182,7 @@ The contract is checked in layers (all registered with CTest):
    behaviour was caught; the few survivors turned out to be equivalent to the
    original.
 5. **Sanitizers.** The whole set was run under AddressSanitizer and UBSan
-   (`-DLZ_ENABLE_SANITIZERS=ON`), including hundreds of thousands of fuzz cases.
+   (`./configure --enable-sanitizers`), including hundreds of thousands of fuzz cases.
 
 ## Using it from C
 
@@ -224,7 +224,7 @@ already fuses, which is where an interpreter spends its time.
 * Platform: x86-64 (`ge_jit_x64.c`, System V ABI) and AArch64 (`ge_jit_a64.c`:
   Linux, Android/Termux, macOS), both through the same stack analysis
   (`ge_jit_common.h`) and runtime helpers (`ge_jit_rt.c`). Elsewhere, or with
-  `-DLZ_ENABLE_JIT=OFF`, the same sources build a stub and everything runs on
+  `./configure --disable-jit`, the same sources build a stub and everything runs on
   the interpreter. If the system refuses executable memory (some hardened
   Android configurations), the JIT switches itself off and the interpreter runs.
 * Policy: the interpreter counts calls and loop back-edges per program; at 50 it
@@ -279,7 +279,7 @@ Debugging aids: `LZ_JIT_DUMP=prefix` writes each compiled program to
   native and that fuel limits keep them off it.
 * `test_engine`, `fuzz_engine` and the `*_ge` conformance variants run a second
   time with `LZ_JIT=eager` (the `*_jit` tests in CTest).
-* The whole suite passes under ASan and UBSan (x86-64), with `-DLZ_ENABLE_JIT=OFF`, and
+* The whole suite passes under ASan and UBSan (x86-64), with `./configure --disable-jit`, and
   under qemu-user on AArch64.
 
 ### AArch64

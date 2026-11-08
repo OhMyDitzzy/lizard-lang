@@ -1,26 +1,23 @@
 #!/usr/bin/env bash
-# build.sh - detects the system, configures Lizard for it, builds it, and packages it.
+# tools/release.sh - detects the system and packages Lizard for it (the packaging half of the
+# old build.sh). It drives ./configure and make: nothing here is a build system of its own.
+# Needs bash (3.2 or newer), make, a C11 compiler and, for packages, tar and gzip or xz. git is
+# optional but gives the build its commit and kind. From a git checkout run ./autogen.sh first
+# (release.sh does it when ./configure is missing and autoconf and automake are installed).
 #
-# A GNU-style driver around CMake: --prefix=, --host=, --enable-/--disable-, VAR=value
-# (CC=clang ./build.sh build). It needs bash (3.2 or newer), cmake 3.16+, a C11 compiler and,
-# for packages, tar and gzip or xz. git is optional but gives the build its commit and kind.
+#   tools/release.sh detect                  what this machine is, and what it can build for
+#   tools/release.sh package                 write dist/lizard-<version>-<target>.tar.gz + SHA256SUMS
+#   tools/release.sh package --targets=all   one tarball per ABI and platform that has a toolchain
+#   tools/release.sh package --official      signed release: clean tree, signed tarballs and SHA256SUMS
+#   tools/release.sh verify [dir]            check checksums and signatures of a dist directory
 #
-#   ./build.sh detect                       what this machine is, and what it can build for
-#   ./build.sh build                        configure and build for this machine (the default)
-#   ./build.sh check                        build, then run the tests
-#   ./build.sh package                      build and write build/../dist/lizard-<version>-<target>.tar.gz
-#   ./build.sh package --targets=all        one tarball per ABI and platform that has a toolchain
-#   ./build.sh package --official           signed release: clean tree, signed tarballs and SHA256SUMS
-#   ./build.sh verify [dir]                 check checksums and signatures of a dist directory
-#   ./build.sh sourcetar                    source tarball that remembers its commit (see docs/BUILDING.md)
-#   ./build.sh clean
-#
-# ./build.sh --help lists every option.
+# The source tarball is `make dist` (and `make distcheck`), not a command of this script.
+# tools/release.sh --help lists every option. See docs/building/release.md.
 
 set -euo pipefail
 
 SCRIPT_VERSION=1
-SRC_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SRC_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
     C_BOLD=$'\033[1m'; C_RED=$'\033[31m'; C_YEL=$'\033[33m'; C_GRN=$'\033[32m'; C_OFF=$'\033[0m'
@@ -35,19 +32,14 @@ warn() { printf '%swarning:%s %s\n' "$C_YEL" "$C_OFF" "$*" >&2; }
 die()  { printf '%serror:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 
 COMMAND=""
-PREFIX=/usr/local
-BUILD_TYPE=Release
-BUILD_ROOT="$SRC_DIR/build"
-OUT_DIR="$SRC_DIR/dist"
-GENERATOR=""
+BUILD_ROOT="$PWD/build-release"
+OUT_DIR="$PWD/dist"
 JOBS=""
 TARGETS=""          # empty: this machine
 ENABLE_JIT=auto     # auto | yes | no
 ENABLE_LTO=no
-ENABLE_SANITIZERS=no
 ENABLE_STATIC=no
-ENABLE_TESTS=yes
-WERROR=no
+BUILD_TYPE=release
 CHANNEL=local
 SIGN_KEY="${LIZARD_SIGNING_KEY:-}"
 COMPRESS=gz
@@ -62,19 +54,15 @@ ARGS_REST=()
 
 usage() {
     cat <<'EOF'
-Usage: ./build.sh [COMMAND] [OPTIONS] [VAR=value ...]
+Usage: tools/release.sh [COMMAND] [OPTIONS] [VAR=value ...]
 
 Commands
   detect       Show the build machine, the compiler, the tools, and which targets can be built.
-  configure    Run CMake for each target.
-  build        Configure and build (default).
-  check        Build, then run the test suite (this machine's target only).
-  package      Build, install into a staging tree and write dist/lizard-<version>-<target>.tar.*
-               plus SHA256SUMS (and, with --official, detached .asc signatures).
+  package      Configure and build each target in a scratch directory, `make install` into a staging
+               tree and write dist/lizard-<version>-<target>.tar.* plus SHA256SUMS (and, with
+               --official, detached .asc signatures).
   verify [DIR] Check SHA256SUMS and every .asc signature in DIR (default: dist).
-  sourcetar    Write dist/lizard-<version>-src.tar.gz from the committed tree, with a .buildinfo
-               so that a build without git still knows its commit.
-  clean        Remove the build directory.
+  clean        Remove the scratch build directory.
 
 Targets and platform
   --targets=LIST     Comma-separated targets: native (default), all, or names such as
@@ -88,15 +76,11 @@ Targets and platform
   --strict           A target without a toolchain is an error, not a skip.
   --keep-going       Continue with the other targets when one fails.
 
-Configuration
-  --prefix=DIR       Install prefix for `cmake --install` (default /usr/local). Packages are relocatable.
-  --build-type=T     Release (default), Debug, RelWithDebInfo, MinSizeRel. Also --debug, --release.
-  --enable-jit / --disable-jit      The JIT (default: on where it exists: x86-64 and AArch64, Linux and macOS).
+Configuration (passed to ./configure)
+  --build-type=T     release (default), debug, relwithdebinfo, minsizerel. Also --debug.
+  --enable-jit / --disable-jit      The JIT (default: on where it exists).
   --enable-lto                      Link-time optimization.
-  --enable-static                   Static executable (the usual choice for musl packages).
-  --enable-sanitizers               ASan and UBSan (not with --enable-static).
-  --disable-tests                   Do not build the tests (cross targets never build them).
-  --enable-werror                   Warnings are errors.
+  --enable-static                   Static executable (--enable-static-binary; the usual choice for musl).
   CC=... CFLAGS=... LDFLAGS=...     Compiler and flags for this machine's target.
 
 Build identity
@@ -107,12 +91,11 @@ Build identity
   --expect-key=FPR   For `verify`: require that this fingerprint made the signatures.
 
 Output
-  --builddir=DIR     Build trees (default ./build; one subdirectory per target and build type).
+  --builddir=DIR     Scratch build trees (default ./build-release; one subdirectory per target).
   --outdir=DIR       Where packages go (default ./dist).
   --compress=gz|xz   Package compression (default gz).
-  --check            With `package`: run the tests first (this machine's target only).
+  --check            With `package`: run `make check` first (this machine's target only).
   --clean-first      Start from empty build directories.
-  --generator=NAME   CMake generator (default: Ninja if installed, else Unix Makefiles).
   -j N, --jobs=N     Parallel jobs (default: number of CPUs).
   -q, --quiet        Fewer messages.     -v, --verbose   Show every command.
   --porcelain        With `detect`: key=value lines for scripts.
@@ -125,19 +108,24 @@ EOF
 # ---------------------------------------------------------------------------- arguments
 need_value() { [ -n "${2:-}" ] || die "$1 needs a value"; }
 
+abs_path() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s\n' "$PWD/$1" ;;
+    esac
+}
+
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             -h|--help) usage; exit 0 ;;
-            --script-version) echo "build.sh $SCRIPT_VERSION"; exit 0 ;;
+            --script-version) echo "release.sh $SCRIPT_VERSION"; exit 0 ;;
             -q|--quiet) QUIET=1 ;;
             -v|--verbose) VERBOSE=1 ;;
             --porcelain) PORCELAIN=yes ;;
-            --prefix=*) PREFIX=${1#*=} ;;
-            --prefix) need_value "$1" "${2:-}"; PREFIX=$2; shift ;;
             --build-type=*) BUILD_TYPE=${1#*=} ;;
-            --debug) BUILD_TYPE=Debug ;;
-            --release) BUILD_TYPE=Release ;;
+            --debug) BUILD_TYPE=debug ;;
+            --release) BUILD_TYPE=release ;;
             --targets=*|--target=*|--host=*) TARGETS=${1#*=} ;;
             --sysroot=*) SYSROOT=${1#*=} ;;
             --strict) STRICT=yes ;;
@@ -148,12 +136,6 @@ parse_args() {
             --disable-lto) ENABLE_LTO=no ;;
             --enable-static) ENABLE_STATIC=yes ;;
             --disable-static) ENABLE_STATIC=no ;;
-            --enable-sanitizers) ENABLE_SANITIZERS=yes ;;
-            --disable-sanitizers) ENABLE_SANITIZERS=no ;;
-            --disable-tests) ENABLE_TESTS=no ;;
-            --enable-tests) ENABLE_TESTS=yes ;;
-            --enable-werror) WERROR=yes ;;
-            --disable-werror) WERROR=no ;;
             --local) CHANNEL=local ;;
             --official) CHANNEL=official ;;
             --sign-key=*) SIGN_KEY=${1#*=} ;;
@@ -163,7 +145,6 @@ parse_args() {
             --compress=*) COMPRESS=${1#*=} ;;
             --check) RUN_CHECK=yes ;;
             --clean-first) CLEAN_FIRST=yes ;;
-            --generator=*) GENERATOR=${1#*=} ;;
             -j) need_value "$1" "${2:-}"; JOBS=$2; shift ;;
             -j[0-9]*) JOBS=${1#-j} ;;
             --jobs=*) JOBS=${1#*=} ;;
@@ -174,24 +155,13 @@ parse_args() {
         esac
         shift
     done
-    COMMAND=${COMMAND:-build}
+    COMMAND=${COMMAND:-package}
 
-    case "$BUILD_TYPE" in Release|Debug|RelWithDebInfo|MinSizeRel) ;; *) die "bad --build-type: $BUILD_TYPE" ;; esac
+    case "$BUILD_TYPE" in release|debug|relwithdebinfo|minsizerel) ;; *) die "bad --build-type: $BUILD_TYPE" ;; esac
     case "$COMPRESS" in gz|xz) ;; *) die "--compress must be gz or xz" ;; esac
-    case "$CHANNEL" in local|official) ;; *) die "bad channel" ;; esac
     if [ -n "$JOBS" ]; then
         case "$JOBS" in ''|*[!0-9]*) die "bad job count: $JOBS" ;; esac
     fi
-    if [ "$ENABLE_STATIC" = yes ] && [ "$ENABLE_SANITIZERS" = yes ]; then
-        die "--enable-static and --enable-sanitizers cannot be combined"
-    fi
-}
-
-abs_path() {
-    case "$1" in
-        /*) printf '%s\n' "$1" ;;
-        *) printf '%s\n' "$PWD/$1" ;;
-    esac
 }
 
 run() {
@@ -200,7 +170,6 @@ run() {
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
-onoff() { if [ "$1" = yes ]; then echo ON; else echo OFF; fi; }
 
 # ---------------------------------------------------------------------------- detection
 lower() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
@@ -266,7 +235,7 @@ compiler_arch() {
 }
 
 # Parses a target name into T_ARCH T_OS T_ABI T_NAME T_GNU (the GNU triplet used to find a
-# cross compiler) and T_ZIG (the spelling zig cc wants).
+# cross compiler and passed to ./configure --host) and T_ZIG (the spelling zig cc wants).
 parse_target() {
     local spec arch os abi=""
     spec=$(lower "$1")
@@ -349,12 +318,7 @@ cpu_count() {
     echo "${n:-1}"
 }
 
-pick_generator() {
-    if [ -n "$GENERATOR" ]; then echo "$GENERATOR"; return; fi
-    if have ninja; then echo Ninja; else echo "Unix Makefiles"; fi
-}
-
-# Does the JIT exist for this target? Mirrors src/engine/ge_jit.h.
+# Does the JIT exist for this target? Mirrors src/engine/ge_jit.h and configure.ac.
 jit_supported() {
     case "$1:$2" in
         x86_64:linux|x86_64:darwin|aarch64:linux|aarch64:darwin) return 0 ;;
@@ -372,14 +336,14 @@ detect_git() {
 
 tree_is_dirty() {
     if [ "$GIT_OK" != yes ]; then return 1; fi
-    # Build directories under the source tree do not count (same rule as cmake/GenerateBuildInfo.cmake).
+    # Build directories under the source tree do not count (same rule as tools/buildinfo.sh).
     local line dir
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         case "$line" in
             '?? '*/)
                 dir=${line#'?? '}
-                if [ -e "$SRC_DIR/${dir}CMakeCache.txt" ] || [ -e "$SRC_DIR/${dir}CMakeFiles" ]; then continue; fi ;;
+                if [ -e "$SRC_DIR/${dir}config.status" ] || [ -e "$SRC_DIR/${dir}.lizard-plain-build" ]; then continue; fi ;;
         esac
         return 0
     done < <(git -C "$SRC_DIR" status --porcelain --untracked-files=normal)
@@ -406,14 +370,17 @@ find_cross_cc() {
         have "${CC%% *}" || die "CC=$CC: not found"
         T_CC=$CC; T_CC_HOW="CC=$CC"; return 0
     fi
-    # darwin to darwin: the same compiler with -arch (CMAKE_OSX_ARCHITECTURES), nothing to find.
+    # darwin to darwin: the same compiler with -arch, nothing to find.
     if [ "$T_OS" = darwin ] && [ "$HOST_OS" = darwin ]; then
-        T_CC=$HOST_CC; T_CC_HOW="$HOST_CC -arch $T_ARCH"; return 0
+        mkdir -p "$bdir"
+        T_CC="$bdir/cc-wrapper.sh"
+        printf '#!/bin/sh\nexec %s -arch %s "$@"\n' "$HOST_CC" "$T_ARCH" >"$T_CC"
+        chmod +x "$T_CC"; T_CC_HOW="$HOST_CC -arch $T_ARCH"; return 0
     fi
     for c in "$T_GNU-gcc" "$T_GNU-cc" "$T_ARCH-unknown-$T_OS-$T_ABI-gcc"; do
         if have "$c"; then T_CC=$c; T_CC_HOW=$c; return 0; fi
     done
-    # Wrapper scripts: CMake wants one executable, and these need arguments.
+    # Wrapper scripts: CC must be one executable, and these need arguments.
     mkdir -p "$bdir"
     if have zig; then
         T_CC="$bdir/cc-wrapper.sh"
@@ -459,7 +426,7 @@ expand_targets() {
     fi
 }
 
-target_bdir() { printf '%s/%s-%s\n' "$BUILD_ROOT" "$1" "$(lower "$BUILD_TYPE")"; }
+target_bdir() { printf '%s/%s\n' "$BUILD_ROOT" "$1"; }
 
 # ---------------------------------------------------------------------------- signing
 SIGN_FPR=""
@@ -477,68 +444,57 @@ resolve_signing_key() {
 }
 
 # ---------------------------------------------------------------------------- configure / build
-CFG_BDIR=""
+ensure_configure() {
+    [ -x "$SRC_DIR/configure" ] && return 0
+    if have autoreconf; then
+        step "Running ./autogen.sh"
+        (cd "$SRC_DIR" && sh ./autogen.sh >/dev/null 2>&1) || die "./autogen.sh failed (run it yourself to see why)"
+    else
+        die "no ./configure: run ./autogen.sh (needs autoconf and automake), or use a release tarball"
+    fi
+}
+
 configure_target() {
     local name=$1
     parse_target "$name"
     local bdir
     bdir=$(target_bdir "$name")
-    CFG_BDIR=$bdir
     local native=no
     [ "$name" = "$HOST_NAME" ] && native=yes
 
     if [ "$CLEAN_FIRST" = yes ] && [ -d "$bdir" ]; then rm -rf "$bdir"; fi
+    mkdir -p "$bdir"
 
-    local args=(-S "$SRC_DIR" -B "$bdir" -G "$(pick_generator)"
-                "-DCMAKE_BUILD_TYPE=$BUILD_TYPE"
-                "-DCMAKE_INSTALL_PREFIX=$PREFIX"
-                "-DLZ_BUILD_CHANNEL=$CHANNEL"
-                "-DLZ_SIGNING_KEY=$SIGN_FPR")
-    local on=ON off=OFF
-    mkdir -p "$BUILD_ROOT"
-
-    # JIT: explicit choice, else wherever the engine has a backend.
+    local args=(--prefix=/ "--with-build-type=$BUILD_TYPE")
+    # the JIT: explicit choice, else wherever the engine has a backend (configure decides)
     case "$ENABLE_JIT" in
         yes) jit_supported "$T_ARCH" "$T_OS" || warn "$name has no JIT backend: --enable-jit has no effect there"
-             args+=("-DLZ_ENABLE_JIT=$on") ;;
-        no)  args+=("-DLZ_ENABLE_JIT=$off") ;;
-        auto) if jit_supported "$T_ARCH" "$T_OS"; then args+=("-DLZ_ENABLE_JIT=$on"); else args+=("-DLZ_ENABLE_JIT=$off"); fi ;;
+             args+=(--enable-jit) ;;
+        no) args+=(--disable-jit) ;;
     esac
-    args+=("-DLZ_ENABLE_LTO=$(onoff "$ENABLE_LTO")" "-DLZ_ENABLE_SANITIZERS=$(onoff "$ENABLE_SANITIZERS")"
-           "-DLZ_STATIC=$(onoff "$ENABLE_STATIC")" "-DLZ_WARNINGS_AS_ERRORS=$(onoff "$WERROR")")
-    if [ "$ENABLE_STATIC" = yes ] && [ "$T_OS" = darwin ]; then
-        warn "macOS has no static executables: --enable-static is ignored for $name"
-        args+=("-DLZ_STATIC=OFF")
+    [ "$ENABLE_LTO" = yes ] && args+=(--enable-lto)
+    if [ "$ENABLE_STATIC" = yes ]; then
+        if [ "$T_OS" = darwin ]; then warn "macOS has no static executables: --enable-static is ignored for $name"
+        else args+=(--enable-static-binary); fi
     fi
+    if [ "$CHANNEL" = official ]; then args+=(--enable-official "--with-signing-key=$SIGN_FPR"); fi
     # Tests run on this machine; a cross build cannot run them.
-    if [ "$ENABLE_TESTS" = yes ] && [ "$native" = yes ]; then
-        args+=("-DLZ_BUILD_TESTS=$on")
-    else
-        args+=("-DLZ_BUILD_TESTS=$off")
-    fi
+    if [ "$native" != yes ]; then args+=(--disable-tests); fi
 
+    local cc_env=()
     if [ "$native" = yes ]; then
-        args+=("-DCMAKE_C_COMPILER=${CC:-$HOST_CC}")
+        if [ -n "${CC:-}" ]; then cc_env+=("CC=$CC"); fi
+        if [ -n "${CFLAGS:-}" ]; then cc_env+=("CFLAGS=$CFLAGS"); fi
+        if [ -n "${LDFLAGS:-}" ]; then cc_env+=("LDFLAGS=$LDFLAGS"); fi
     else
         find_cross_cc "$bdir" || return 2
         say "    toolchain: $T_CC_HOW"
-        args+=("-DCMAKE_C_COMPILER=$T_CC" "-DCMAKE_SYSTEM_PROCESSOR=$T_ARCH")
-        case "$T_OS" in
-            linux) args+=(-DCMAKE_SYSTEM_NAME=Linux) ;;
-            darwin) args+=(-DCMAKE_SYSTEM_NAME=Darwin "-DCMAKE_OSX_ARCHITECTURES=$T_ARCH") ;;
-            windows) args+=(-DCMAKE_SYSTEM_NAME=Windows) ;;
-            freebsd) args+=(-DCMAKE_SYSTEM_NAME=FreeBSD) ;;
-        esac
-        if [ -n "$SYSROOT" ]; then args+=("-DCMAKE_SYSROOT=$SYSROOT"); fi
-    fi
-    if [ "$native" = yes ]; then
-        if [ -n "${CFLAGS:-}" ]; then args+=("-DCMAKE_C_FLAGS=$CFLAGS"); fi
-        if [ -n "${LDFLAGS:-}" ]; then args+=("-DCMAKE_EXE_LINKER_FLAGS=$LDFLAGS"); fi
+        args+=("--host=$T_GNU")
+        cc_env+=("CC=$T_CC")
     fi
 
-    run cmake "${args[@]}" >"$bdir.configure.log" 2>&1 || {
-        # the log lives beside the build directory so that it survives --clean-first
-        sed 's/^/    | /' "$bdir.configure.log" >&2 || true
+    (cd "$bdir" && run "$SRC_DIR/configure" "${args[@]}" ${cc_env[@]+"${cc_env[@]}"}) >"$bdir.configure.log" 2>&1 || {
+        tail -n 40 "$bdir.configure.log" | sed 's/^/    | /' >&2 || true
         die "configure failed for $name (log: $bdir.configure.log)"
     }
     return 0
@@ -548,9 +504,9 @@ build_target() {
     local name=$1 bdir
     bdir=$(target_bdir "$name")
     if [ "$VERBOSE" -eq 1 ]; then
-        run cmake --build "$bdir" --parallel "$(cpu_count)"
+        run make -C "$bdir" -j "$(cpu_count)"
     else
-        run cmake --build "$bdir" --parallel "$(cpu_count)" >"$bdir.build.log" 2>&1 || {
+        run make -C "$bdir" -j "$(cpu_count)" >"$bdir.build.log" 2>&1 || {
             tail -n 40 "$bdir.build.log" | sed 's/^/    | /' >&2
             die "build failed for $name (log: $bdir.build.log)"
         }
@@ -562,21 +518,17 @@ read_buildinfo() { # dir key
 }
 
 check_target() {
-    local name=$1 bdir ctest_args
+    local name=$1 bdir
     bdir=$(target_bdir "$name")
     parse_target "$name"
     [ "$name" = "$HOST_NAME" ] || die "cannot run the tests of $name on $HOST_NAME"
-    [ "$ENABLE_TESTS" = yes ] || die "--disable-tests and check do not go together"
-    ctest_args=(--test-dir "$bdir" --output-on-failure -j "$(cpu_count)")
-    # skink_cli insists that the JIT is active: without a backend it fails on purpose.
-    if [ "$(read_buildinfo "$bdir" jit)" != on ]; then ctest_args+=(-E skink_cli); fi
     local log="$bdir.check.log" rc=0
-    run ctest "${ctest_args[@]}" >"$log" 2>&1 || rc=$?
+    run make -C "$bdir" check -j "$(cpu_count)" >"$log" 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then
-        cat "$log" >&2
-        die "tests failed for $name (log: $log)"
+        tail -n 60 "$log" >&2
+        die "tests failed for $name (log: $log; see $bdir/test-suite.log)"
     fi
-    tail -n 3 "$log" | sed 's/^/    /' >&2
+    grep -E '^# (TOTAL|PASS|SKIP|FAIL)' "$log" | sed 's/^/    /' >&2 || true
 }
 
 # ---------------------------------------------------------------------------- packaging
@@ -598,7 +550,7 @@ make_tarball() { # stage_dir name out_file
 }
 
 package_target() {
-    local name=$1 bdir stage version pkg out strip=()
+    local name=$1 bdir stage version pkg out
     bdir=$(target_bdir "$name")
     version=$(read_buildinfo "$bdir" version)
     [ -n "$version" ] || die "no BUILDINFO in $bdir (did the build run?)"
@@ -606,12 +558,10 @@ package_target() {
     stage="$BUILD_ROOT/stage/$name"
     rm -rf "$stage"; mkdir -p "$stage" "$OUT_DIR"
 
-    local strip_tool
-    strip_tool=$(sed -n 's/^CMAKE_STRIP:[A-Z]*=//p' "$bdir/CMakeCache.txt" | head -1)
-    if [ -n "$strip_tool" ] && [ "${strip_tool%-NOTFOUND}" = "$strip_tool" ] && [ "$BUILD_TYPE" != Debug ]; then
-        strip=(--strip)
-    fi
-    run cmake --install "$bdir" --prefix "$stage/$pkg" "${strip[@]+"${strip[@]}"}" >/dev/null
+    # install-strip for a release build (configure finds the stripper of a cross toolchain)
+    local target=install-strip
+    [ "$BUILD_TYPE" = debug ] && target=install
+    run make -C "$bdir" "$target" "DESTDIR=$stage/$pkg" >/dev/null
     cp "$bdir/generated/BUILDINFO" "$stage/$pkg/BUILDINFO"
 
     # Smoke test of what is about to be shipped, when it can run here.
@@ -643,16 +593,16 @@ finish_packages() {
 
 # ---------------------------------------------------------------------------- commands
 cmd_detect() {
-    local gen jobs libc="" t jit=no
-    gen=$(pick_generator); jobs=$(cpu_count)
+    local jobs libc="" jit=no
+    jobs=$(cpu_count)
     jit_supported "$HOST_ARCH" "$HOST_OS" && jit=yes
     case "$HOST_ABI" in
         gnu*) libc=glibc; if have getconf; then libc="glibc $(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')"; fi ;;
         musl*) libc=musl ;;
     esac
     if [ "$PORCELAIN" = yes ]; then
-        printf 'host=%s\narch=%s\nos=%s\nabi=%s\ncc=%s\ntriple=%s\ngenerator=%s\njobs=%s\njit=%s\n' \
-            "$HOST_NAME" "$HOST_ARCH" "$HOST_OS" "$HOST_ABI" "$HOST_CC" "$HOST_TRIPLE" "$gen" "$jobs" "$jit"
+        printf 'host=%s\narch=%s\nos=%s\nabi=%s\ncc=%s\ntriple=%s\ngenerator=make\njobs=%s\njit=%s\n' \
+            "$HOST_NAME" "$HOST_ARCH" "$HOST_OS" "$HOST_ABI" "$HOST_CC" "$HOST_TRIPLE" "$jobs" "$jit"
         return
     fi
     printf 'Build machine\n'
@@ -661,8 +611,9 @@ cmd_detect() {
     printf '  compiler      %s   (%s)\n' "$HOST_CC_VERSION" "$HOST_TRIPLE"
     if [ "$jit" = yes ]; then printf '  JIT           supported\n'; else printf '  JIT           not available (the GE interpreter runs everything)\n'; fi
     printf 'Tools\n'
-    printf '  cmake         %s\n' "$(have cmake && cmake --version | head -1 || echo 'MISSING')"
-    printf '  generator     %s, %s jobs\n' "$gen" "$jobs"
+    printf '  make          %s, %s jobs\n' "$(have make && make --version 2>/dev/null | head -1 || echo 'MISSING')" "$jobs"
+    printf '  autoconf      %s\n' "$(have autoconf && autoconf --version | head -1 || echo 'not installed (only a git checkout needs it)')"
+    printf '  automake      %s\n' "$(have automake && automake --version | head -1 || echo 'not installed (only a git checkout needs it)')"
     printf '  git           %s\n' "$(have git && git --version || echo 'not installed (builds will be kind "source")')"
     printf '  tar           %s\n' "$(tar --version 2>/dev/null | head -1 || echo 'MISSING')"
     printf '  gpg           %s\n' "$(have gpg && gpg --version | head -1 || echo 'not installed (needed only for --official)')"
@@ -706,7 +657,7 @@ prepare_channel() {
     fi
 }
 
-run_targets() { # action: configure | build | check | package
+run_targets() { # action: package
     local action=$1 name built=0 skipped=0 failed=0 rc
     PACKAGES=()
     expand_targets
@@ -725,41 +676,18 @@ run_targets() { # action: configure | build | check | package
         elif [ "$rc" -ne 0 ]; then
             failed=$((failed + 1)); [ "$KEEP_GOING" = yes ] || exit 1; continue
         fi
-        [ "$action" = configure ] && { built=$((built + 1)); continue; }
         build_target "$name"
-        case "$action" in
-            check) check_target "$name" ;;
-            package)
-                if [ "$RUN_CHECK" = yes ]; then
-                    if [ "$name" = "$HOST_NAME" ]; then check_target "$name"; else warn "--check skipped for $name: it cannot run here"; fi
-                fi
-                package_target "$name" ;;
-            build) say "    $(target_bdir "$name")/bin/lizard" ;;
-        esac
+        if [ "$RUN_CHECK" = yes ]; then
+            if [ "$name" = "$HOST_NAME" ]; then check_target "$name"; else warn "--check skipped for $name: it cannot run here"; fi
+        fi
+        package_target "$name"
         built=$((built + 1))
     done
-    if [ "$action" = package ]; then finish_packages; fi
+    finish_packages
     say ""
     say "$built built, $skipped skipped, $failed failed"
     [ "$built" -gt 0 ] || die "nothing was built"
     [ "$failed" -eq 0 ] || exit 1
-}
-
-cmd_sourcetar() {
-    [ "$GIT_OK" = yes ] || die "sourcetar needs a git checkout"
-    if tree_is_dirty; then die "sourcetar archives the committed tree: commit your changes first"; fi
-    have cmake || die "cmake is needed to compute the build information"
-    local probe="$BUILD_ROOT/.srcprobe" version out tmp
-    rm -rf "$probe"; mkdir -p "$probe" "$OUT_DIR"
-    run cmake -S "$SRC_DIR" -B "$probe" -DLZ_BUILD_TESTS=OFF >/dev/null
-    version=$(read_buildinfo "$probe" version)
-    tmp=$(mktemp -d)
-    cp "$probe/generated/BUILDINFO" "$tmp/.buildinfo"
-    out="$OUT_DIR/lizard-$version-src.tar.gz"
-    run git -C "$SRC_DIR" archive --format=tar --prefix="lizard-$version/" --add-file="$tmp/.buildinfo" HEAD | gzip -9 -n >"$out"
-    rm -rf "$tmp" "$probe"
-    say "$out"
-    (cd "$OUT_DIR" && sha256_of "$(basename "$out")" >"$(basename "$out").sha256")
 }
 
 cmd_verify() {
@@ -809,18 +737,17 @@ main() {
         clean) cmd_clean; exit 0 ;;
         verify) cmd_verify; exit $? ;;
     esac
-    have cmake || die "cmake (3.16 or newer) is required"
+    have make || die "make is required"
     detect_host
     detect_git
     case "$COMMAND" in
         detect) cmd_detect ;;
-        configure|build|check)
-            prepare_channel
-            run_targets "$COMMAND" ;;
         package)
+            ensure_configure
             prepare_channel
             run_targets package ;;
-        sourcetar) cmd_sourcetar ;;
+        sourcetar) die "there is no sourcetar: the source tarball is \`make dist\` (and \`make distcheck\`)" ;;
+        build|check|configure) die "use ./configure && make (&& make check); this script only packages" ;;
         *) die "unknown command: $COMMAND (try --help)" ;;
     esac
 }

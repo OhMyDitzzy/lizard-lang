@@ -14,10 +14,27 @@ jobs:
         cc: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build
-      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - run: sudo apt-get update && sudo apt-get install -y autoconf automake
+      - run: ./autogen.sh
+      - run: ./configure
         env:
-          CC: ${{ matrix.cc == 'gcc' && 'gcc' || 'clang' }}
-          CXX: ${{ matrix.cc == 'gcc' && 'g++' || 'clang++' }}
-      - run: cmake --build build -j
-      - run: ctest --test-dir build --output-on-failure --timeout 600
+          CC: ${{ matrix.cc }}
+      - run: make -j$(nproc)
+      - run: make check -j$(nproc)
+      - if: failure()
+        run: cat test-suite.log
+
+  distcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y autoconf automake
+      - run: ./autogen.sh && ./configure
+      - run: make distcheck
+
+  plain:
+    # no autoconf, no automake: only sh, awk and the compiler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh tools/build-plain.sh check

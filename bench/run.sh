@@ -3,10 +3,10 @@
 #
 #   bench/run.sh [path/to/lizard] [runs]
 #
-# Defaults: build/bin/lizard, 3 runs. Also checks that both engines print the
+# Defaults: ./lizard, 3 runs. Also checks that both engines print the
 # same output. Needs only bash: no bc, no awk.
 
-LIZARD=${1:-build/bin/lizard}
+LIZARD=${1:-./lizard}
 RUNS=${2:-3}
 HERE=$(cd "$(dirname "$0")" && pwd)
 
