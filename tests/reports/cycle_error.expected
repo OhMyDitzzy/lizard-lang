@@ -1,0 +1,13 @@
+error: cannot store: this would create a reference cycle
+ --> cycle_error.lz:5:3
+  |
+5 | e.items = Wrapped("inner", cause: e)
+  |   ^^^^^ `Wrapped.items` would own an object that already owns this one
+  |
+  = note: an error owns its fields, its `cause:` and its `data:`, so a cause cannot lead back to the error that holds it
+help: make the field a link: it points at an object without owning it
+ --> cycle_error.lz:2:9
+  |
+2 |     pub link items = nil
+  |         +++++
+

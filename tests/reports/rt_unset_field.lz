@@ -1,0 +1,4 @@
+class A {
+    pub x
+}
+let a = A()

@@ -1,0 +1,12 @@
+error: return type mismatch: expected int, got "5"
+ --> return_wrong_int.lz:2:12
+  |
+2 |     return "5"
+  |            ^^^
+  |
+help: convert the value to the declared type
+  |
+2 |     return int("5")
+  |            ~~~~~~~~
+
+error: aborting due to 1 previous error

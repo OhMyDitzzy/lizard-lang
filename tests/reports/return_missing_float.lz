@@ -1,0 +1,4 @@
+fn f() -> float {
+    let x = 1
+}
+f()

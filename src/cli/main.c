@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L /* fileno, isatty */
 #endif
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -210,6 +211,19 @@ static void report_runtime_error(const LzVM *vm, const LzSource *source,
     report.offset = vm->error_offset;
     report.length = 0;
 
+    /* The caret covers the whole identifier (a member name, a callee) when one starts here. */
+    if (source->text != NULL && vm->error_offset < source->length) {
+        const char *at = source->text + vm->error_offset;
+        size_t room = source->length - vm->error_offset;
+        size_t n = 0;
+        if (room > 0 && (isalpha((unsigned char)at[0]) || at[0] == '_')) {
+            while (n < room && (isalnum((unsigned char)at[n]) || at[n] == '_')) {
+                n++;
+            }
+        }
+        report.length = n;
+    }
+
     /* An undefined name: the compiler kept what it knew about the names in scope. */
     char headline[160];
     const LzNameHint *hint = lz_diagnostics_find_hint(diagnostics, vm->error_offset);
@@ -231,7 +245,8 @@ static void report_runtime_error(const LzVM *vm, const LzSource *source,
      * A dict key that is not there: the closest keys of that dict, offered the way an
      * unknown name's candidates are.
      */
-    char help[192];
+    char help[192 + 384];
+    help[0] = '\0';
     if (vm->error_suggestions.count > 0 && strncmp(vm->error, "key ", 4) == 0) {
         size_t used = (size_t)snprintf(help, sizeof help, "did you mean ");
         size_t count = vm->error_suggestions.count;
@@ -241,6 +256,38 @@ static void report_runtime_error(const LzVM *vm, const LzSource *source,
                                      vm->error_suggestions.names[i], i + 1 == count ? "?" : "");
         }
         report.help = help;
+    }
+
+    /* The label, note and fix the failing code recorded (lz_vm_set_label / _note / _fix). */
+    if (vm->error_label[0] != '\0' && report.label == NULL) {
+        report.label = vm->error_label;
+    }
+    LzFix fix = {0};
+    bool fix_drawn = false;
+    if (vm->error_fix.present && vm->error_fix.offset <= source->length &&
+        (size_t)vm->error_fix.offset + vm->error_fix.delete_length <= source->length) {
+        fix.headline = vm->error_fix.headline;
+        fix.offset = vm->error_fix.offset;
+        fix.delete_length = vm->error_fix.delete_length;
+        fix.insert_text = vm->error_fix.insert_text;
+        report.fix = &fix;
+        fix_drawn = true;
+    }
+
+    /*
+     * The help the failing code recorded (lz_vm_set_help). The dict-key suggestion above comes
+     * first; a recorded help follows on its own line. A fix that is drawn says it better.
+     */
+    if (vm->error_help[0] != '\0' && !fix_drawn) {
+        size_t used = report.help != NULL ? strlen(help) : 0;
+        if (used > 0 && used < sizeof help - 1) {
+            help[used++] = '\n';
+        }
+        (void)snprintf(help + used, sizeof help - used, "%s", vm->error_help);
+        report.help = help;
+    }
+    if (vm->error_note[0] != '\0') {
+        report.note = vm->error_note;
     }
 
     LzReportFrame frames[LZ_TRACE_MAX];

@@ -141,6 +141,13 @@ const LzMember *lz_class_find(const LzClass *cls, const LzString *name);
  * the private members of itself and of its ancestors, never of its descendants.
  */
 bool lz_class_sees(const LzVM *vm, uint64_t owner, const LzClass *declaring);
+/*
+ * The error for a store that would close a reference cycle, one wording for all containers:
+ * label, note and help (and a visual fix when the field's declaration can be found).
+ *   instance + member: a field of an instance (`self.next = other`);
+ *   instance == NULL:  the container being stored into is an array (kind 'a') or a dict ('d').
+ */
+LzStatus lz_vm_cycle_error(LzVM *vm, const LzInstance *instance, const LzMember *member, char kind);
 /* The live class with this id, or NULL. */
 const LzClass *lz_class_by_id(const LzVM *vm, uint64_t id);
 /* Is `cls` the class with this id, or derived from it? */

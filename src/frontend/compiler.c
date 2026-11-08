@@ -1,5 +1,6 @@
 #include "lizard/compiler.h"
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -170,6 +171,7 @@ typedef struct Parser {
     LzToken current;
     LzToken previous;
     LzDiagnostics *diagnostics;
+    LzDiagExtras pending; /* label/note/help/fix for the next error that is recorded */
     bool panic;
     LzStatus fatal;
     Symbol symbols[LZ_MAX_SYMBOLS];
@@ -318,9 +320,64 @@ static Expr parse_precedence(Parser *parser, Precedence precedence);
 
 /* Diagnostics */
 
+/*
+ * Help for the mistakes beginners make most, keyed by the start of the message. Only fixes that
+ * are the same every time live here; a help that needs the code around it is set where the
+ * error is found (diag_help).
+ */
+static const struct {
+    const char *message;
+    const char *help;
+} STATIC_HELP[] = {
+    {"'return' outside of a function", "'return' only works inside a function: fn name() { return value }"},
+    {"'break' outside of a loop", "use 'break' inside the body of a `for` or `while` loop"},
+    {"'continue' outside of a loop", "use 'continue' inside the body of a `for` or `while` loop"},
+    {"classes can only be declared at the top level",
+     "move the class out of the function or block, to the top level of the file"},
+    {"'self' must be the first parameter of a method", "write the method as fn name(self, ...) { ... }"},
+    {"this function needs a body (only a trait can leave it out)", "give it a body: fn name() { ... }"},
+    {"expected '{' or '=>' before function body", "write the body as { ... } or as => expression"},
+    {"'super' can only be used inside a method",
+     "use super.name() inside a method of a class that has a parent class"},
+    {"'read' only applies to fields", "write it on a field: pub read name = value"},
+    {"a link can only be a field", "write it on a field: pub link parent = nil; elsewhere store link(x)"},
+    {"'override' only applies to functions and properties", "remove `override`, or put it in front of a fn"},
+    {"an 'if' expression needs an 'else'", "add an else branch: if cond { a } else { b }"},
+    {"a 'switch' expression needs an 'else'", "end the switch with an `else` arm so every value has a result"},
+    {"cannot assign to constant '", "declare it with let instead of const if its value must change"},
+    {"cannot assign to the loop variable '", "copy it first (let copy = i) and change the copy"},
+    {"unterminated string", "close the string with a matching quote on the same line"},
+    {"unexpected '}'", "this '}' has no matching '{' before it: remove it, or add the missing '{'"},
+    {"extend can only be used at the top level", "move the extend block to the top level of the file"},
+    {"an 'error' declaration is only allowed at the top level", "move the error declaration to the top level of the file"},
+    {"expected ')' after", "a '(' was opened but not closed: add the missing ')'"},
+    {"expected ']' after", "a '[' was opened but not closed: add the missing ']'"},
+    {"expected '}' after", "a '{' was opened but not closed: add the missing '}'"},
+};
+
+static const char *static_help_for(const char *message) {
+    for (size_t i = 0; i < sizeof STATIC_HELP / sizeof STATIC_HELP[0]; i++) {
+        if (strncmp(message, STATIC_HELP[i].message, strlen(STATIC_HELP[i].message)) == 0) {
+            return STATIC_HELP[i].help;
+        }
+    }
+    if (strstr(message, "' is already declared in this scope") != NULL) {
+        return "give the second one another name, or change the first with: name = value";
+    }
+    return NULL;
+}
+
 static void record_full(Parser *parser, uint32_t offset, uint32_t length, const char *message,
                         const char *label, const LzSuggestions *suggestions) {
     LzDiagnostics *diagnostics = parser->diagnostics;
+    LzDiagExtras extras = parser->pending;
+    memset(&parser->pending, 0, sizeof parser->pending);
+    if (extras.help[0] == '\0' && !extras.has_fix) {
+        const char *help = static_help_for(message);
+        if (help != NULL) {
+            (void)snprintf(extras.help, sizeof extras.help, "%s", help);
+        }
+    }
     for (size_t i = 0; i < diagnostics->count; i++) {
         /* A finally body is compiled once per way out: the same mistake is told once. */
         if (diagnostics->items[i].offset == offset &&
@@ -337,6 +394,7 @@ static void record_full(Parser *parser, uint32_t offset, uint32_t length, const 
     item->length = length;
     (void)snprintf(item->message, sizeof item->message, "%s", message);
     item->label = label;
+    item->extras = extras;
     if (suggestions != NULL) {
         item->suggestions = *suggestions;
     } else {
@@ -348,10 +406,81 @@ static void record(Parser *parser, uint32_t offset, uint32_t length, const char 
     record_full(parser, offset, length, message, NULL, NULL);
 }
 
-static void error_at(Parser *parser, const LzToken *token, const char *message) {
-    if (parser->panic) {
+/* Extras for the next recorded error (set them just before the call that reports it). */
+static void diag_label(Parser *parser, const char *format, ...) LZ_PRINTF_FORMAT(2, 3);
+static void diag_label(Parser *parser, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    (void)vsnprintf(parser->pending.label, sizeof parser->pending.label, format, args);
+    va_end(args);
+}
+
+static void diag_note(Parser *parser, const char *format, ...) LZ_PRINTF_FORMAT(2, 3);
+static void diag_note(Parser *parser, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    (void)vsnprintf(parser->pending.note, sizeof parser->pending.note, format, args);
+    va_end(args);
+}
+
+static void diag_help(Parser *parser, const char *format, ...) LZ_PRINTF_FORMAT(2, 3);
+static void diag_help(Parser *parser, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    (void)vsnprintf(parser->pending.help, sizeof parser->pending.help, format, args);
+    va_end(args);
+}
+
+/* A fix: replace [offset, offset + delete) with `text`; the help text stays as the fallback. */
+static void diag_fix(Parser *parser, const char *headline, uint32_t offset, uint32_t delete_length,
+                     const char *text) {
+    LzDiagExtras *extras = &parser->pending;
+    extras->has_fix = true;
+    extras->fix_insert_line = false;
+    extras->fix_offset = offset;
+    extras->fix_delete = delete_length;
+    (void)snprintf(extras->fix_headline, sizeof extras->fix_headline, "%s", headline);
+    (void)snprintf(extras->fix_text, sizeof extras->fix_text, "%s", text);
+}
+
+/* A fix that puts `text` on a new line in front of the line of `offset`, indented by `indent`. */
+static void diag_fix_line(Parser *parser, const char *headline, uint32_t offset, const char *indent,
+                          const char *text) {
+    diag_fix(parser, headline, offset, 0, text);
+    parser->pending.fix_insert_line = true;
+    parser->pending.fix_has_indent = true;
+    (void)snprintf(parser->pending.fix_indent, sizeof parser->pending.fix_indent, "%s", indent);
+}
+
+/* A keyword written where a name belongs: say so, and offer a name. */
+static void keyword_as_name_help(Parser *parser, const LzToken *token, const char *message) {
+    if (strcmp(message, "expected variable name after 'let'") != 0 &&
+        strcmp(message, "expected constant name after 'const'") != 0 &&
+        strcmp(message, "expected a parameter name") != 0) {
         return;
     }
+    if (token->length == 0 || token->length > 24 || token->type == LZ_TOKEN_IDENTIFIER ||
+        !(isalpha((unsigned char)parser->source->text[token->offset]))) {
+        return;
+    }
+    for (uint32_t i = 0; i < token->length; i++) {
+        if (!isalpha((unsigned char)parser->source->text[token->offset + i])) {
+            return;
+        }
+    }
+    char word[32];
+    memcpy(word, parser->source->text + token->offset, token->length);
+    word[token->length] = '\0';
+    diag_help(parser, "`%s` is a keyword; pick another name, e.g. %s", word,
+              strcmp(word, "class") == 0 ? "klass" : "my_name");
+}
+
+static void error_at(Parser *parser, const LzToken *token, const char *message) {
+    if (parser->panic) {
+        memset(&parser->pending, 0, sizeof parser->pending);
+        return;
+    }
+    keyword_as_name_help(parser, token, message);
     parser->panic = true;
     record(parser, token->offset, token->length, message);
 }
@@ -868,6 +997,123 @@ static void describe_type(const LzType *type, char *out, size_t size) {
     lz_buffer_free(&buffer);
 }
 
+
+/*
+ * A value that fits `type`, written as source ("text" for string, 0 for int, [] for T[] ...),
+ * for a help that says what to return. False when there is no good example (any, functions,
+ * literal unions): then the help is left out rather than guessed.
+ */
+static bool example_value_for_type(const LzType *type, char *out, size_t size) {
+    if (type->literal_count > 0) {
+        return false;
+    }
+    uint16_t kinds = lz_type_possible_kinds(type);
+    if (kinds == LZ_KINDS_ANY || kinds == 0) {
+        return false;
+    }
+    if ((kinds & LZ_KIND_NIL) != 0) {
+        (void)snprintf(out, size, "nil");
+        return true;
+    }
+    if ((kinds & LZ_KIND_INT) != 0) {
+        (void)snprintf(out, size, "0");
+    } else if ((kinds & LZ_KIND_FLOAT) != 0) {
+        (void)snprintf(out, size, "0.0");
+    } else if ((kinds & LZ_KIND_BOOL) != 0) {
+        (void)snprintf(out, size, "true");
+    } else if ((kinds & LZ_KIND_STRING) != 0) {
+        (void)snprintf(out, size, "\"text\"");
+    } else if ((kinds & LZ_KIND_ARRAY) != 0) {
+        (void)snprintf(out, size, "[]");
+    } else if ((kinds & LZ_KIND_DICT) != 0) {
+        (void)snprintf(out, size, "{}");
+    } else if ((kinds & LZ_KIND_INSTANCE) != 0 && type->class_name != NULL) {
+        (void)snprintf(out, size, "%s(...)", type->class_name->data);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/* How to turn an expression of type `from` into one of type `to`, when there is a clear way. */
+static bool conversion_for(const LzType *from, const LzType *to, const char *expr, char *out,
+                           size_t size) {
+    uint16_t have = lz_type_possible_kinds(from);
+    uint16_t want = lz_type_possible_kinds(to);
+    if (have == 0 || (have & LZ_KIND_NIL) != 0) {
+        return false;
+    }
+    if (want == LZ_KIND_STRING && (have & ~LZ_KINDS_NUMBER) == 0) {
+        (void)snprintf(out, size, "str(%s)", expr);
+    } else if (want == LZ_KIND_INT && (have == LZ_KIND_STRING || have == LZ_KIND_FLOAT)) {
+        (void)snprintf(out, size, "int(%s)", expr);
+    } else if (want == LZ_KIND_FLOAT && (have == LZ_KIND_STRING || have == LZ_KIND_INT)) {
+        (void)snprintf(out, size, "float(%s)", expr);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/* The indentation (spaces and tabs) of the line that holds `offset`; false if code comes before it. */
+static bool line_is_just_indent_before(const Parser *parser, uint32_t offset, char *indent, size_t size) {
+    const char *text = parser->source->text;
+    size_t start = offset;
+    while (start > 0 && text[start - 1] != '\n') {
+        start--;
+    }
+    size_t n = 0;
+    for (size_t i = start; i < offset; i++) {
+        if (text[i] != ' ' && text[i] != '\t') {
+            return false;
+        }
+        if (n + 1 < size) {
+            indent[n++] = text[i];
+        }
+    }
+    indent[n] = '\0';
+    return true;
+}
+
+static LzToken span_from(const Parser *parser, const LzToken *start);
+
+/*
+ * When `from` converts clearly into `to`, set the help (and, when `with_fix`, the visual fix that
+ * replaces the expression in `span` with the conversion) for the mismatch about to be reported.
+ */
+static void convert_help(Parser *parser, const LzType *from, const LzType *to, const LzToken *span,
+                         bool with_fix) {
+    if (parser->panic || parser->pending.help[0] != '\0' || parser->pending.has_fix) {
+        return;
+    }
+    /* The span can run on to the end of the statement: the expression stops at its last real character. */
+    const char *text = parser->source->text + span->offset;
+    size_t length = span->length;
+    for (size_t i = 0; i < length; i++) {
+        if (text[i] == '\n' || text[i] == '\r') {
+            length = i;
+            break;
+        }
+    }
+    while (length > 0 && (text[length - 1] == ' ' || text[length - 1] == '\t')) {
+        length--;
+    }
+    char expr[100];
+    char converted[128];
+    if (length == 0 || length >= sizeof expr) {
+        return;
+    }
+    memcpy(expr, text, length);
+    expr[length] = '\0';
+    if (!conversion_for(from, to, expr, converted, sizeof converted)) {
+        return;
+    }
+    diag_help(parser, "convert the value: %s", converted);
+    if (with_fix) {
+        diag_fix(parser, "convert the value to the declared type", span->offset, (uint32_t)length, converted);
+    }
+}
+
 static LzToken span_from(const Parser *parser, const LzToken *start) {
     LzToken span = *start;
     uint32_t end = parser->previous.offset + parser->previous.length;
@@ -905,6 +1151,17 @@ static void error_operator(Parser *parser, const LzToken *op, const LzType *left
         describe_type(right, second, sizeof second);
         (void)snprintf(message, sizeof message, "operator '%s' cannot be applied to %s and %s",
                        symbol, first, second);
+    }
+    if (right != NULL) {
+        uint16_t a = lz_type_possible_kinds(left);
+        uint16_t b = lz_type_possible_kinds(right);
+        bool text_and_number = (a == LZ_KIND_STRING && (b & ~LZ_KINDS_NUMBER) == 0 && b != 0) ||
+                               (b == LZ_KIND_STRING && (a & ~LZ_KINDS_NUMBER) == 0 && a != 0);
+        if (text_and_number && strcmp(symbol, "+") == 0) {
+            diag_help(parser, "convert one side: str(n) to join them as text, or int(s) to add them as numbers");
+        } else if (text_and_number) {
+            diag_help(parser, "convert the text to a number first: int(s) or float(s)");
+        }
     }
     error_at(parser, op, message);
 }
@@ -958,6 +1215,7 @@ static void check_flow(Parser *parser, const LzType *from, const LzType *to, con
                        uint32_t offset, LzOpCode check_op, const char *mismatch) {
     if (lz_type_assignable(from, to) == LZ_ASSIGN_NEVER) {
         LzToken span = span_from(parser, start);
+        convert_help(parser, from, to, &span, strncmp(mismatch, "return", 6) == 0);
         error_types(parser, &span, mismatch, to, ", got ", from);
         return;
     }
@@ -988,6 +1246,7 @@ static void check_static(Parser *parser, const LzType *from, const LzType *to,
                          const LzToken *start) {
     if (lz_type_assignable(from, to) == LZ_ASSIGN_NEVER) {
         LzToken span = span_from(parser, start);
+        convert_help(parser, from, to, &span, false);
         error_types(parser, &span, "type mismatch: expected ", to, ", got ", from);
     }
 }
@@ -2841,6 +3100,7 @@ static void check_argument(Parser *parser, const FuncSig *sig, size_t index, con
         char prefix[128];
         (void)snprintf(prefix, sizeof prefix, "type mismatch: argument '%s' of %s() expects ", name,
                        sig_name(sig));
+        convert_help(parser, &arg->type, expected, &span, false);
         error_types(parser, &span, prefix, expected, ", got ", &arg->type);
     }
 }
@@ -2859,6 +3119,18 @@ static void check_arity(Parser *parser, const FuncSig *sig, size_t given, const 
                        sig->required != sig->param_count ? "at most " : "", (unsigned)sig->param_count,
                        sig->param_count == 1 ? "" : "s", given);
     }
+    char signature[200];
+    size_t used = (size_t)snprintf(signature, sizeof signature, "signature: %s(", sig_name(sig));
+    for (size_t i = 0; i < sig->param_count + (sig->has_rest ? 1 : 0) && used < sizeof signature; i++) {
+        bool rest = i >= sig->param_count;
+        used += (size_t)snprintf(signature + used, sizeof signature - used, "%s%s%s%s", i == 0 ? "" : ", ",
+                                 rest ? "*" : "", sig->names[i]->data,
+                                 !rest && i >= sig->required ? " = ..." : "");
+    }
+    if (used < sizeof signature) {
+        (void)snprintf(signature + used, sizeof signature - used, ")");
+    }
+    diag_help(parser, "%s", signature);
     error_at(parser, at, message);
 }
 
@@ -5132,6 +5404,7 @@ static void variable_declaration(Parser *parser, bool is_const) {
             LzType value_type = lz_type_of_value(&value);
             if (annotated && lz_type_assignable(&value_type, &declared) == LZ_ASSIGN_NEVER) {
                 LzToken span = span_from(parser, &initializer_start);
+                convert_help(parser, &value_type, &declared, &span, false);
                 error_types(parser, &span, "type mismatch: expected ", &declared, ", got ",
                             &value_type);
             }
@@ -5477,6 +5750,7 @@ static void expression_statement(Parser *parser) {
         Expr value = expression(parser);
         if (lz_type_assignable(&value.type, &target.type) == LZ_ASSIGN_NEVER) {
             LzToken span = span_from(parser, &value_start);
+            convert_help(parser, &value.type, &target.type, &span, false);
             error_types(parser, &span, "type mismatch: expected ", &target.type, ", got ",
                         &value.type);
         }
@@ -5649,6 +5923,7 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
                 Expr value = expression(parser);
                 if (lz_type_assignable(&value.type, &declared) == LZ_ASSIGN_NEVER) {
                     LzToken span = span_from(parser, &value_start);
+                    convert_help(parser, &value.type, &declared, &span, false);
                     error_types(parser, &span, "type mismatch: expected ", &declared, ", got ",
                                 &value.type);
                 }
@@ -5741,6 +6016,25 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
     if (!returns && sig->result_declared) {
         LzType nothing = lz_type_of_kinds(LZ_KIND_NIL);
         if (lz_type_assignable(&nothing, &sig->result) == LZ_ASSIGN_NEVER) {
+            char type_name[96];
+            char example[96];
+            char indent[40];
+            describe_type(&sig->result, type_name, sizeof type_name);
+            diag_label(parser, "this function is declared `-> %s` but can reach here without returning",
+                       type_name);
+            if (example_value_for_type(&sig->result, example, sizeof example)) {
+                diag_help(parser, "add a return before the closing brace, for example: return %s", example);
+                /* A fix only when the `}` stands alone on its line: the new line goes above it. */
+                if (line_is_just_indent_before(parser, close.offset, indent, sizeof indent)) {
+                    char body_indent[48];
+                    (void)snprintf(body_indent, sizeof body_indent, "%s%s", indent,
+                                   strchr(indent, '\t') != NULL ? "\t" : "    ");
+                    char line[110];
+                    (void)snprintf(line, sizeof line, "return %s", example);
+                    diag_fix_line(parser, "add a return before the closing brace", close.offset,
+                                  body_indent, line);
+                }
+            }
             error_types(parser, &close, "missing return: the function must return a value of type ",
                         &sig->result, "", NULL);
         }
@@ -6653,15 +6947,30 @@ static void return_statement(Parser *parser) {
 
     LzToken start = parser->current;
     Expr value = expr_of(lz_type_of_kinds(LZ_KIND_NIL));
+    bool empty = false;
     if (check(parser, LZ_TOKEN_NEWLINE) || check(parser, LZ_TOKEN_SEMICOLON) ||
         check(parser, LZ_TOKEN_RIGHT_BRACE) || check(parser, LZ_TOKEN_EOF)) {
         emit_op_at(parser, LZ_OP_NIL, offset);
+        empty = true;
+        start = parser->previous; /* the caret goes under `return` */
     } else {
         value = expression(parser);
     }
     if (fs->function != NULL && fs->sig->result_declared) {
+        if (empty) {
+            char type_name[96];
+            char example[96];
+            describe_type(&fs->sig->result, type_name, sizeof type_name);
+            if (example_value_for_type(&fs->sig->result, example, sizeof example)) {
+                diag_help(parser, "this function must return a value of type %s; write: return <value>, for example: return %s",
+                          type_name, example);
+            } else {
+                diag_help(parser, "this function must return a value of type %s; write: return <value>", type_name);
+            }
+        }
         check_flow(parser, &value.type, &fs->sig->result, &start, offset, LZ_OP_CHECK_RETURN,
                    "return type mismatch: expected ");
+        memset(&parser->pending, 0, sizeof parser->pending);
     }
     bool run_finally = false;
     for (const TryContext *ctx = parser->try_ctx; ctx != NULL && ctx->func == parser->fs;
@@ -7417,8 +7726,26 @@ void lz_diagnostics_report(const LzDiagnostics *diagnostics, const LzSource *sou
         report.message = item->message;
         report.offset = item->offset;
         report.length = item->length;
-        report.label = item->label;
+        report.label = item->extras.label[0] != '\0' ? item->extras.label : item->label;
         report.suggestions = &item->suggestions;
+        const LzDiagExtras *extras = &item->extras;
+        if (extras->note[0] != '\0') {
+            report.note = extras->note;
+        }
+        LzFix fix = {0};
+        bool fix_ok = extras->has_fix && extras->fix_offset <= source->length &&
+                      (size_t)extras->fix_offset + extras->fix_delete <= source->length;
+        if (fix_ok) {
+            fix.headline = extras->fix_headline;
+            fix.offset = extras->fix_offset;
+            fix.delete_length = extras->fix_delete;
+            fix.insert_text = extras->fix_text;
+            fix.insert_line = extras->fix_insert_line;
+            fix.insert_indent = extras->fix_has_indent ? extras->fix_indent : NULL;
+            report.fix = &fix;
+        } else if (extras->help[0] != '\0') {
+            report.help = extras->help;
+        }
         lz_report_write(source, &report, color, out);
     }
     lz_report_write_summary(diagnostics->count + diagnostics->dropped, diagnostics->dropped, color,

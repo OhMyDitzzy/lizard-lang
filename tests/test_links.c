@@ -226,7 +226,7 @@ static void check_cycle_with_link_help(const char *text, const char *message) {
     run(&program, text, 0);
     LZ_CHECK(program.compile_status == LZ_OK);
     bool ok = program.run_status != LZ_OK && strstr(program.vm.error, message) != NULL &&
-              strstr(program.vm.error_help, "use a link field") != NULL;
+              strstr(program.vm.error_help, "link") != NULL;
     if (!ok) {
         fprintf(stderr, "program:\n%s\nexpected a cycle error [%s] with a link hint; got [%s] [%s]\n",
                 text, message, program.vm.error, program.vm.error_help);
@@ -238,8 +238,8 @@ static void check_cycle_with_link_help(const char *text, const char *message) {
 static void test_cycle_message(void) {
     check_cycle_with_link_help("class Box { pub inner: any = nil }\nlet a = Box()\na.inner = a\n",
                                "cannot store");
-    check_run_error("let a = []\nlet b = [a]\na.push(b)\n", "use a link field");
-    check_run_error("let a = {}\nlet b = {\"a\": a}\na[\"b\"] = b\n", "use a link field");
+    check_run_error("let a = []\nlet b = [a]\na.push(b)\n", "reference cycle");
+    check_run_error("let a = {}\nlet b = {\"a\": a}\na[\"b\"] = b\n", "reference cycle");
     /* A parent/child tree with a link back to the parent is fine. */
     check_output("class Node { pub name: string\n  pub link parent: Node = nil\n  pub children: Node[] = [] }\n"
                  "let root = Node(name: \"root\")\nlet kid = Node(name: \"kid\", parent: root)\n"

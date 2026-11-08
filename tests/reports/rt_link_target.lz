@@ -1,0 +1,5 @@
+class A {
+    pub x = 1
+}
+let l = link(A())
+let y = l + 1

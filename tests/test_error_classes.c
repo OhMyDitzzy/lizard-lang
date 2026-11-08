@@ -389,7 +389,7 @@ static void test_kind_limit(void) {
 }
 
 static void test_cycles(void) {
-    const char *cycle = "cannot store: this would create a reference cycle (through field 'items' of X)";
+    const char *cycle = "cannot store: this would create a reference cycle";
     const char *x = "error X : RuntimeError {\n pub items: any = []\n pub fn grow(self) { self.items = [self] }\n"
                     " pub fn grow_nested(self) { self.items = [[self]] }\n"
                     " pub fn grow_cause(self) { self.items = X(\"n\", cause: self) }\n"
@@ -418,7 +418,7 @@ static void test_cycles(void) {
     check_run_error("error X : RuntimeError { pub n: int = 0 }\nlet e = X(\"m\")\ne.data = e\n", "cannot assign to field 'data' of error");
     /* a cycle caught and the error kept: nothing leaks (finish checks live_objects) */
     (void)snprintf(text, sizeof text, "%slet e = X(\"m\")\ntry { e.grow() } catch k { println(k.message) }\nprintln(e.items)\n", x);
-    check_output(text, "cannot store: this would create a reference cycle (through field 'items' of X)\n[]\n");
+    check_output(text, "cannot store: this would create a reference cycle\n[]\n");
     /* the valid versions work */
     (void)snprintf(text, sizeof text, "%slet e = X(\"m\")\ne.fine()\nprintln(e.items)\n", x);
     check_output(text, "[1, [2]]\n");

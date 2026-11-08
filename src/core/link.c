@@ -240,7 +240,9 @@ void lz_link_table_free(LzVM *vm) {
 }
 
 LzStatus lz_vm_link_error(LzVM *vm) {
-    return lz_vm_set_error(vm, LZ_ERR_TYPE, "a link has to be read with .target first, got link");
+    LzStatus status = lz_vm_set_error(vm, LZ_ERR_TYPE, "a link has to be read with .target first, got link");
+    lz_vm_set_help(vm, "use l.target to get the object, and check l.alive first");
+    return status;
 }
 
 LzValue lz_link_deref(const LzLink *link) {

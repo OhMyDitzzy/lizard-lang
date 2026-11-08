@@ -1,0 +1,4 @@
+fn f() -> dict[string, int] {
+    let x = 1
+}
+f()

@@ -40,7 +40,7 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->handler_count = 0;
     vm->trace_source = NULL;
     vm->error_suggestions.count = 0;
-    vm->error_help[0] = '\0';
+    lz_vm_clear_error_extras(vm);
     vm->text_status = LZ_OK;
     vm->has_classes = false;
     vm->exts = NULL;
@@ -193,7 +193,7 @@ bool lz_vm_take_text_status(LzVM *vm, LzStatus *status) {
 LzStatus lz_vm_set_error(LzVM *vm, LzStatus status, const char *format, ...) {
     va_list args;
     vm->error_suggestions.count = 0;
-    vm->error_help[0] = '\0';
+    lz_vm_clear_error_extras(vm);
     va_start(args, format);
     (void)vsnprintf(vm->error, sizeof vm->error, format, args);
     va_end(args);
@@ -205,4 +205,42 @@ LzStatus lz_vm_set_error(LzVM *vm, LzStatus status, const char *format, ...) {
         lz_value_release(&vm->heap, &old);
     }
     return status;
+}
+
+void lz_vm_set_help(LzVM *vm, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    (void)vsnprintf(vm->error_help, sizeof vm->error_help, format, args);
+    va_end(args);
+}
+
+void lz_vm_set_note(LzVM *vm, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    (void)vsnprintf(vm->error_note, sizeof vm->error_note, format, args);
+    va_end(args);
+}
+
+void lz_vm_set_label(LzVM *vm, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    (void)vsnprintf(vm->error_label, sizeof vm->error_label, format, args);
+    va_end(args);
+}
+
+void lz_vm_set_fix(LzVM *vm, const char *headline, uint32_t offset, size_t delete_length,
+                   const char *insert_text) {
+    LzVMFix *fix = &vm->error_fix;
+    fix->present = true;
+    fix->offset = offset;
+    fix->delete_length = (uint32_t)delete_length;
+    (void)snprintf(fix->headline, sizeof fix->headline, "%s", headline);
+    (void)snprintf(fix->insert_text, sizeof fix->insert_text, "%s", insert_text);
+}
+
+void lz_vm_clear_error_extras(LzVM *vm) {
+    vm->error_help[0] = '\0';
+    vm->error_note[0] = '\0';
+    vm->error_label[0] = '\0';
+    vm->error_fix.present = false;
 }

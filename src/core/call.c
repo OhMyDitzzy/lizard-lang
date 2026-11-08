@@ -12,6 +12,7 @@
 #include "lizard/class.h"
 #include "lizard/link.h"
 #include "lizard/native.h"
+#include "lizard/suggest.h"
 #include "lizard/vm.h"
 
 /*
@@ -22,6 +23,12 @@
 
 static LzStatus malformed(LzVM *vm, const char *what) {
     return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "malformed bytecode: %s", what);
+}
+
+static LzStatus not_callable_error(LzVM *vm) {
+    LzStatus status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "can only call functions");
+    lz_vm_set_help(vm, "only functions and classes can be called; did you forget an operator?");
+    return status;
 }
 
 static LzStatus stack_overflow(LzVM *vm) {
@@ -41,20 +48,39 @@ static const char *plural(size_t n) {
     return n == 1 ? "" : "s";
 }
 
+/* "signature: f(a, b = ..., *rest)": the parameters of `function`, for a call that did not fit. */
+static void signature_help(LzVM *vm, const LzFunction *function) {
+    char text[256];
+    size_t used = (size_t)snprintf(text, sizeof text, "signature: %s(", lz_function_display_name(function));
+    for (size_t i = 0; i < lz_function_slots(function) && used < sizeof text; i++) {
+        bool rest = i >= function->param_count;
+        used += (size_t)snprintf(text + used, sizeof text - used, "%s%s%s%s", i == 0 ? "" : ", ",
+                                 rest ? "*" : "", function->param_names[i]->data,
+                                 !rest && i >= function->required ? " = ..." : "");
+    }
+    if (used < sizeof text) {
+        (void)snprintf(text + used, sizeof text - used, ")");
+    }
+    lz_vm_set_help(vm, "%s", text);
+}
+
 static LzStatus arity_error(LzVM *vm, const LzFunction *function, size_t given) {
     const char *name = lz_function_display_name(function);
     size_t required = function->required;
     size_t most = function->param_count;
+    LzStatus status;
     if (function->has_rest) {
-        return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): expected at least %zu argument%s, got %zu",
-                               name, required, plural(required), given);
+        status = lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): expected at least %zu argument%s, got %zu",
+                                 name, required, plural(required), given);
+    } else if (required == most) {
+        status = lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): expected %zu argument%s, got %zu", name,
+                                 required, plural(required), given);
+    } else {
+        status = lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): expected %zu to %zu arguments, got %zu", name,
+                                 required, most, given);
     }
-    if (required == most) {
-        return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): expected %zu argument%s, got %zu", name,
-                               required, plural(required), given);
-    }
-    return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): expected %zu to %zu arguments, got %zu", name,
-                           required, most, given);
+    signature_help(vm, function);
+    return status;
 }
 
 /* Bit i is set for every parameter below argc: the arguments the caller passed by position. */
@@ -65,8 +91,11 @@ static uint64_t supplied_mask(size_t argc) {
 static LzStatus push_frame(LzVM *vm, LzClosure *closure, size_t base, uint64_t supplied,
                            size_t resume_ip, uint32_t call_offset) {
     if (vm->frame_count >= LZ_FRAMES_MAX) {
-        return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
-                               "stack overflow: too many nested calls (limit %d)", LZ_FRAMES_MAX);
+        LzStatus status = lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
+                                          "stack overflow: too many nested calls (limit %d)", LZ_FRAMES_MAX);
+        lz_vm_set_help(vm, "a function calls itself without a base case, or the recursion is too deep (limit %d)",
+                       LZ_FRAMES_MAX);
+        return status;
     }
     vm->frames[vm->frame_count - 1].ip = resume_ip;
     LzCallFrame *frame = &vm->frames[vm->frame_count++];
@@ -159,7 +188,7 @@ static LzStatus unwrap_bound(LzVM *vm, size_t callee_index, size_t *argc) {
         if (bound->skip_first) {
             if (*argc == 0) {
                 lz_value_release(&vm->heap, &callee);
-                return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "can only call functions");
+                return not_callable_error(vm);
             }
             LzValue first = vm->stack[callee_index + 1];
             memmove(&vm->stack[callee_index + 1], &vm->stack[callee_index + 2],
@@ -227,7 +256,7 @@ LzStatus lz_vm_call(LzVM *vm, size_t argc, size_t resume_ip, uint32_t call_offse
     }
     if (!lz_value_is_closure(callee)) {
         return lz_value_is_link(callee) ? lz_vm_link_error(vm)
-                                        : lz_vm_set_error(vm, LZ_ERR_RUNTIME, "can only call functions");
+                                        : not_callable_error(vm);
     }
 
     LzClosure *closure = lz_value_as_closure(callee);
@@ -390,6 +419,29 @@ static int find_param(const LzFunction *function, const char *name, size_t lengt
     return -1;
 }
 
+/* A named argument that is no parameter: the closest name, then the names there are. */
+static void unknown_argument_help(LzVM *vm, const LzFunction *function, const char *name, size_t length) {
+    char text[300];
+    size_t used = 0;
+    LzSuggester suggester;
+    lz_suggester_init(&suggester, name, length);
+    for (size_t i = 0; i < function->param_count; i++) {
+        lz_suggester_offer(&suggester, function->param_names[i]->data);
+    }
+    if (suggester.found.count > 0) {
+        used += (size_t)snprintf(text, sizeof text, "did you mean `%s`? ", suggester.found.names[0]);
+    }
+    used += (size_t)snprintf(text + used, sizeof text - used, "the parameters are: ");
+    for (size_t i = 0; i < function->param_count && used < sizeof text; i++) {
+        used += (size_t)snprintf(text + used, sizeof text - used, "%s%s", i == 0 ? "" : ", ",
+                                 function->param_names[i]->data);
+    }
+    if (function->param_count == 0) {
+        (void)snprintf(text + used, sizeof text - used, "none");
+    }
+    lz_vm_set_help(vm, "%s", text);
+}
+
 LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint16_t names_index,
                        size_t resume_ip, uint32_t call_offset, bool *entered) {
     *entered = false;
@@ -418,7 +470,7 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
         if (lz_value_is_link(callee)) {
             return lz_vm_link_error(vm);
         }
-        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "can only call functions");
+        return not_callable_error(vm);
     }
     uint8_t error_kind = 0;
     bool makes_error = native && lz_native_error_kind((const LzNative *)callee->as.object, &error_kind);
@@ -473,7 +525,7 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
                 return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): builtin functions do not take named arguments",
                                        ((const LzNative *)callee->as.object)->name->data);
             }
-            return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "can only call functions");
+            return not_callable_error(vm);
         }
     }
     if (lz_value_is_class(&vm->stack[callee_index])) {
@@ -548,6 +600,7 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
             status = lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): unexpected named argument '%.*s'",
                                      lz_function_display_name(function), (int)(end - position),
                                      names->data + position);
+            unknown_argument_help(vm, function, names->data + position, end - position);
             drop_values(vm, named, named_count);
             return status;
         }
@@ -571,6 +624,7 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
         if (((mask >> i) & 1u) == 0) {
             status = lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): missing argument '%s'",
                                      lz_function_display_name(function), function->param_names[i]->data);
+            signature_help(vm, function);
             drop_values(vm, named, named_count);
             return status;
         }

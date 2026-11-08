@@ -1,0 +1,9 @@
+error: cannot assign to constant 'k'
+ --> c_assign_const.lz:2:1
+  |
+2 | k = 2
+  | ^
+  |
+  = help: declare it with let instead of const if its value must change
+
+error: aborting due to 1 previous error

@@ -1,0 +1,9 @@
+error: type mismatch: expected int, got "5"
+ --> rt_type_annotation.lz:1:14
+  |
+1 | let n: int = "5"
+  |              ^^^
+  |
+  = help: convert the value: int("5")
+
+error: aborting due to 1 previous error

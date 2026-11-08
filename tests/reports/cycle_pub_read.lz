@@ -1,0 +1,10 @@
+class Node {
+    pub read next = nil
+    pub fn set(self, other) {
+        self.next = other
+    }
+}
+let a = Node()
+let b = Node()
+a.set(b)
+b.set(a)

@@ -1,0 +1,2 @@
+let b = 0
+println(10 / b)

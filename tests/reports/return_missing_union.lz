@@ -1,0 +1,4 @@
+fn f() -> int | string {
+    let x = 1
+}
+f()

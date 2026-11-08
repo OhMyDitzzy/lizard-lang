@@ -1,0 +1,9 @@
+error: 'return' outside of a function
+ --> c_return_outside.lz:1:1
+  |
+1 | return 1
+  | ^^^^^^
+  |
+  = help: 'return' only works inside a function: fn name() { return value }
+
+error: aborting due to 1 previous error

@@ -302,7 +302,7 @@ static void test_fields_and_chain(void) {
 }
 
 static void test_cycles(void) {
-    const char *msg = "cannot contain itself";
+    const char *msg = "reference cycle";
     check_run_error("error E\nlet d = {}\nlet e = E(\"m\", data: d)\nd[\"e\"] = e\n", msg);
     check_run_error("error E\nlet a = []\nlet e = E(\"m\", data: a)\npush(a, e)\n", msg);
     /* Through a nested container and through the cause chain. */

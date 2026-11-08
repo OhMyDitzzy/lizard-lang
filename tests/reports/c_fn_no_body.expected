@@ -1,0 +1,9 @@
+error: expected '{' or '=>' before function body
+ --> c_fn_no_body.lz:1:7
+  |
+1 | fn f()
+  |       ^
+  |
+  = help: write the body as { ... } or as => expression
+
+error: aborting due to 1 previous error

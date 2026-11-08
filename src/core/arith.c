@@ -91,7 +91,9 @@ static LzStatus concat(LzVM *vm, const LzValue *left, const LzValue *right, LzVa
 }
 
 static LzStatus division_by_zero(LzVM *vm) {
-    return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "division by zero");
+    LzStatus status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "division by zero");
+    lz_vm_set_help(vm, "check the divisor before dividing: if b != 0 { ... }");
+    return status;
 }
 
 static LzStatus integer_floor_divide(LzVM *vm, int64_t a, int64_t b, LzValue *result) {
@@ -293,6 +295,18 @@ LzStatus lz_arith_bit_not(LzVM *vm, const LzValue *operand, LzValue *result) {
     return LZ_OK;
 }
 
+/* What to do about an operator that got the wrong kinds of operands, when there is a clear fix. */
+static void mixed_operands_help(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right) {
+    bool text_and_number = (is_string(left) && is_number(right)) || (is_number(left) && is_string(right));
+    if (left->type == LZ_VAL_NIL || right->type == LZ_VAL_NIL) {
+        lz_vm_set_help(vm, "a value is nil here; check it first: if x != nil { ... }");
+    } else if (text_and_number && op == LZ_OP_ADD) {
+        lz_vm_set_help(vm, "convert one side: str(n) to join them as text, or int(s) to add them as numbers");
+    } else if (is_string(left) || is_string(right)) {
+        lz_vm_set_help(vm, "convert the text to a number first: int(s) or float(s)");
+    }
+}
+
 LzStatus lz_arith_binary(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right,
                          LzValue *result) {
     if (lz_value_is_instance(left) || lz_value_is_instance(right)) {
@@ -322,9 +336,12 @@ LzStatus lz_arith_binary(LzVM *vm, LzOpCode op, const LzValue *left, const LzVal
         return lz_vm_link_error(vm);
     }
     if (!is_number(left) || !is_number(right)) {
-        return lz_vm_set_error(vm, LZ_ERR_RUNTIME,
-                               op == LZ_OP_ADD ? "operands must be two numbers or two strings (or two arrays)"
-                                               : "operands must be numbers");
+        LzStatus status = lz_vm_set_error(
+            vm, LZ_ERR_RUNTIME,
+            op == LZ_OP_ADD ? "operands must be two numbers or two strings (or two arrays)"
+                            : "operands must be numbers");
+        mixed_operands_help(vm, op, left, right);
+        return status;
     }
 
     if (op == LZ_OP_DIVIDE) {

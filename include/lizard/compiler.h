@@ -9,12 +9,32 @@
 #define LZ_MAX_DIAGNOSTICS 16
 #define LZ_MAX_NAME_HINTS 64
 
+/*
+ * What an error says beyond its message: text for the label, a note and a help, and optionally
+ * a visual fix (see LzFix in report.h): delete `fix_delete` bytes at `fix_offset` and insert
+ * `fix_text`, or put `fix_text` on a new line before the line of `fix_offset`.
+ */
+typedef struct LzDiagExtras {
+    char label[160]; /* when not empty, replaces LzDiagnostic.label */
+    char note[200];
+    char help[200]; /* a "= help:" line; the fallback when the fix cannot be drawn */
+    bool has_fix;
+    bool fix_insert_line;
+    bool fix_has_indent;
+    uint32_t fix_offset;
+    uint32_t fix_delete;
+    char fix_headline[96];
+    char fix_text[128];
+    char fix_indent[40];
+} LzDiagExtras;
+
 typedef struct LzDiagnostic {
     uint32_t offset;
     uint32_t length;
     char message[256]; /* as long as vm->error, so nothing is cut */
     const char *label; /* short text under the carets (static string), or NULL */
     LzSuggestions suggestions; /* "did you mean": names close to the one used, if any */
+    LzDiagExtras extras;
 } LzDiagnostic;
 
 /*

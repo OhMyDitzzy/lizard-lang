@@ -1,0 +1,5 @@
+class P {
+    pub a
+    pub b
+}
+let p = P(1, 2, 3)

@@ -1,0 +1,8 @@
+error: this link points at nothing any more (its object was freed)
+ --> rt_link_dead.lz:5:11
+  |
+5 | println(l.x)
+  |           ^
+  |
+  = help: check l.alive before using it, or keep the owner of the object alive as long as you need it
+

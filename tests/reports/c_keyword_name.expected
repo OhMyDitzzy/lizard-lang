@@ -1,0 +1,15 @@
+error: expected a parameter name
+ --> c_keyword_name.lz:1:6
+  |
+1 | fn f(fn) {}
+  |      ^^
+  |
+  = help: `fn` is a keyword; pick another name, e.g. my_name
+
+error: expected '(' after 'fn'
+ --> c_keyword_name.lz:1:8
+  |
+1 | fn f(fn) {}
+  |        ^
+
+error: aborting due to 2 previous errors

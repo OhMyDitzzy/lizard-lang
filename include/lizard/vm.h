@@ -60,6 +60,19 @@ typedef struct LzErrorType {
 
 struct LzSource;
 
+/*
+ * A visual fix for the run-time error in vm->error (see LzFix in report.h): an edit at a source
+ * offset, drawn by the CLI as the corrected line. Optional; vm->error_help is the text the CLI
+ * falls back to when the edit cannot be placed.
+ */
+typedef struct LzVMFix {
+    bool present;
+    uint32_t offset;
+    uint32_t delete_length;
+    char headline[128];
+    char insert_text[160];
+} LzVMFix;
+
 struct LzVM {
     LzHeap heap;
     LzWriter out;
@@ -102,7 +115,10 @@ struct LzVM {
     const struct LzNative *current_native; /* the native lz_native_call is about to run; valid at its entry only */
     bool trace_fixed;            /* a failed callback already recorded the trace and its frames are gone */
     /* Classes (see class.h). */
-    char error_help[192];        /* "help:" line for the run-time error in vm->error, or empty */
+    char error_help[384];        /* "help:" line for the run-time error in vm->error, or empty */
+    char error_note[256];        /* "note:" line (context) for the run-time error in vm->error, or empty */
+    char error_label[160];       /* text written next to the carets of the run-time error, or empty */
+    LzVMFix error_fix;           /* a visual fix for the run-time error, or not present */
     LzStatus text_status;        /* a script to_string/to_debug that failed while a value was being written */
     uint64_t next_class_id;      /* the last LzClass.id handed out */
     struct LzClass **class_registry; /* every live class, sorted by id (weak): see lz_class_by_id */
@@ -294,6 +310,24 @@ LzStatus lz_vm_out_of_memory(LzVM *vm);
 /* A script to_string/to_debug failed while a value was written: takes that status (once). */
 bool lz_vm_take_text_status(LzVM *vm, LzStatus *status);
 LzStatus lz_vm_set_error(LzVM *vm, LzStatus status, const char *format, ...) LZ_PRINTF_FORMAT(3, 4);
+
+/*
+ * Attach a "help:" (what to do about it) or a "note:" (context) line to the error that
+ * lz_vm_set_error just recorded. Call them after lz_vm_set_error, which clears both.
+ * Only write a help when there is a real fix that can be written as code.
+ */
+void lz_vm_set_help(LzVM *vm, const char *format, ...) LZ_PRINTF_FORMAT(2, 3);
+void lz_vm_set_note(LzVM *vm, const char *format, ...) LZ_PRINTF_FORMAT(2, 3);
+/* The text next to the carets ("`Person.relation` would own ..."). Also after lz_vm_set_error. */
+void lz_vm_set_label(LzVM *vm, const char *format, ...) LZ_PRINTF_FORMAT(2, 3);
+/*
+ * A fix drawn under the error: delete `delete_length` bytes at `offset` and insert `insert_text`.
+ * The help text stays as the fallback for a report that cannot draw it.
+ */
+void lz_vm_set_fix(LzVM *vm, const char *headline, uint32_t offset, size_t delete_length,
+                   const char *insert_text);
+/* Clears help, note, label and fix: what lz_vm_set_error does for a new failure. */
+void lz_vm_clear_error_extras(LzVM *vm);
 
 /*
  * Spends cost units of fuel; natives that do heavy work call this so one

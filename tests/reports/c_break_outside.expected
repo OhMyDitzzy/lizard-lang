@@ -1,0 +1,9 @@
+error: 'break' outside of a loop
+ --> c_break_outside.lz:1:1
+  |
+1 | break
+  | ^^^^^
+  |
+  = help: use 'break' inside the body of a `for` or `while` loop
+
+error: aborting due to 1 previous error

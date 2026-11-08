@@ -12,6 +12,10 @@
 #include <stdio.h>
 #include <string.h>
 
+static bool value_is_text(const LzValue *value) {
+    return value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_STRING;
+}
+
 static bool read_u16(const LzChunk *chunk, size_t *ip, uint16_t *out) {
     if (*ip + 2 > chunk->count) {
         return false;
@@ -125,6 +129,21 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
                                       expected.data != NULL ? expected.data : "?",
                                       actual.data != NULL ? actual.data : "?",
                                       lz_value_is_link(value) ? "; use .target" : "");
+    if (!lz_value_is_link(value) && expected.data != NULL && actual.data != NULL) {
+        if (value->type == LZ_VAL_NIL) {
+            lz_vm_set_help(vm, "the value is nil here; give it a value, or change the annotation to %s | nil",
+                           expected.data);
+        } else if (strcmp(expected.data, "string") == 0 && (value->type == LZ_VAL_INT || value->type == LZ_VAL_FLOAT)) {
+            lz_vm_set_help(vm, "convert it with str(n), or change the annotation to %s | %s", expected.data,
+                           actual.data);
+        } else if ((strcmp(expected.data, "int") == 0 || strcmp(expected.data, "float") == 0) &&
+                   value_is_text(value)) {
+            lz_vm_set_help(vm, "convert it with %s(text), or change the annotation to %s | %s", expected.data,
+                           expected.data, actual.data);
+        } else {
+            lz_vm_set_help(vm, "convert it, or change the annotation to %s | %s", expected.data, actual.data);
+        }
+    }
     lz_buffer_free(&expected);
     lz_buffer_free(&actual);
     return status;
@@ -201,12 +220,33 @@ static LzStatus array_push(LzVM *vm) {
     return status;
 }
 
+static void nil_help(LzVM *vm) {
+    lz_vm_set_help(vm, "the value is nil here; check it first: if x != nil { ... }");
+}
+
 static LzStatus not_indexable(LzVM *vm, const LzValue *value) {
     if (lz_value_is_link(value)) {
         return lz_vm_link_error(vm);
     }
-    return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot index a value of type %s",
-                           lz_value_kind_name(value));
+    LzStatus status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot index a value of type %s",
+                                      lz_value_kind_name(value));
+    if (value->type == LZ_VAL_NIL) {
+        nil_help(vm);
+    }
+    return status;
+}
+
+/* "<kind> has no field 'x'" for a value that is neither an instance nor a class. */
+static LzStatus no_field_error(LzVM *vm, const LzValue *value, const LzString *name) {
+    LzStatus status = lz_vm_set_error(vm, LZ_ERR_TYPE, "%s has no field '%s'", lz_value_kind_name(value),
+                                      name->data);
+    if (value->type == LZ_VAL_NIL) {
+        nil_help(vm);
+    } else {
+        lz_vm_set_help(vm, "only objects and errors have fields; %s values have functions: name(x)",
+                       lz_value_kind_name(value));
+    }
+    return status;
 }
 
 /*
@@ -732,7 +772,7 @@ static LzStatus throw_op(LzVM *vm) {
     }
     vm->thrown = thrown;
     vm->error_suggestions.count = 0;
-    vm->error_help[0] = '\0';
+    lz_vm_clear_error_extras(vm);
     (void)snprintf(vm->error, sizeof vm->error, "%s: %.*s",
                    error->kind_name->data, (int)error->message->length,
                    error->message->data);
@@ -814,8 +854,12 @@ static LzStatus set_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
         return LZ_OK;
     }
     if (!lz_value_is_instance(&target) && !lz_value_is_class(&target)) {
-        return lz_vm_set_error(vm, LZ_ERR_TYPE, "cannot assign to field '%s' of %s", name->data,
-                               lz_value_kind_name(&target));
+        LzStatus status = lz_vm_set_error(vm, LZ_ERR_TYPE, "cannot assign to field '%s' of %s", name->data,
+                                          lz_value_kind_name(&target));
+        if (target.type == LZ_VAL_NIL) {
+            nil_help(vm);
+        }
+        return status;
     }
     status = lz_vm_member_set(vm, current_owner(vm), &target, name, &value);
     if (status != LZ_OK) {
@@ -1049,8 +1093,7 @@ static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool wr
         lz_value_release(&vm->heap, &target);
     }
     if (!lz_value_is_error(top)) {
-        return lz_vm_set_error(vm, LZ_ERR_TYPE, "%s has no field '%s'",
-                               lz_value_kind_name(top), name->data);
+        return no_field_error(vm, top, name);
     }
     LzError *error = (LzError *)top->as.object;
     if (error->payload != NULL) {
@@ -1832,8 +1875,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
                 }
             } else if (!lz_value_is_instance(&vm->stack[vm->stack_count - 1]) &&
                        !lz_value_is_class(&vm->stack[vm->stack_count - 1])) {
-                status = lz_vm_set_error(vm, LZ_ERR_TYPE, "%s has no field '%s'",
-                                         lz_value_kind_name(&vm->stack[vm->stack_count - 1]), name->data);
+                status = no_field_error(vm, &vm->stack[vm->stack_count - 1], name);
             } else {
                 status = member_get_op(vm, name, true, false);
             }

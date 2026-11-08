@@ -376,9 +376,7 @@ LzStatus lz_array_check_store(LzVM *vm, LzArray *array, const LzValue *value) {
             return lz_vm_out_of_memory(vm);
         }
         if (cycle > 0) {
-            return lz_vm_set_error(vm, LZ_ERR_RUNTIME,
-                                   "a value cannot contain itself; for a pointer back to the owner, use a "
-                                   "link field (pub link parent: Node = nil)");
+            return lz_vm_cycle_error(vm, NULL, NULL, 'a');
         }
         if (array->element != NULL) {
             charged = lz_vm_charge_fuel(vm, lz_array_cost(lz_value_as_array(value)->count));
@@ -417,9 +415,15 @@ LzStatus lz_array_resolve_index(LzVM *vm, const LzValue *index, size_t count, si
     int64_t position = index->as.integer;
     int64_t resolved = position < 0 ? position + (int64_t)count : position;
     if (resolved < 0 || resolved >= (int64_t)count) {
-        return lz_vm_set_error(vm, LZ_ERR_RUNTIME,
-                               "index %lld out of range for array of length %zu",
-                               (long long)position, count);
+        LzStatus status = lz_vm_set_error(vm, LZ_ERR_RUNTIME,
+                                          "index %lld out of range for array of length %zu",
+                                          (long long)position, count);
+        if (count == 0) {
+            lz_vm_set_help(vm, "the array is empty; check len(a) before reading an item");
+        } else {
+            lz_vm_set_help(vm, "valid indexes are 0..%zu (or -1..-%zu from the end)", count - 1, count);
+        }
+        return status;
     }
     *out = (size_t)resolved;
     return LZ_OK;

@@ -1,0 +1,9 @@
+error: add() expects 2 arguments, got 3
+ --> rt_arity_fn.lz:4:4
+  |
+4 | add(1, 2, 3)
+  |    ^
+  |
+  = help: signature: add(a, b)
+
+error: aborting due to 1 previous error

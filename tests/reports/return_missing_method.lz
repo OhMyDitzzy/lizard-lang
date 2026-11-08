@@ -1,0 +1,6 @@
+class C {
+    fn name(self) -> string {
+        let x = 1
+    }
+}
+C().name()

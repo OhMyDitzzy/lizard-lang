@@ -1,0 +1,5 @@
+class A {
+    pub read x = 1
+}
+let a = A()
+a.x = 2

@@ -38,8 +38,9 @@ The same check covers arrays (`a.push(a)`) and dicts (`a["x"] = a`). The message
 the field and points at the fixed-size alternative:
 
 ```
-cannot store: this would create a reference cycle (through field 'next' of Node)
-help: a value cannot contain itself; for a pointer back to the owner, use a link field (pub link parent: Node = nil)
+cannot store: this would create a reference cycle
+help: make the field a link: it points at an object without owning it
+    pub link next = nil
 ```
 
 ## Skink: cycles through closures

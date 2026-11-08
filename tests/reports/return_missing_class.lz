@@ -1,0 +1,7 @@
+class C {
+    pub x = 1
+}
+fn f() -> C {
+    let x = 1
+}
+f()

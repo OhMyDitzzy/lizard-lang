@@ -1,0 +1,9 @@
+error: unterminated string
+ --> c_unclosed_string.lz:1:9
+  |
+1 | let s = "abc
+  |         ^
+  |
+  = help: close the string with a matching quote on the same line
+
+error: aborting due to 1 previous error

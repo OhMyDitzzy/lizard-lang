@@ -1,4 +1,5 @@
 #include "lizard/class.h"
+#include "lizard/source.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -476,8 +477,10 @@ static LzStatus read_only_error(LzVM *vm, const LzClass *cls, const LzMember *me
 }
 
 static LzStatus unset_error(LzVM *vm, const LzClass *cls, const LzMember *member) {
-    return fail(vm, LZ_ERR_RUNTIME, NULL, "field '%s' of %s has no value yet (assign it in init())",
-                member->name->data, cls->name->data);
+    return fail(vm, LZ_ERR_RUNTIME,
+                "give the field a default (pub x = 0) or pass it when you create the object",
+                "field '%s' of %s has no value yet (assign it in init())", member->name->data,
+                cls->name->data);
 }
 
 /* ---- inheritance ---- */
@@ -966,11 +969,7 @@ LzStatus lz_instance_store(LzVM *vm, LzInstance *instance, const LzMember *membe
             return lz_vm_out_of_memory(vm);
         }
         if (cycle > 0) {
-            return fail(vm, LZ_ERR_RUNTIME,
-                        "a value cannot contain itself; for a pointer back to the owner, use a link "
-                        "field (pub link parent: Node = nil)",
-                        "cannot store: this would create a reference cycle (through field '%s' of %s)",
-                        member->name->data, cls->name->data);
+            return lz_vm_cycle_error(vm, instance, member, 'f');
         }
     }
     LzValue stored = *value;
@@ -982,6 +981,82 @@ LzStatus lz_instance_store(LzVM *vm, LzInstance *instance, const LzMember *membe
     instance->unset &= ~((uint64_t)1 << member->slot);
     lz_value_release(&vm->heap, &old);
     return LZ_OK;
+}
+
+
+/* ---- the error for a store that would close a reference cycle ---- */
+
+/*
+ * "pub link relation: Person = nil" for the field `member`, written the way it was declared:
+ * the line of its declaration when the source is at hand, else built from what the class knows.
+ */
+static void link_declaration(const LzVM *vm, const LzMember *member, char *out, size_t size) {
+    const char *prefix = member->vis == LZ_VIS_PUB        ? "pub link "
+                         : member->vis == LZ_VIS_PUB_READ ? "pub read link "
+                                                          : "link ";
+    const LzSource *source = vm->trace_source;
+    if (source != NULL && member->offset < source->length &&
+        strncmp(source->text + member->offset, member->name->data, member->name->length) == 0) {
+        size_t end = member->offset;
+        while (end < source->length && source->text[end] != '\n' && source->text[end] != '\r') {
+            end++;
+        }
+        while (end > member->offset && (source->text[end - 1] == ' ' || source->text[end - 1] == '\t')) {
+            end--;
+        }
+        (void)snprintf(out, size, "%s%.*s", prefix, (int)(end - member->offset),
+                       source->text + member->offset);
+        return;
+    }
+    LzBuffer type = {0};
+    LzWriter type_out = lz_writer_from_buffer(&type);
+    bool annotated = member->type.kinds != LZ_KINDS_ANY || member->type.literal_count > 0;
+    if (annotated) {
+        lz_type_describe(&member->type, &type_out);
+    }
+    (void)snprintf(out, size, "%s%s%s%s%s", prefix, member->name->data, annotated ? ": " : "",
+                   annotated && type.data != NULL ? type.data : "",
+                   member->thunk.type == LZ_VAL_NIL ? "" : " = ...");
+    lz_buffer_free(&type);
+}
+
+LzStatus lz_vm_cycle_error(LzVM *vm, const LzInstance *instance, const LzMember *member, char kind) {
+    (void)lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot store: this would create a reference cycle");
+    if (instance == NULL || member == NULL) {
+        bool is_array = kind == 'a';
+        vm->error_kind = (uint8_t)LZ_ERROR_VALUE;
+        lz_vm_set_label(vm, "this %s would end up containing itself", is_array ? "array" : "dict");
+        lz_vm_set_note(vm, "%s", is_array ? "an array owns its items, so it cannot end up inside itself"
+                                          : "a dict owns its values, so it cannot end up inside itself");
+        lz_vm_set_help(vm, is_array ? "store a link instead: items.push(link(x)), and read it back with .target"
+                                    : "store a link instead: d[key] = link(x), and read it back with .target");
+        return LZ_ERR_RUNTIME;
+    }
+    vm->error_kind = (uint8_t)LZ_ERROR_RUNTIME; /* the wording must not pick another kind */
+    lz_vm_set_label(vm, "`%s.%s` would own an object that already owns this one",
+                    instance->cls->name->data, member->name->data);
+    if (instance->owner_error != NULL) {
+        lz_vm_set_note(vm, "an error owns its fields, its `cause:` and its `data:`, so a cause cannot "
+                           "lead back to the error that holds it");
+    } else {
+        lz_vm_set_note(vm, "an object owns what its fields hold, so two objects cannot own each other");
+    }
+    char declaration[256];
+    link_declaration(vm, member, declaration, sizeof declaration);
+    lz_vm_set_help(vm, "make the field a link: it points at an object without owning it\n%s", declaration);
+    /*
+     * The visual fix: `link ` goes in front of the field's name. Only when the declaration is
+     * known to be there (the name is at the recorded offset), never by guessing.
+     */
+    const LzSource *source = vm->trace_source;
+    bool placed = source == NULL || (member->offset < source->length &&
+                                     strncmp(source->text + member->offset, member->name->data,
+                                             member->name->length) == 0);
+    if (placed && member->offset != LZ_NO_OFFSET) {
+        lz_vm_set_fix(vm, "make the field a link: it points at an object without owning it",
+                      member->offset, 0, "link ");
+    }
+    return LZ_ERR_RUNTIME;
 }
 
 /* ---- running script code from C ---- */
@@ -1051,6 +1126,24 @@ static LzStatus finish_instance(LzVM *vm, LzInstance *instance) {
     return LZ_OK;
 }
 
+/* "signature: Person(name, relation)": the constructor of `cls`, an error's message first. */
+static void signature_help(const LzClass *cls, bool with_message, char *out, size_t size) {
+    size_t used = (size_t)snprintf(out, size, "signature: %s(", cls->name->data);
+    bool first = true;
+    if (with_message && used < size) {
+        used += (size_t)snprintf(out + used, size - used, "message");
+        first = false;
+    }
+    for (size_t i = 0; i < cls->param_count && used < size; i++) {
+        used += (size_t)snprintf(out + used, size - used, "%s%s", first ? "" : ", ",
+                                 field_at(cls, cls->params[i])->name->data);
+        first = false;
+    }
+    if (used < size) {
+        (void)snprintf(out + used, size - used, ")");
+    }
+}
+
 /* Which parameter of the constructor is `name`: a field, public. Fails with the right message. */
 static LzStatus param_of(LzVM *vm, const LzClass *cls, const LzString *name, size_t *param,
                          const char *callname) {
@@ -1075,7 +1168,10 @@ static LzStatus param_of(LzVM *vm, const LzClass *cls, const LzString *name, siz
     if (suggester.found.count > 0) {
         (void)snprintf(suggestion, sizeof suggestion, " (did you mean '%s'?)", suggester.found.names[0]);
     }
-    return fail(vm, LZ_ERR_ARITY, NULL, "%s has no field '%s'%s", cls->name->data, name->data, suggestion);
+    char signature[256];
+    signature_help(cls, false, signature, sizeof signature);
+    return fail(vm, LZ_ERR_ARITY, signature, "%s has no field '%s'%s", cls->name->data, name->data,
+                suggestion);
 }
 
 static const LzString *name_at(LzVM *vm, const char *names, size_t length, size_t index,
@@ -1116,10 +1212,14 @@ static LzStatus construct_impl(LzVM *vm, LzClass *cls, size_t positional, const 
                 }
                 used += (size_t)snprintf(list + used, sizeof list - used, ", %s", field->data);
             }
-            return fail(vm, LZ_ERR_ARITY, NULL, "%s takes at most %zu argument%s (%s), got %zu", cls->name->data,
+            char signature[256];
+            signature_help(cls, true, signature, sizeof signature);
+            return fail(vm, LZ_ERR_ARITY, signature, "%s takes at most %zu argument%s (%s), got %zu", cls->name->data,
                         cls->param_count + 1, cls->param_count + 1 == 1 ? "" : "s", list, positional + 1);
         }
-        return fail(vm, LZ_ERR_ARITY, NULL, "%s takes at most %zu argument%s, got %zu", cls->name->data,
+        char signature[256];
+        signature_help(cls, false, signature, sizeof signature);
+        return fail(vm, LZ_ERR_ARITY, signature, "%s takes at most %zu argument%s, got %zu", cls->name->data,
                     cls->param_count, cls->param_count == 1 ? "" : "s", positional);
     }
     /* Which argument fills which field. */
@@ -1145,7 +1245,10 @@ static LzStatus construct_impl(LzVM *vm, LzClass *cls, size_t positional, const 
     for (size_t i = 0; i < cls->param_count; i++) {
         const LzMember *member = field_at(cls, cls->params[i]);
         if (given[i] == NULL && member->thunk.type == LZ_VAL_NIL) {
-            return fail(vm, LZ_ERR_ARITY, NULL, "%s needs '%s'", cls->name->data, member->name->data);
+            char signature[256];
+            signature_help(cls, false, signature, sizeof signature);
+            return fail(vm, LZ_ERR_ARITY, signature, "%s needs '%s'", cls->name->data,
+                        member->name->data);
         }
     }
 
@@ -1538,10 +1641,12 @@ static LzStatus link_value_for(LzVM *vm, const LzValue *value, LzValue *cell, Lz
         }
     }
     if (target == NULL && value->type != LZ_VAL_NIL) {
-        return lz_vm_set_error(
+        LzStatus status = lz_vm_set_error(
             vm, LZ_ERR_TYPE,
             "link() needs an object that can be shared (instance, array, dict or function), got %s",
             lz_value_kind_name(value));
+        lz_vm_set_help(vm, "strings and numbers are copied, not shared; link an instance, array, dict or function");
+        return status;
     }
     LzLink *link = lz_link_new(&vm->heap, target);
     if (link == NULL) {
@@ -1674,11 +1779,17 @@ LzStatus lz_vm_link_target(LzVM *vm, const LzValue *value, LzValue *target, bool
     return LZ_OK;
 }
 
+static LzStatus dead_link_error(LzVM *vm, LzStatus status) {
+    (void)lz_vm_set_error(vm, status, "this link points at nothing any more (its object was freed)");
+    lz_vm_set_help(vm, "check l.alive before using it, or keep the owner of the object alive as long as you need it");
+    return status;
+}
+
 LzStatus lz_vm_link_member_get(LzVM *vm, uint64_t owner, const LzValue *value, const LzString *name,
                                LzValue *result) {
     LzValue target = lz_link_deref(lz_value_as_link(value));
     if (target.type == LZ_VAL_NIL) {
-        return lz_vm_set_error(vm, LZ_ERR_TYPE, "this link points at nothing any more (its object was freed)");
+        return dead_link_error(vm, LZ_ERR_TYPE);
     }
     if (!lz_value_is_instance(&target)) {
         /* Only an instance has fields and methods to read through its link: the rest needs .target. */
@@ -1694,7 +1805,7 @@ LzStatus lz_vm_link_member_set(LzVM *vm, uint64_t owner, const LzValue *value, c
                                const LzValue *assigned) {
     LzValue target = lz_link_deref(lz_value_as_link(value));
     if (target.type == LZ_VAL_NIL) {
-        return lz_vm_set_error(vm, LZ_ERR_TYPE, "this link points at nothing any more (its object was freed)");
+        return dead_link_error(vm, LZ_ERR_TYPE);
     }
     LzStatus status = lz_vm_member_set(vm, owner, &target, name, assigned);
     lz_value_release(&vm->heap, &target);
@@ -1716,7 +1827,7 @@ LzStatus lz_vm_member_set(LzVM *vm, uint64_t owner, const LzValue *target,
         LzFound at;
         const LzMember *member = lz_class_lookup(cls, name, &at) ? at.member : NULL;
         if (member != NULL && member->kind == LZ_MEMBER_CONST) {
-            return fail(vm, LZ_ERR_RUNTIME, NULL, "'%s' is a constant and cannot be assigned", name->data);
+            return fail(vm, LZ_ERR_RUNTIME, "a constant is fixed when the class is defined; use a field (pub x = 0) for a value that changes", "'%s' is a constant and cannot be assigned", name->data);
         }
         if (member == NULL) {
             return no_member(vm, cls, owner, name, "constant or function", false, true);
@@ -1740,10 +1851,10 @@ LzStatus lz_vm_member_set(LzVM *vm, uint64_t owner, const LzValue *target,
         }
         return lz_instance_store(vm, instance, member, value);
     case LZ_MEMBER_GETTER:
-        return fail(vm, LZ_ERR_RUNTIME, NULL, "'%s' is a computed property and cannot be assigned",
-                    name->data);
+        return fail(vm, LZ_ERR_RUNTIME, "change the fields it is computed from, or write a method to set them",
+                    "'%s' is a computed property and cannot be assigned", name->data);
     case LZ_MEMBER_CONST:
-        return fail(vm, LZ_ERR_RUNTIME, NULL, "'%s' is a constant and cannot be assigned", name->data);
+        return fail(vm, LZ_ERR_RUNTIME, "a constant is fixed when the class is defined; use a field (pub x = 0) for a value that changes", "'%s' is a constant and cannot be assigned", name->data);
     case LZ_MEMBER_METHOD:
     case LZ_MEMBER_STATIC:
         return fail(vm, LZ_ERR_RUNTIME, NULL, "'%s' is a function and cannot be assigned", name->data);
@@ -1797,7 +1908,7 @@ static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, 
     }
     LzInstance *instance = lz_value_is_instance(&stand) ? lz_value_as_instance(&stand) : payload_of(&stand);
     if (instance == NULL) {
-        return lz_vm_set_error(vm, LZ_ERR_TYPE, "this link points at nothing any more (its object was freed)");
+        return dead_link_error(vm, LZ_ERR_TYPE);
     }
     if (lz_value_is_link(&receiver) && (strcmp(name->data, "copy") == 0 || strcmp(name->data, "with") == 0)) {
         return lz_vm_link_error(vm); /* copying a cell would not copy the object: read .target first */
@@ -1873,7 +1984,7 @@ static LzStatus class_callee(LzVM *vm, uint64_t owner, const LzString *name, siz
         /* The class is the target; `self` for a static is the class itself, so the slot becomes it. */
         LzValue target = lz_link_deref(lz_value_as_link(&receiver));
         if (target.type == LZ_VAL_NIL) {
-            return lz_vm_set_error(vm, LZ_ERR_TYPE, "this link points at nothing any more (its object was freed)");
+            return dead_link_error(vm, LZ_ERR_TYPE);
         }
         lz_value_retain(&target);
         lz_value_release(&vm->heap, &vm->stack[receiver_index]);
@@ -2185,7 +2296,7 @@ LzStatus lz_vm_method_lookup(LzVM *vm, uint64_t owner, const LzString *name, int
         LzValue target = lz_link_deref(lz_value_as_link(receiver));
         if (target.type != LZ_VAL_OBJECT) {
             if (mode != 0) {
-                return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "this link points at nothing any more (its object was freed)");
+                return dead_link_error(vm, LZ_ERR_RUNTIME);
             }
             return LZ_OK;
         }

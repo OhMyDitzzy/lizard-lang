@@ -230,8 +230,10 @@ LzStatus lz_vm_error_define_constructor(LzVM *vm, LzString *name, uint8_t kind) 
 
 LzStatus lz_vm_error_declare(LzVM *vm, LzString *name, uint8_t parent, uint8_t *out) {
     if (vm->error_type_count >= LZ_ERROR_TYPES_MAX - LZ_ERROR_KIND_COUNT) {
-        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "too many error kinds (limit is %d)",
-                               LZ_ERROR_TYPES_MAX);
+        LzStatus status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "too many error kinds (limit is %d)",
+                                          LZ_ERROR_TYPES_MAX);
+        lz_vm_set_help(vm, "declare fewer error kinds: use one error with a field (pub code: int) instead of one kind per case");
+        return status;
     }
     uint8_t kind = (uint8_t)(LZ_ERROR_KIND_COUNT + vm->error_type_count);
     LzStatus status = lz_vm_error_define_constructor(vm, name, kind);

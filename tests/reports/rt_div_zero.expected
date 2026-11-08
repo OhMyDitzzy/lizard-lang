@@ -1,0 +1,8 @@
+error: division by zero
+ --> rt_div_zero.lz:2:12
+  |
+2 | println(10 / b)
+  |            ^
+  |
+  = help: check the divisor before dividing: if b != 0 { ... }
+

@@ -15,6 +15,26 @@ typedef struct LzReportFrame {
 } LzReportFrame;
 
 /*
+ * A visual fix: a small edit to the source, drawn as the corrected line with markers under
+ * what changed (`+` added, `~` replaced, `-` removed). All text is borrowed.
+ *
+ *   help: make the field a link: it points at an object without owning it
+ *     --> class.lz:3:9
+ *      |
+ *   3  |     pub link relation = nil
+ *      |         +++++
+ */
+typedef struct LzFix {
+    const char *headline;      /* "make the field a link" */
+    const LzSource *source;    /* the file the fix is in (NULL = the error's own file) */
+    size_t offset;             /* where to edit */
+    size_t delete_length;      /* bytes removed (0 = pure insertion) */
+    const char *insert_text;   /* text inserted at offset (may be "") */
+    bool insert_line;          /* the text is a whole new line placed before the line of `offset` */
+    const char *insert_indent; /* indentation of that new line, or NULL = same as the line of offset */
+} LzFix;
+
+/*
  * Everything one error report shows. Text fields are borrowed and optional
  * (NULL leaves that part out).
  *
@@ -40,7 +60,8 @@ typedef struct LzReport {
     size_t length;
     const char *label; /* written next to the carets */
     const char *note;  /* "= note: ..." */
-    const char *help;  /* "= help: ..." */
+    const char *help;  /* "= help: ..." (a line break starts a line of code to copy) */
+    const LzFix *fix;  /* optional: "help: ..." with the corrected line drawn */
     const LzSuggestions *suggestions;
     const LzReportFrame *frames; /* a stack trace, innermost first */
     size_t frame_count;

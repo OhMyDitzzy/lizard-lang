@@ -146,10 +146,12 @@ LzStatus lz_builtin_link(LzVM *vm, int argc, const LzValue *argv, LzValue *resul
         return LZ_OK;
     }
     if (!lz_link_target_ok(&argv[0])) {
-        return lz_vm_set_error(
+        LzStatus status = lz_vm_set_error(
             vm, LZ_ERR_TYPE,
             "link() needs an object that can be shared (instance, array, dict or function), got %s",
             lz_value_kind_name(&argv[0]));
+        lz_vm_set_help(vm, "strings and numbers are copied, not shared; link an instance, array, dict or function");
+        return status;
     }
     LzObject *target = argv[0].type == LZ_VAL_OBJECT ? argv[0].as.object : NULL;
     LzLink *link = lz_link_new(&vm->heap, target);

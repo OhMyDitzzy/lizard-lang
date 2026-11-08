@@ -1,0 +1,9 @@
+error: key "nam" not found
+ --> rt_dict_key.lz:2:10
+  |
+2 | println(d["nam"])
+  |          ^
+  |
+  = help: did you mean "name"?
+              use d.get(key, default) to get a fallback instead of an error
+

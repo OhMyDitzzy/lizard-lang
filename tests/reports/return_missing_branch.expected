@@ -1,0 +1,12 @@
+error: missing return: the function must return a value of type string
+ --> return_missing_branch.lz:5:1
+  |
+5 | }
+  | ^ this function is declared `-> string` but can reach here without returning
+  |
+help: add a return before the closing brace
+  |
+5 +     return "text"
+5 | }
+
+error: aborting due to 1 previous error

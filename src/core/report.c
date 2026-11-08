@@ -133,6 +133,8 @@ static void header(const Out *out, const char *severity, const char *message) {
     raw(out, "\n", 1);
 }
 
+static void put_line_number(const Out *out, size_t number, size_t width);
+
 /* The corrected line with the marker line below it. */
 static void write_suggestion(const Out *out, const LzSource *source, const LzLocation *where,
                              size_t offset, size_t span, const char *candidate, size_t width,
@@ -163,7 +165,7 @@ static void write_suggestion(const Out *out, const LzSource *source, const LzLoc
     gutter_line(out, width);
 
     /* The corrected line; the changed letters stand out in green. */
-    put_unsigned(out, C_BLUE, line_number);
+    put_line_number(out, line_number, width);
     raw(out, " ", 1);
     styled_cstr(out, C_BLUE, "|");
     raw(out, " ", 1);
@@ -194,6 +196,132 @@ static void write_suggestion(const Out *out, const LzSource *source, const LzLoc
     raw(out, "\n", 1);
 }
 
+/* The line number, padded on the right to the gutter width. */
+static void put_line_number(const Out *out, size_t number, size_t width) {
+    put_unsigned(out, C_BLUE, number);
+    spaces(out, width - digit_count(number));
+}
+
+static size_t clamp_offset(const LzSource *source, size_t offset) {
+    return offset > source->length ? source->length : offset;
+}
+
+/* The place a fix edits: its file and the location in it. */
+static const LzSource *fix_source(const LzSource *error_source, const LzFix *fix) {
+    return fix->source != NULL ? fix->source : error_source;
+}
+
+/*
+ * help: <headline>, then the corrected line (or the new line) with markers under what changed.
+ * `+` added, `~` replaced, `-` removed; a whole inserted line has `+` in the margin.
+ */
+static void write_fix(const Out *out, const LzSource *error_source, const LzLocation *error_where,
+                      const LzFix *fix, size_t width) {
+    const LzSource *source = fix_source(error_source, fix);
+    size_t offset = clamp_offset(source, fix->offset);
+    LzLocation where = lz_source_locate(source, offset);
+    const char *insert = fix->insert_text != NULL ? fix->insert_text : "";
+    size_t insert_length = strlen(insert);
+
+    styled_cstr(out, C_GREEN, "help");
+    styled(out, C_BOLD, ": ", 2);
+    styled_cstr(out, C_BOLD, fix->headline != NULL ? fix->headline : "change this");
+    raw(out, "\n", 1);
+
+    bool same_place = source == error_source && where.line == error_where->line;
+    if (!same_place) {
+        spaces(out, width);
+        styled_cstr(out, C_BLUE, "--> ");
+        raw(out, source->name, strlen(source->name));
+        raw(out, ":", 1);
+        put_unsigned(out, NULL, where.line);
+        raw(out, ":", 1);
+        put_unsigned(out, NULL, where.column);
+        raw(out, "\n", 1);
+    }
+    gutter_line(out, width);
+
+    if (fix->insert_line) {
+        /* The new line, then the line it goes in front of. */
+        size_t indent_end = where.line_start;
+        while (indent_end < where.line_end &&
+               (source->text[indent_end] == ' ' || source->text[indent_end] == '\t')) {
+            indent_end++;
+        }
+        put_line_number(out, where.line, width);
+        raw(out, " ", 1);
+        styled_cstr(out, C_GREEN, "+");
+        raw(out, " ", 1);
+        if (fix->insert_indent != NULL) {
+            source_text(out, out->color ? C_GREEN : NULL, fix->insert_indent, 0,
+                        strlen(fix->insert_indent));
+        } else {
+            source_text(out, out->color ? C_GREEN : NULL, source->text, where.line_start, indent_end);
+        }
+        source_text(out, out->color ? C_GREEN : NULL, insert, 0, insert_length);
+        raw(out, "\n", 1);
+
+        put_line_number(out, where.line, width);
+        raw(out, " ", 1);
+        styled_cstr(out, C_BLUE, "|");
+        raw(out, " ", 1);
+        source_text(out, NULL, source->text, where.line_start, where.line_end);
+        raw(out, "\n", 1);
+        return;
+    }
+
+    /* The edit is clipped to its line. */
+    size_t removed = fix->delete_length;
+    if (offset + removed > where.line_end) {
+        removed = where.line_end > offset ? where.line_end - offset : 0;
+    }
+    put_line_number(out, where.line, width);
+    raw(out, " ", 1);
+    styled_cstr(out, C_BLUE, "|");
+    raw(out, " ", 1);
+    source_text(out, NULL, source->text, where.line_start, offset);
+    source_text(out, out->color ? C_GREEN : NULL, insert, 0, insert_length);
+    source_text(out, NULL, source->text, offset + removed, where.line_end);
+    raw(out, "\n", 1);
+
+    gutter(out, width);
+    raw(out, " ", 1);
+    spaces(out, columns(source->text, where.line_start, offset));
+    if (insert_length > 0) {
+        repeat(out, C_GREEN, removed > 0 ? '~' : '+', columns(insert, 0, insert_length));
+    } else if (removed > 0) {
+        repeat(out, C_RED, '-', 1);
+        raw(out, " ", 1);
+        styled_cstr(out, C_RED, "remove `");
+        styled(out, C_RED, source->text + offset, removed);
+        styled_cstr(out, C_RED, "`");
+    }
+    raw(out, "\n", 1);
+}
+
+/*
+ * Text that may span lines: the first line follows the caller's prefix, each later line
+ * (a piece of code to copy, usually) is indented by `indent` columns.
+ */
+static void write_text_block(const Out *out, const char *text, size_t indent) {
+    const char *line = text;
+    bool first = true;
+    while (true) {
+        const char *end = strchr(line, '\n');
+        size_t length = end != NULL ? (size_t)(end - line) : strlen(line);
+        if (!first) {
+            raw(out, "\n", 1);
+            spaces(out, indent);
+        }
+        raw(out, line, length);
+        if (end == NULL) {
+            break;
+        }
+        line = end + 1;
+        first = false;
+    }
+}
+
 void lz_report_write(const LzSource *source, const LzReport *report, bool color,
                      const LzWriter *out_writer) {
     Out out = {out_writer, color};
@@ -202,6 +330,13 @@ void lz_report_write(const LzSource *source, const LzReport *report, bool color,
     size_t offset = report->offset > source->length ? source->length : report->offset;
     LzLocation where = lz_source_locate(source, offset);
     size_t width = digit_count(where.line);
+    if (report->fix != NULL) {
+        const LzSource *fsrc = fix_source(source, report->fix);
+        LzLocation fwhere = lz_source_locate(fsrc, clamp_offset(fsrc, report->fix->offset));
+        if (digit_count(fwhere.line) > width) {
+            width = digit_count(fwhere.line);
+        }
+    }
 
     header(&out, severity, report->message);
 
@@ -218,7 +353,7 @@ void lz_report_write(const LzSource *source, const LzReport *report, bool color,
     gutter_line(&out, width);
 
     /* The source line. */
-    put_unsigned(&out, C_BLUE, where.line);
+    put_line_number(&out, where.line, width);
     raw(&out, " ", 1);
     styled_cstr(&out, C_BLUE, "|");
     raw(&out, " ", 1);
@@ -282,8 +417,17 @@ void lz_report_write(const LzSource *source, const LzReport *report, bool color,
         raw(&out, " ", 1);
         styled_cstr(&out, C_GREEN, "help");
         styled(&out, C_BOLD, ": ", 2);
-        raw(&out, report->help, strlen(report->help));
+        write_text_block(&out, report->help, width + 1 + 2 + 6 + 4);
         raw(&out, "\n", 1);
+    }
+    if (report->fix != NULL) {
+        if (!has_footer) {
+            gutter_line(&out, width);
+        }
+        write_fix(&out, source, &where, report->fix, width);
+        if (report->frames != NULL && report->frame_count > 0) {
+            gutter_line(&out, width);
+        }
     }
     if (report->frames != NULL && report->frame_count > 0) {
         spaces(&out, width + 1);

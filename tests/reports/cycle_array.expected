@@ -1,0 +1,9 @@
+error: cannot store: this would create a reference cycle
+ --> cycle_array.lz:2:11
+  |
+2 | items.push(items)
+  |           ^ this array would end up containing itself
+  |
+  = note: an array owns its items, so it cannot end up inside itself
+  = help: store a link instead: items.push(link(x)), and read it back with .target
+

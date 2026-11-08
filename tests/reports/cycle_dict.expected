@@ -1,0 +1,9 @@
+error: cannot store: this would create a reference cycle
+ --> cycle_dict.lz:2:2
+  |
+2 | d["self"] = d
+  |  ^ this dict would end up containing itself
+  |
+  = note: a dict owns its values, so it cannot end up inside itself
+  = help: store a link instead: d[key] = link(x), and read it back with .target
+

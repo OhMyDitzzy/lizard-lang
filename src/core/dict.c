@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "lizard/array.h"
+#include "lizard/class.h"
 #include "lizard/suggest.h"
 
 void lz_dict_clear_mark(LzObject *dict) {
@@ -188,6 +189,7 @@ LzStatus lz_vm_dict_key_error(LzVM *vm, const LzDict *dict, const LzValue *key,
     LzStatus result = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "%s",
                                       text.data != NULL ? text.data : "key not found");
     lz_buffer_free(&text);
+    lz_vm_set_help(vm, "use d.get(key, default) to get a fallback instead of an error");
 
     /* Only a string key is suggested, and only against the dict's own string keys. */
     if (key->type == LZ_VAL_OBJECT && dict != NULL) {
@@ -270,9 +272,7 @@ LzStatus lz_dict_check_store(LzVM *vm, LzDict *dict, const LzValue *value) {
             return lz_vm_out_of_memory(vm);
         }
         if (cycle > 0) {
-            return lz_vm_set_error(vm, LZ_ERR_RUNTIME,
-                                   "a value cannot contain itself; for a pointer back to the owner, use a "
-                                   "link field (pub link parent: Node = nil)");
+            return lz_vm_cycle_error(vm, NULL, NULL, 'd');
         }
     }
     if (!lz_dict_value_fits(dict, value)) {

@@ -159,7 +159,7 @@ static void test_programs(void) {
     check_output("class Bad { pub x: int = 1\n  pub fn to_string(self) => 42 }\ntry { println(Bad()) } catch e { println($\"{e.kind}: {e.message}\") }\nclass Thrower { pub x: int = 1\n  pub fn to_string(self) { throw ValueError(\"nope\") } }\ntry { println($\"{Thrower()}\") } catch e { println($\"{e.kind}: {e.message}\") }\n",
                  "TypeError: to_string() of Bad must return a string, got int\nValueError: nope\n");
     check_output("class Node { pub next: any = nil\n  pub items: any[] = [] }\nlet a = Node()\nlet b = Node(next: a)\ntry { a.next = b } catch e { println(e.message) }\ntry { a.items.push(a) } catch e { println(e.kind) }\nprintln(b)\n",
-                 "cannot store: this would create a reference cycle (through field 'next' of Node)\nValueError\nNode(next: Node(next: nil, items: []), items: [])\n");
+                 "cannot store: this would create a reference cycle\nValueError\nNode(next: Node(next: nil, items: []), items: [])\n");
     check_output("class H { pub handler: any = nil\n  pub n: int = 7\n  pub fn wire(self) { self.handler = fn() => self.n } }\nlet h = H()\nh.wire()\nprintln(h.handler())\n",
                  "7\n");
     check_output("class C { pub n: int = 0\n  pub fn inc(self) { self.n += 1 }\n  pub fn tick(self) => fn() { self.inc() } }\nlet c = C()\nlet t = c.tick()\nt()\nt()\nprintln(c.n)\n",

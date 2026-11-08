@@ -357,13 +357,13 @@ static void test_annotations(void) {
 
 static void test_cycles(void) {
     check_run_error("let d = {}\nd[\"self\"] = d\n",
-                    "a value cannot contain itself", NULL);
+                    "cannot store: this would create a reference cycle", NULL);
     check_run_error("let d = {}\nlet e = {\"d\": d}\nd[\"e\"] = e\n",
-                    "a value cannot contain itself", NULL);
+                    "cannot store: this would create a reference cycle", NULL);
     check_run_error("let xs = []\nlet d = {\"xs\": xs}\npush(xs, d)\n",
-                    "a value cannot contain itself", NULL);
+                    "cannot store: this would create a reference cycle", NULL);
     check_run_error("let d = {}\nlet e = d\nlet f = {}\nf[\"x\"] = e\ne[\"y\"] = f\n",
-                    "a value cannot contain itself", NULL);
+                    "cannot store: this would create a reference cycle", NULL);
     /* A shared (not cyclic) dict is fine. */
     check_output("let inner = {\"a\": 1}\nlet d = {\"x\": inner, \"y\": inner}\nprintln(d)\n",
                  "{\"x\": {\"a\": 1}, \"y\": {\"a\": 1}}\n");

@@ -1,0 +1,26 @@
+error: stack overflow: too many nested calls (limit 2048)
+ --> rt_recursion.lz:2:13
+  |
+2 |     return f(n + 1)
+  |             ^
+  |
+  = help: a function calls itself without a base case, or the recursion is too deep (limit 2048)
+  = stack trace: innermost call first
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      at f (rt_recursion.lz:2:13)
+      ... 2032 more frames
+

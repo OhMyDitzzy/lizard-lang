@@ -1,0 +1,4 @@
+fn f() -> bool {
+    let x = 1
+}
+f()

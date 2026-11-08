@@ -1,0 +1,8 @@
+error: a link has to be read with .target first, got link
+ --> rt_link_target.lz:5:11
+  |
+5 | let y = l + 1
+  |           ^
+  |
+  = help: use l.target to get the object, and check l.alive first
+

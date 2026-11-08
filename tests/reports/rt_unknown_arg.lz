@@ -1,0 +1,4 @@
+fn greet(name, greeting) {
+    return name
+}
+greet(nam: 1, greeting: 2)

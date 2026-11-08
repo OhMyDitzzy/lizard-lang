@@ -1,0 +1,8 @@
+error: nil has no field 'name'
+ --> rt_nil_field.lz:2:11
+  |
+2 | println(x.name)
+  |           ^^^^
+  |
+  = help: the value is nil here; check it first: if x != nil { ... }
+

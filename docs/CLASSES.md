@@ -420,8 +420,8 @@ Choices made where the specification was open:
 
 * **Messages.** Field type errors read `Point.x expects int, got string`. Unbound methods check
   `self`: `Point.sum() needs a Point as its first argument, got string`. Unknown members are
-  `RuntimeError`. A cycle is refused as `cannot store: this would create a reference cycle
-  (through field 'next' of Node)`. Objects as dict keys: `a Point cannot be a dict key` (the existing wording).
+  `RuntimeError`. A cycle is refused as `cannot store: this would create a reference cycle`, with
+  the field named in the label under the carets (see "Memory and cycles"). Objects as dict keys: `a Point cannot be a dict key` (the existing wording).
 * **Array types** use the existing syntax `int[]`, not `[int]`.
 * **Printing.** A function prints `<fn Point.origin>` and a bound method `<method Point.sum>`.
 * **Class names in types** are matched by class identity (see above), never by name.
@@ -496,7 +496,26 @@ Objects are counted like arrays: an object is a container node in every cycle me
 
 * A cycle that goes only through objects, arrays and dicts is **refused when stored**, with the
   field named: `a.next = b` after `b.next = a`. `a.items.push(a)` keeps the existing array
-  message. The help line points at `link` (§ below).
+  message. The report shows the fix (§ below).
+
+  Two objects that point at each other would keep each other alive forever, so Lizard stops the
+  second store and shows how to fix it. Think of a `link` as a bookmark: it points at an object
+  without owning it, so the object can still go away, and the link then reads as `nil`:
+
+  ```
+  error: cannot store: this would create a reference cycle
+   --> class.lz:8:6
+    |
+  8 | anak.relation = ibu
+    |      ^^^^^^^^ `Person.relation` would own an object that already owns this one
+    |
+    = note: an object owns what its fields hold, so two objects cannot own each other
+  help: make the field a link: it points at an object without owning it
+   --> class.lz:3:9
+    |
+  3 |     pub link relation = nil
+    |         +++++
+  ```
 * A cycle through a closure (a method that stores a lambda capturing `self` in a field, or a
   stored bound method `self.f = self.method`) is collected by the skink collector, which
   treats objects and bound methods as nodes.
