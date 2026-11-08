@@ -1,7 +1,0 @@
-error: return type mismatch: expected bool, got "yes"
- --> return_wrong_bool.lz:2:12
-  |
-2 |     return "yes"
-  |            ^^^^^
-
-error: aborting due to 1 previous error

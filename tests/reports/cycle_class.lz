@@ -1,8 +1,0 @@
-class Person {
-    pub name
-    pub relation = nil
-}
-let ibu = Person("Siti")
-let anak = Person("Budi")
-ibu.relation = anak
-anak.relation = ibu

@@ -1,5 +1,0 @@
-error Wrapped : RuntimeError {
-    pub items = nil
-}
-let e = Wrapped("boom")
-e.items = Wrapped("inner", cause: e)

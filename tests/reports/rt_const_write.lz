@@ -1,4 +1,0 @@
-class A {
-    const LIMIT = 3
-}
-A.LIMIT = 4

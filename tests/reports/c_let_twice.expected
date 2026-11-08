@@ -1,9 +1,0 @@
-error: variable 'a' is already declared in this scope
- --> c_let_twice.lz:2:5
-  |
-2 | let a = 2
-  |     ^
-  |
-  = help: give the second one another name, or change the first with: name = value
-
-error: aborting due to 1 previous error

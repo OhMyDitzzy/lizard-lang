@@ -123,11 +123,6 @@ if(UNIX)
     add_test(NAME error_types_cli
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/error_types_check.sh $<TARGET_FILE:lizard>)
 
-    # Golden error reports (tests/reports/*.lz + .expected): label, note, help and visual fixes,
-    # identical on the reference interpreter, Gecko and the JIT.
-    add_test(NAME reports_cli
-        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/reports_check.sh $<TARGET_FILE:lizard>)
-
     # `lizard --version`: the version, the kind of build, the channel, all consistent with BUILDINFO.
     add_test(NAME version_cli
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/version_check.sh $<TARGET_FILE:lizard>

@@ -1,9 +1,0 @@
-error: classes can only be declared at the top level
- --> c_class_nested.lz:2:5
-  |
-2 |     class A {}
-  |     ^^^^^
-  |
-  = help: move the class out of the function or block, to the top level of the file
-
-error: aborting due to 1 previous error

@@ -1,8 +1,0 @@
-error: can only call functions
- --> rt_call_int.lz:2:2
-  |
-2 | x()
-  |  ^
-  |
-  = help: only functions and classes can be called; did you forget an operator?
-

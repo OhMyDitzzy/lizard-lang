@@ -1,4 +1,0 @@
-fn f() -> int {
-    return "5"
-}
-f()

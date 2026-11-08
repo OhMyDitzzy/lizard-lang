@@ -1044,7 +1044,7 @@ static bool conversion_for(const LzType *from, const LzType *to, const char *exp
         return false;
     }
     if (want == LZ_KIND_STRING && (have & ~LZ_KINDS_NUMBER) == 0) {
-        (void)snprintf(out, size, "str(%s)", expr);
+        (void)snprintf(out, size, "string(%s)", expr);
     } else if (want == LZ_KIND_INT && (have == LZ_KIND_STRING || have == LZ_KIND_FLOAT)) {
         (void)snprintf(out, size, "int(%s)", expr);
     } else if (want == LZ_KIND_FLOAT && (have == LZ_KIND_STRING || have == LZ_KIND_INT)) {
@@ -1158,7 +1158,7 @@ static void error_operator(Parser *parser, const LzToken *op, const LzType *left
         bool text_and_number = (a == LZ_KIND_STRING && (b & ~LZ_KINDS_NUMBER) == 0 && b != 0) ||
                                (b == LZ_KIND_STRING && (a & ~LZ_KINDS_NUMBER) == 0 && a != 0);
         if (text_and_number && strcmp(symbol, "+") == 0) {
-            diag_help(parser, "convert one side: str(n) to join them as text, or int(s) to add them as numbers");
+            diag_help(parser, "convert one side: string(n) to join them as text, or int(s) to add them as numbers");
         } else if (text_and_number) {
             diag_help(parser, "convert the text to a number first: int(s) or float(s)");
         }

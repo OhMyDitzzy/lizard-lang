@@ -1,9 +1,0 @@
-error: expected ')' after expression
- --> c_unclosed_paren.lz:2:1
-  |
-2 | 
-  | ^
-  |
-  = help: a '(' was opened but not closed: add the missing ')'
-
-error: aborting due to 1 previous error

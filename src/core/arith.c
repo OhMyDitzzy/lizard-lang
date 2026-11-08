@@ -301,7 +301,7 @@ static void mixed_operands_help(LzVM *vm, LzOpCode op, const LzValue *left, cons
     if (left->type == LZ_VAL_NIL || right->type == LZ_VAL_NIL) {
         lz_vm_set_help(vm, "a value is nil here; check it first: if x != nil { ... }");
     } else if (text_and_number && op == LZ_OP_ADD) {
-        lz_vm_set_help(vm, "convert one side: str(n) to join them as text, or int(s) to add them as numbers");
+        lz_vm_set_help(vm, "convert one side: string(n) to join them as text, or int(s) to add them as numbers");
     } else if (is_string(left) || is_string(right)) {
         lz_vm_set_help(vm, "convert the text to a number first: int(s) or float(s)");
     }

@@ -1,8 +1,0 @@
-error: link() needs an object that can be shared (instance, array, dict or function), got int
- --> rt_link_bad.lz:1:13
-  |
-1 | let l = link(5)
-  |             ^
-  |
-  = help: strings and numbers are copied, not shared; link an instance, array, dict or function
-

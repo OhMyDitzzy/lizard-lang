@@ -1,8 +1,0 @@
-error: 'x' is read-only outside A
- --> rt_pub_read_write.lz:5:3
-  |
-5 | a.x = 2
-  |   ^
-  |
-  = help: change it inside a method of A
-

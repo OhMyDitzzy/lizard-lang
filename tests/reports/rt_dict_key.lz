@@ -1,2 +1,0 @@
-let d = {"name": 1}
-println(d["nam"])

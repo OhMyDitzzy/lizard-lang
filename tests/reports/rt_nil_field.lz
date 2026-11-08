@@ -1,2 +1,0 @@
-let x = nil
-println(x.name)

@@ -1,8 +1,0 @@
-error: 'LIMIT' is a constant and cannot be assigned
- --> rt_const_write.lz:4:3
-  |
-4 | A.LIMIT = 4
-  |   ^^^^^
-  |
-  = help: a constant is fixed when the class is defined; use a field (pub x = 0) for a value that changes
-

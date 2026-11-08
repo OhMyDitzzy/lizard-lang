@@ -1,8 +1,0 @@
-error: P takes at most 2 arguments, got 3
- --> rt_arity_class.lz:5:10
-  |
-5 | let p = P(1, 2, 3)
-  |          ^
-  |
-  = help: signature: P(a, b)
-

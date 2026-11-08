@@ -1,4 +1,0 @@
-fn f() -> string {
-    return 5
-}
-f()

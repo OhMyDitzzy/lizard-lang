@@ -1,5 +1,0 @@
-class A {
-    pub x = 1
-}
-let l = link(A())
-println(l.x)

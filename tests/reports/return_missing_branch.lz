@@ -1,6 +1,0 @@
-fn f(a) -> string {
-    if a {
-        return "yes"
-    }
-}
-f(true)

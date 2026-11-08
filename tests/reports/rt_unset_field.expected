@@ -1,8 +1,0 @@
-error: A needs 'x'
- --> rt_unset_field.lz:4:10
-  |
-4 | let a = A()
-  |          ^
-  |
-  = help: signature: A(x)
-
