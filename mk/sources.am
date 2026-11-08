@@ -65,6 +65,7 @@ lizard_SOURCES = \
 lizard_docs = \
 	README.md \
 	docs/ARCHITECTURE.md \
+	docs/BUILDING.md \
 	docs/CLASSES.md \
 	docs/CLI.md \
 	docs/COLLECTIONS.md \

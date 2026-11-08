@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y autoconf automake
-      - run: ./autogen.sh
+      - run: sh ./autogen.sh
       - run: ./configure --enable-sanitizers --with-build-type=debug
       - run: make -j$(nproc)
       - run: make check -j$(nproc)
@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y autoconf automake
-      - run: ./autogen.sh
+      - run: sh ./autogen.sh
       - run: ./configure --enable-poison --with-build-type=debug
       - run: make -j$(nproc)
       - run: make check -j$(nproc)
@@ -34,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y autoconf automake valgrind
-      - run: ./autogen.sh
+      - run: sh ./autogen.sh
       - run: ./configure --with-build-type=debug
       - run: make -j$(nproc)
       - run: sh tools/valgrind-check.sh .
