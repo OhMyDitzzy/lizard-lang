@@ -1,0 +1,48 @@
+# `pub` marks what other code may use. Without modules it changes nothing yet,
+# but the compiler records every pub declaration in the interface of the file.
+
+pub const MAX_SPEED = 120
+pub let visits = 0
+pub type Speed = int
+
+pub fn clamp(value: Speed, limit: Speed = MAX_SPEED) -> Speed {
+    if value > limit { return limit }
+    return value
+}
+
+pub trait Named {
+    get label(self)
+}
+
+pub class Car : Named {
+    pub model: string
+    pub read speed: Speed = 0
+    odometer: int = 0            # private: not part of the interface
+
+    pub get label(self) => $"{self.model} at {self.speed}"
+
+    pub fn accelerate(self, amount: Speed) {
+        self.speed = clamp(self.speed + amount)
+        self.odometer += self.speed
+    }
+}
+
+pub error BreakdownError : Error {
+    pub model: string
+}
+
+let car = Car("Zephyr")
+car.accelerate(80)
+car.accelerate(80)
+println(car.label)                           # Zephyr at 120
+println(clamp(300), clamp(300, 50))          # 120 50
+
+try {
+    throw BreakdownError("engine stalled", car.model)
+} catch e {
+    println(e.message, e.model)              # engine stalled Zephyr
+}
+
+# `pub` is still an ordinary name when nothing declarable follows it
+let pub = 3
+println(pub + 1)                             # 4

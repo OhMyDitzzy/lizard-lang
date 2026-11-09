@@ -1,3 +1,4 @@
+#include "interface_build.h"
 #include "lizard/chunk.h"
 
 #include <stdlib.h>
@@ -15,6 +16,7 @@ void lz_chunk_init(LzChunk *chunk) {
     chunk->type_capacity = 0;
     chunk->type_slots = NULL;
     chunk->type_slot_capacity = 0;
+    chunk->iface = NULL;
 }
 
 void lz_chunk_discard(LzChunk *chunk) {
@@ -23,6 +25,7 @@ void lz_chunk_discard(LzChunk *chunk) {
     free(chunk->constants);
     free(chunk->types);
     free(chunk->type_slots);
+    lz_interface_free(chunk->iface);
     lz_chunk_init(chunk);
 }
 

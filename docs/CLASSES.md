@@ -52,6 +52,15 @@ statement runs (like every statement in Lizard), so a method may call `Point(...
 * A field without a default that `init()` does not fill is an error (see below).
 * At most 64 fields per class.
 
+## `pub` on a class
+
+A class (or trait, or error) may be written `pub class Point { ... }` at the top level, like any
+other declaration (see Syntax). Without modules nothing changes: the class works exactly as
+without `pub`. The compiler records the interface of a `pub` class: its `pub` members with their
+signatures, its parent and traits, and one `init` that says how to create it (the constructor
+arguments below). Private fields and methods are never recorded, though the class stays usable
+from outside. A `pub` member may not mention a class, trait or alias that is not `pub` itself.
+
 ## The constructor
 
 `Point(...)` takes **every `pub` field** (including `pub read`) in declaration order. Private

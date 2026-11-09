@@ -27,6 +27,72 @@ Hello, Lizard! Ana, round 2
 Hello, Lizard! Ana, round 3
 ```
 
+## Top-level declarations and `pub`
+
+`fn`, `const`, `let`, `class`, `trait`, `error` and `type` can stand at the top of a file, and
+`pub` may go in front of any of them. It marks what other code may use. Without modules it
+changes nothing yet, but the compiler records it: every `pub` declaration, with its signature, goes
+into the interface of the file, ready for the day another file asks for it.
+
+```lizard
+pub fn add(a: int, b: int) -> int => a + b
+pub const MAX = 10
+pub class Point {
+  pub x: int
+  pub y: int = 0
+}
+println(add(Point(1, 2).x, MAX))
+```
+
+```text
+11
+```
+
+`pub` belongs on top-level declarations only. Inside a function or a block it is refused, and so
+is `pub` in front of something that declares nothing, like `extend` or a `switch`:
+
+```lizard fail
+fn outer() {
+  pub fn helper() => 1
+  return helper()
+}
+```
+
+```
+error: `pub` only works on top-level declarations
+ --> ...
+  |
+2 |   pub fn helper() => 1
+  |   ^^^ this is inside a function
+  |
+help: `pub` marks something other code can use, so it goes on top-level declarations
+```
+
+What a `pub` declaration shows must be nameable from outside. A `pub` function whose signature
+uses a class (or trait, alias or error) that is not `pub` is an error, because code outside
+could not write that type:
+
+```lizard fail
+class Hidden {
+  pub n: int
+}
+pub fn make() -> Hidden => Hidden(1)
+```
+
+```
+error: `make` is pub, but its signature uses `Hidden`, which is not
+ --> ...
+  |
+4 | pub fn make() -> Hidden => Hidden(1)
+  |                  ^^^^^^ `Hidden` is not `pub`
+  |
+  = note: code outside could not name this type
+help: make `Hidden` public
+```
+
+Private fields and methods of a `pub` class are not part of the interface, so they may use any
+type. Built-in types never need `pub`.
+
 ## Operators and precedence
 
 Binary operators group from left to right, and a newline after an operator is

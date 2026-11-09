@@ -191,8 +191,7 @@ static void test_programs(void) {
                         "operator 'fn' cannot be defined");
     check_compile_error("class A { trait x }",
                         "'trait' is not supported yet");
-    check_compile_error("pub class A { }",
-                        "'pub' on a class needs modules");
+    check_output("pub class A { pub x: int }\nprintln(A(1).x)\n", "1\n");
     check_compile_error("class A { pub get a(self, b) => 1 }",
                         "a 'get' property takes only 'self'");
     check_compile_error("class A { fn init(self, b) { } }",

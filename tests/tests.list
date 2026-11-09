@@ -29,6 +29,7 @@ test_in test_in plain - -
 test_switch test_switch plain - -
 test_try test_try plain - -
 test_classes test_classes plain - -
+test_interface test_interface plain - -
 test_extend test_extend plain - -
 test_error_classes test_error_classes plain - -
 test_error_types test_error_types plain - -

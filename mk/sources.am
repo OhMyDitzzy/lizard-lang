@@ -13,6 +13,7 @@ lizard_core_SOURCES = \
 	src/core/debug.c \
 	src/core/format.c \
 	src/core/function.c \
+	src/core/interface.c \
 	src/core/link.c \
 	src/core/memory.c \
 	src/core/number.c \
@@ -116,5 +117,5 @@ lizard_examples = \
 	examples/strings.lz \
 	examples/switch.lz \
 	examples/traits.lz \
-	examples/types.lz
-
+	examples/types.lz \
+	examples/pub.lz 

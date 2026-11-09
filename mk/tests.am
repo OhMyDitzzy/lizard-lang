@@ -29,6 +29,7 @@ check_PROGRAMS = \
 	test_switch \
 	test_try \
 	test_classes \
+	test_interface \
 	test_extend \
 	test_error_classes \
 	test_error_types \
@@ -126,6 +127,7 @@ TESTS = \
 	test_switch \
 	test_try \
 	test_classes \
+	test_interface \
 	test_extend \
 	test_error_classes \
 	test_error_types \
@@ -247,6 +249,8 @@ test_try_SOURCES = tests/test_try.c
 test_try_LDADD = $(LZ_LDADD_PLAIN)
 test_classes_SOURCES = tests/test_classes.c
 test_classes_LDADD = $(LZ_LDADD_PLAIN)
+test_interface_SOURCES = tests/test_interface.c
+test_interface_LDADD = $(LZ_LDADD_PLAIN)
 test_extend_SOURCES = tests/test_extend.c
 test_extend_LDADD = $(LZ_LDADD_PLAIN)
 test_error_classes_SOURCES = tests/test_error_classes.c

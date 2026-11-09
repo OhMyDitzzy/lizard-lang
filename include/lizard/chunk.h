@@ -153,6 +153,7 @@ typedef struct LzChunk {
     size_t type_capacity;
     uint32_t *type_slots; /* open-addressing index into types, 0 = empty, else index + 1 */
     size_t type_slot_capacity;
+    struct LzInterface *iface; /* what the unit's `pub` declarations offer (see lizard/interface.h); NULL for a function's chunk */
 } LzChunk;
 
 void lz_chunk_init(LzChunk *chunk);
