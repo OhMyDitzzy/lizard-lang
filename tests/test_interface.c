@@ -190,14 +190,66 @@ static void check_runs(const char *text, const char *expected) {
     lz_buffer_free(&err);
 }
 
+/* `pub let` is refused: the error, its help (a fix when the variable never changes), no entry,
+ * and, with a fix, a result that compiles. */
+static void check_pub_let(const char *text, const char *help, const char *fixed_text) {
+    LzVM vm;
+    LzBuffer out = {0};
+    LzBuffer err = {0};
+    LzChunk chunk;
+    LzDiagnostics diagnostics;
+    LzSource source;
+    memset(&vm, 0, sizeof vm);
+    lz_vm_init(&vm, lz_writer_from_buffer(&out), lz_writer_from_buffer(&err));
+    LZ_CHECK(lz_builtin_install(&vm) == LZ_OK);
+    lz_source_from_string(&source, "t.lz", text);
+    lz_chunk_init(&chunk);
+    LzStatus status = lz_compile(&vm, &source, &chunk, &diagnostics);
+    bool ok = status == LZ_ERR_COMPILE && diagnostics.count == 1;
+    if (ok) {
+        const LzDiagnostic *item = &diagnostics.items[0];
+        ok = strcmp(item->message, "'pub' cannot be used on 'let'") == 0 &&
+             strcmp(item->extras.label, "a variable can change, so other code could not rely on it") == 0 &&
+             strcmp(item->extras.note, "`pub` is for things that stay the same, or that you reach through a function") == 0 &&
+             item->length == 3 && memcmp(text + item->offset, "let", 3) == 0;
+        if (fixed_text != NULL) {
+            ok = ok && item->extras.has_fix && strcmp(item->extras.fix_text, "const") == 0 &&
+                 item->extras.fix_offset == item->offset && item->extras.fix_delete == 3;
+        } else {
+            ok = ok && !item->extras.has_fix && strcmp(item->extras.help, help) == 0;
+        }
+    }
+    if (!ok) {
+        fprintf(stderr, "program:\n%s\nwrong `pub let` error (status %d, count %zu)\n", text, (int)status,
+                diagnostics.count);
+    }
+    LZ_CHECK(ok);
+    const LzInterface *iface = lz_interface_of(&chunk);
+    LZ_CHECK(iface == NULL || lz_interface_count(iface) == 0);
+    lz_chunk_free(&vm.heap, &chunk);
+    lz_vm_release_roots(&vm);
+    lz_vm_free(&vm);
+    lz_buffer_free(&out);
+    lz_buffer_free(&err);
+    if (fixed_text != NULL) {
+        /* the fix, applied by hand, is the program that compiles */
+        char patched[256];
+        size_t at = strstr(text, "let") - text;
+        (void)snprintf(patched, sizeof patched, "%.*sconst%s", (int)at, text, text + at + 3);
+        LZ_CHECK(strcmp(patched, fixed_text) == 0);
+        check_interface(fixed_text, strstr(fixed_text, "pub const names") != NULL ? "const names: string[]\n"
+                                                                                  : "const limit: int\n");
+    }
+}
+
 static void test_interface_cases(void) {
     /* 1: every kind */
     check_interface(
         "pub fn add(a: int, b: int) -> int => a + b\n"
         "pub fn greet(name, greeting = \"hi\", *rest: int) {}\n"
         "pub const MAX = 10\n"
-        "pub let counter = 0\n"
-        "pub let names: string[] = []\n"
+        "pub const counter = 0\n"
+        "pub const names: string[] = []\n"
         "pub type Id = int\n"
         "pub class Point {\n    pub x: int\n    pub y: int = 0\n    pub fn sum(self) => self.x + self.y\n}\n"
         "pub trait Shape {\n    fn area(self)\n    fn label(self) => \"shape\"\n}\n"
@@ -207,8 +259,8 @@ static void test_interface_cases(void) {
         "fn add(a: int, b: int) -> int\n"
         "fn greet(name: any, greeting: any =, *rest: int) -> any\n"
         "const MAX: int\n"
-        "let counter: int\n"
-        "let names: string[]\n"
+        "const counter: int\n"
+        "const names: string[]\n"
         "type Id: int\n"
         "class Point\n"
         "  init init(x: int, y: int =) -> nil\n"
@@ -285,6 +337,17 @@ static void test_interface_cases(void) {
                "pub trait T { fn f(self) => 1 }\npub type Id = int\npub error E : Error\nprintln(add(P(1).x, MAX))\n",
                "11\n");
     check_runs("let pub = 4\npub = pub + 1\nprintln(pub, pub is int)\n", "5 true\n");
+    /* `pub let` is refused: only what stays the same is shared */
+    check_pub_let("pub let limit = 10\nprintln(limit)\n", NULL, "pub const limit = 10\nprintln(limit)\n");
+    check_pub_let("pub let names: string[] = []\n", NULL, "pub const names: string[] = []\n");
+    check_pub_let("pub let limit = 10\nfn raise() { limit += 1 }\nraise()\n",
+                  "keep it private and share it through a function, for example `pub fn limit() => limit`", NULL);
+    check_pub_let("pub let limit = 10\nlimit = 20\n",
+                  "keep it private and share it through a function, for example `pub fn limit() => limit`", NULL);
+    check_pub_let("pub let limit\n",
+                  "keep it private and share it through a function, for example `pub fn limit() => limit`", NULL);
+    /* a name inside a string is not an assignment */
+    check_pub_let("pub let limit = 10\nprintln(\"limit = 1\")\n", NULL, "pub const limit = 10\nprintln(\"limit = 1\")\n");
     /* 2: pub in the wrong place */
     check_error("fn f() {\n    pub fn g() => 1\n}\n", "`pub` only works on top-level declarations",
                 "this is inside a function", "", true);

@@ -33,7 +33,6 @@ typedef struct LzIfaceSig LzIfaceSig;
 typedef enum LzIfaceKind {
     LZ_IFACE_FN,
     LZ_IFACE_CONST,
-    LZ_IFACE_LET,
     LZ_IFACE_CLASS,
     LZ_IFACE_TRAIT,
     LZ_IFACE_ERROR,
@@ -60,7 +59,7 @@ size_t lz_interface_count(const LzInterface *iface);
 const LzIfaceEntry *lz_interface_entry(const LzInterface *iface, size_t index);
 
 LzIfaceKind lz_interface_entry_kind(const LzIfaceEntry *entry);
-/* "fn", "const", "let", "class", "trait", "error" or "type". */
+/* "fn", "const", "class", "trait", "error" or "type". */
 const char *lz_interface_kind_name(LzIfaceKind kind);
 const char *lz_interface_entry_name(const LzIfaceEntry *entry);
 

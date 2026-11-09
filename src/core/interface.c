@@ -305,8 +305,6 @@ const char *lz_interface_kind_name(LzIfaceKind kind) {
         return "fn";
     case LZ_IFACE_CONST:
         return "const";
-    case LZ_IFACE_LET:
-        return "let";
     case LZ_IFACE_CLASS:
         return "class";
     case LZ_IFACE_TRAIT:

@@ -1873,13 +1873,13 @@ static void iface_add_function(Parser *parser, const LzString *name, const FuncS
     lz_iface_entry_set_sig(entry, built);
 }
 
-/* `pub let` and `pub const`: one entry with the type written or worked out. */
-static void iface_add_variable(Parser *parser, bool is_const, const LzString *name, const LzType *type) {
+/* `pub const`: one entry with the type written or worked out. */
+static void iface_add_variable(Parser *parser, const LzString *name, const LzType *type) {
     if (!compiling_clean(parser)) {
         return;
     }
     char text[128];
-    LzIfaceEntry *entry = lz_iface_add_entry(parser->iface, is_const ? LZ_IFACE_CONST : LZ_IFACE_LET, name->data);
+    LzIfaceEntry *entry = lz_iface_add_entry(parser->iface, LZ_IFACE_CONST, name->data);
     (void)type_text(type, text, sizeof text);
     if (entry == NULL || !lz_iface_entry_set_type(entry, text)) {
         iface_oom(parser);
@@ -5776,7 +5776,7 @@ static void variable_declaration(Parser *parser, bool is_const) {
                 if (!annotated) {
                     check_pub_type(parser, &shown, &name_token, name->data, 0);
                 }
-                iface_add_variable(parser, true, name, &shown);
+                iface_add_variable(parser, name, &shown);
             }
             return;
         }
@@ -5799,12 +5799,12 @@ static void variable_declaration(Parser *parser, bool is_const) {
         stored = lz_type_widen(&initializer.type);
     }
     declare_variable(parser, &name_token, name, is_const, &stored);
-    if (is_pub) {
+    if (is_pub && is_const) { /* `pub let` never gets here: pub_prefix refuses it */
         LzType shown = annotated ? declared : (has_initializer ? lz_type_widen(&initializer.type) : declared);
         if (!annotated) {
             check_pub_type(parser, &shown, &name_token, name->data, 0);
         }
-        iface_add_variable(parser, is_const, name, &shown);
+        iface_add_variable(parser, name, &shown);
     }
     /* `let d = {...}` stays an `any` (a later `d = 5` is legal), but `d["a"]` reads a key
      * rather than an array index, which a string would not survive. */
@@ -8154,6 +8154,102 @@ static void pub_removal_fix(Parser *parser, const LzToken *pub, const char *head
     diag_fix(parser, headline, pub->offset, length, "");
 }
 
+/* Is this token the `=` of an assignment (plain or compound)? */
+static bool token_is_assign(LzTokenType type) {
+    switch (type) {
+    case LZ_TOKEN_EQUAL:
+    case LZ_TOKEN_PLUS_EQUAL:
+    case LZ_TOKEN_MINUS_EQUAL:
+    case LZ_TOKEN_STAR_EQUAL:
+    case LZ_TOKEN_SLASH_EQUAL:
+    case LZ_TOKEN_SLASH_SLASH_EQUAL:
+    case LZ_TOKEN_PERCENT_EQUAL:
+    case LZ_TOKEN_AMPERSAND_EQUAL:
+    case LZ_TOKEN_PIPE_EQUAL:
+    case LZ_TOKEN_CARET_EQUAL:
+    case LZ_TOKEN_LESS_LESS_EQUAL:
+    case LZ_TOKEN_GREATER_GREATER_EQUAL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * Is `name` given a new value anywhere in the file? Read by tokens, so words inside strings and
+ * comments do not count. A same-named variable in another scope counts too: when in doubt the
+ * answer is yes, because a fix to `const` that is wrong is worse than no fix.
+ */
+static bool name_is_assigned_in_file(const Parser *parser, const LzToken *name_token) {
+    size_t length = name_token->length;
+    const char *name = parser->source->text + name_token->offset;
+    LzLexer lexer;
+    lz_lexer_init(&lexer, parser->source);
+    LzToken previous = {0};
+    LzToken token = lz_lexer_next(&lexer);
+    while (token.type != LZ_TOKEN_EOF) {
+        LzToken after = lz_lexer_next(&lexer);
+        if (token.type == LZ_TOKEN_IDENTIFIER && token.length == length &&
+            memcmp(parser->source->text + token.offset, name, length) == 0 &&
+            previous.type != LZ_TOKEN_DOT && previous.type != LZ_TOKEN_LET &&
+            previous.type != LZ_TOKEN_CONST && token_is_assign(after.type)) {
+            return true;
+        }
+        previous = token;
+        token = after;
+    }
+    return false;
+}
+
+/* Does the `let` (the current token is its name) start with a value: `let x = ...` or `let x: T = ...`? */
+static bool let_has_value(const Parser *parser) {
+    LzLexer ahead = parser->lexer;
+    int depth = 0;
+    for (;;) {
+        LzToken token = lz_lexer_next(&ahead);
+        switch (token.type) {
+        case LZ_TOKEN_EOF:
+        case LZ_TOKEN_NEWLINE:
+        case LZ_TOKEN_SEMICOLON:
+            return false;
+        case LZ_TOKEN_LEFT_PAREN:
+        case LZ_TOKEN_LEFT_BRACKET:
+        case LZ_TOKEN_LEFT_BRACE:
+            depth++;
+            break;
+        case LZ_TOKEN_RIGHT_PAREN:
+        case LZ_TOKEN_RIGHT_BRACKET:
+        case LZ_TOKEN_RIGHT_BRACE:
+            depth--;
+            break;
+        case LZ_TOKEN_EQUAL:
+            if (depth == 0) {
+                return true;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+/*
+ * `pub let` at the top level: a variable can change, so it cannot be shared. The `let` is read
+ * as a private variable, so the rest of the file still compiles; nothing goes in the interface.
+ */
+static void pub_let_error(Parser *parser, const LzToken *let_token) {
+    LzToken name = peek_token(parser, 1);
+    diag_label(parser, "a variable can change, so other code could not rely on it");
+    diag_note(parser, "`pub` is for things that stay the same, or that you reach through a function");
+    if (name.type == LZ_TOKEN_IDENTIFIER && let_has_value(parser) && !name_is_assigned_in_file(parser, &name)) {
+        diag_fix(parser, "this variable never changes, so declare it with `const`", let_token->offset,
+                 let_token->length, "const");
+    } else {
+        diag_help(parser, "keep it private and share it through a function, for example `pub fn limit() => limit`");
+    }
+    record(parser, let_token->offset, let_token->length, "'pub' cannot be used on 'let'");
+}
+
 /*
  * A `pub` was read at the start of a statement (the current token is the word after it). What
  * follows decides: a declaration keeps it for the declaration to take (parser->pub_open); anything
@@ -8191,6 +8287,10 @@ static void pub_prefix(Parser *parser) {
         }
     }
 
+    if (declaration_follows && at_top_level(parser) && word.type == LZ_TOKEN_LET) {
+        pub_let_error(parser, &word);
+        return;
+    }
     if (declaration_follows && at_top_level(parser)) {
         parser->pub_open = true;
         parser->pub_token = pub;

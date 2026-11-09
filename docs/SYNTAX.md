@@ -30,7 +30,7 @@ Hello, Lizard! Ana, round 3
 ## Top-level declarations and `pub`
 
 `fn`, `const`, `let`, `class`, `trait`, `error` and `type` can stand at the top of a file, and
-`pub` may go in front of any of them. It marks what other code may use. Without modules it
+`pub` may go in front of any of them except `let`. It marks what other code may use. Without modules it
 changes nothing yet, but the compiler records it: every `pub` declaration, with its signature, goes
 into the interface of the file, ready for the day another file asks for it.
 
@@ -46,6 +46,46 @@ println(add(Point(1, 2).x, MAX))
 
 ```text
 11
+```
+
+`pub` never goes in front of `let`. A variable can change, so other code could not rely on it;
+what you share should stay the same (`const`), or be reached through a function or a class:
+
+```lizard fail
+pub let limit = 10
+println(limit)
+```
+
+```
+error: 'pub' cannot be used on 'let'
+ --> ...
+  |
+1 | pub let limit = 10
+  |     ^^^ a variable can change, so other code could not rely on it
+  |
+  = note: `pub` is for things that stay the same, or that you reach through a function
+help: this variable never changes, so declare it with `const`
+  |
+1 | pub const limit = 10
+  |     ~~~~~
+```
+
+When the variable is given a new value somewhere in the file, the compiler cannot suggest
+`const`; keep the variable private and share it through a function instead:
+
+```lizard
+pub const MAX = 10
+let calls = 0
+pub fn count() => calls
+fn tick() {
+  calls += 1
+}
+tick()
+println(MAX, count())
+```
+
+```text
+10 1
 ```
 
 `pub` belongs on top-level declarations only. Inside a function or a block it is refused, and so

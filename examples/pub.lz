@@ -2,7 +2,7 @@
 # but the compiler records every pub declaration in the interface of the file.
 
 pub const MAX_SPEED = 120
-pub let visits = 0
+pub const MIN_SPEED = 0
 pub type Speed = int
 
 pub fn clamp(value: Speed, limit: Speed = MAX_SPEED) -> Speed {
