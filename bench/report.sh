@@ -173,7 +173,7 @@ build() {
     if [ "$has_base_time" = yes ]; then
         echo "Median wall time in milliseconds. A change smaller than twice the combined deviation is marked noise."
         echo
-        LABEL_A=base LABEL_B=head SECTION=time "$HERE/compare.sh" "$DATA/time-base.tsv" "$DATA/time-head.tsv"
+        LABEL_A=base LABEL_B=head SECTION=time bash "$HERE/compare.sh" "$DATA/time-base.tsv" "$DATA/time-head.tsv"
     else
         echo "Wall time of the head, in milliseconds."
         echo
@@ -185,7 +185,7 @@ build() {
     if [ "$has_base_ir" = yes ] && have head/instructions.tsv; then
         echo "Instructions counted by callgrind at a small size. They do not vary between runs, so every change is real."
         echo
-        LABEL_A=base LABEL_B=head "$HERE/compare.sh" "$DATA/base/instructions.tsv" "$DATA/head/instructions.tsv"
+        LABEL_A=base LABEL_B=head bash "$HERE/compare.sh" "$DATA/base/instructions.tsv" "$DATA/head/instructions.tsv"
     elif have head/instructions.tsv; then
         ir_table "$DATA/head/instructions.tsv"
     else
@@ -195,7 +195,7 @@ build() {
     echo "## Peak memory"
     echo
     if [ "$has_base_time" = yes ]; then
-        LABEL_A=base LABEL_B=head SECTION=memory "$HERE/compare.sh" "$DATA/time-base.tsv" "$DATA/time-head.tsv"
+        LABEL_A=base LABEL_B=head SECTION=memory bash "$HERE/compare.sh" "$DATA/time-base.tsv" "$DATA/time-head.tsv"
     elif have time-head.tsv; then
         awk -F'\t' 'NR == 1 { print "| benchmark | engine | peak KB |"; print "| --- | --- | ---: |"; next }
             { printf "| %s | %s | %s |\n", $1, $2, $6 }' "$DATA/time-head.tsv"

@@ -1,5 +1,6 @@
 name: bench
 
+# Manual only: run it from the Actions tab. See "Benchmarks" in docs/DEVELOPING.md.
 on:
   workflow_dispatch:
     inputs:
@@ -98,9 +99,9 @@ jobs:
         id: smoke
         run: |
           # every benchmark once at a tiny size: it must run and print the same on every engine
-          SCALE=1000 RUNS=1 bench/measure.sh build-head/lizard bench-data/smoke-head.tsv || [ $? -eq 3 ]
+          SCALE=1000 RUNS=1 bash bench/measure.sh build-head/lizard bench-data/smoke-head.tsv || [ $? -eq 3 ]
           if [ -x build-base/lizard ]; then
-            SCALE=1000 RUNS=1 bench/measure.sh build-base/lizard bench-data/smoke-base.tsv || [ $? -eq 3 ]
+            SCALE=1000 RUNS=1 bash bench/measure.sh build-base/lizard bench-data/smoke-base.tsv || [ $? -eq 3 ]
           fi
           failed=false
           awk -F'\t' 'NR > 1 && $7 != "ok" && $7 !~ /^skipped/ { bad = 1 } END { exit bad }' bench-data/smoke-head.tsv || failed=true
@@ -113,20 +114,20 @@ jobs:
           # base and head take turns, one benchmark at a time, never in parallel
           base_bin=-
           [ -x build-base/lizard ] && base_bin=build-base/lizard
-          bench/ab.sh "$base_bin" build-head/lizard bench-data || [ $? -eq 3 ]
+          bash bench/ab.sh "$base_bin" build-head/lizard bench-data || [ $? -eq 3 ]
 
       - name: Instructions
         if: ${{ steps.smoke.outputs.failed != 'true' && inputs.profile }}
         run: |
-          bench/profile.sh build-head/lizard bench-data/head || [ $? -eq 3 ]
+          bash bench/profile.sh build-head/lizard bench-data/head || [ $? -eq 3 ]
           if [ -x build-base/lizard ]; then
-            bench/profile.sh build-base/lizard bench-data/base || [ $? -eq 3 ]
+            bash bench/profile.sh build-base/lizard bench-data/base || [ $? -eq 3 ]
           fi
 
       - name: Report
         if: ${{ always() }}
         run: |
-          bench/report.sh bench-data bench-report.md
+          bash bench/report.sh bench-data bench-report.md
           cat bench-report.md >>"$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4

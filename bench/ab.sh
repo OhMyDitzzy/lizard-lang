@@ -36,7 +36,7 @@ for file in "$HERE"/*.lz; do
         else
             bin=$HEAD
         fi
-        ONLY=$name "$HERE/measure.sh" "$bin" "$TMP/$side.tsv"
+        ONLY=$name bash "$HERE/measure.sh" "$bin" "$TMP/$side.tsv"
         [ $? -eq 3 ] && bad=1
         if [ "$header" = yes ]; then
             cp "$TMP/$side.tsv" "$OUT/time-$side.tsv"

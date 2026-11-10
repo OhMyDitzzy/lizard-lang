@@ -69,7 +69,7 @@ dist_examples_DATA = $(lizard_examples)
 
 # ---- dist ----------------------------------------------------------------------------------------
 # (bench/ is copied by dist-hook: a directory named like the phony target "bench" would run it)
-EXTRA_DIST = autogen.sh LICENSE builtin docs examples include mk src tests tools
+EXTRA_DIST = autogen.sh LICENSE bench builtin docs examples include mk src tests tools
 # .buildinfo makes a build from the tarball (no git) report the commit it was cut from
 dist-hook:
 	cp -pR '$(top_srcdir)/bench' '$(distdir)/bench'
