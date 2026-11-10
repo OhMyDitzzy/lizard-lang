@@ -1,6 +1,13 @@
-# Recursive calls: fib(32) makes about 7 million calls.
+# Recursive calls: N rounds of fib(25), about 243,000 calls each (7 million calls in all).
 fn fib(n) {
   if n < 2 { return n }
   return fib(n - 1) + fib(n - 2)
 }
-println(fib(32))
+let N = 28
+let round = 0
+let total = 0
+while round < N {
+  total = total + fib(25)
+  round = round + 1
+}
+println(total)

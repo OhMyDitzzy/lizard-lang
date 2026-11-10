@@ -1,5 +1,6 @@
 # Fill an array, take prefix sums in place, then fold it: indexing with a computed index.
-let n = 600000
+let N = 600000
+let n = N
 let xs = []
 let i = 0
 while i < n {

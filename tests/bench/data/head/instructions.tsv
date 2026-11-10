@@ -1,0 +1,5 @@
+benchmark	engine	ir
+fib	ref	9000000
+fib	ge	4000000
+sieve	ref	8000000
+sieve	ge	2900000

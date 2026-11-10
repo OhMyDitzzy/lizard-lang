@@ -121,4 +121,5 @@ lizard_examples = \
 	examples/strings.lz \
 	examples/switch.lz \
 	examples/traits.lz \
-	examples/types.lz
+	examples/types.lz \
+	examples/typeof.lz

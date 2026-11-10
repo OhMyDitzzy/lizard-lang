@@ -97,3 +97,4 @@ error_types_cli tests/error_types_check.sh script - @lizard
 version_cli tests/version_check.sh script - @lizard @buildinfo
 sources_sync tools/check-sync.sh script - @srcdir
 test_typesys test_typesys plain - -
+bench_scripts tests/bench_scripts_check.sh script - @lizard

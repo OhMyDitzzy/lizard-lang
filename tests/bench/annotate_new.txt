@@ -1,0 +1,38 @@
+--------------------------------------------------------------------------------
+Profile data file 'callgrind.out.4242' (creator: callgrind-3.22.0)
+--------------------------------------------------------------------------------
+I1 cache: 
+D1 cache: 
+LL cache: 
+Timerange: Basic block 0 - 91234
+Trigger: Program termination
+Profiled target:  ./lizard --engine=ref /tmp/fib.lz (PID 4242, part 1)
+Events recorded:  Ir
+Events shown:     Ir
+Event sort order: Ir
+Thresholds:       99
+Include dirs:     
+User annotated:   
+Auto-annotation:  on
+
+--------------------------------------------------------------------------------
+Ir                  
+--------------------------------------------------------------------------------
+10,000,000 (100.0%)  PROGRAM TOTALS
+
+--------------------------------------------------------------------------------
+Ir                  file:function
+--------------------------------------------------------------------------------
+6,000,000 (60.00%)  ???:lz_vm_run [/work/build-head/lizard]
+1,500,000 (15.00%)  ../src/core/value.c:lz_value_free [/work/build-head/lizard]
+  900,000 ( 9.00%)  ./src/core/table.c:table_find [/work/build-head/lizard]
+  500,000 ( 5.00%)  ???:malloc [/usr/lib/x86_64-linux-gnu/libc.so.6]
+  400,000 ( 4.00%)  ???:0x0000000000012345 [/work/build-head/lizard]
+  300,000 ( 3.00%)  ???:free [/usr/lib/x86_64-linux-gnu/libc.so.6]
+
+--------------------------------------------------------------------------------
+-- Auto-annotated source: ../src/core/run.c
+--------------------------------------------------------------------------------
+Ir                 
+
+-- line 10 ----------------------------------------

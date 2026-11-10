@@ -1,0 +1,7 @@
+# total_ir 10000000
+60.00%	6000000	lz_vm_run
+15.00%	1500000	src/core/value.c:lz_value_free
+9.00%	900000	src/core/table.c:table_find
+5.00%	500000	malloc
+4.00%	400000	0x0000000000012345
+3.00%	300000	free

@@ -34,10 +34,10 @@ carry over). "GE" is the interpreter alone (`--jit=off`), "GE+JIT" the default:
 | `collatz_locals` (locals, `//`) | 3.71 s | 1.04 s | 0.11 s | 32.6x | 9.5x |
 | `floats` (Leibniz series) | 0.63 s | 0.18 s | 0.04 s | 16.0x | 4.5x |
 | `loops` (nested counting loops) | 1.21 s | 0.30 s | 0.05 s | 24.7x | 6.0x |
-| `matrix` (150x150 multiply) | 0.67 s | 0.17 s | 0.05 s | 13.8x | 3.4x |
+| `matrix` (60 products of 40x40) | 0.67 s | 0.17 s | 0.05 s | 13.8x | 3.4x |
 | `prefix_sums` (array in place) | 0.37 s | 0.07 s | 0.04 s | 8.4x | 1.8x |
 | `sieve` (1,000,000) | 0.58 s | 0.13 s | 0.07 s | 8.4x | 1.9x |
-| `fib` (`fib(32)`, ~7M calls) | 0.70 s | 0.23 s | 0.05 s | 13.4x | 4.6x |
+| `fib` (28 times `fib(25)`, ~7M calls) | 0.70 s | 0.23 s | 0.05 s | 13.4x | 4.6x |
 | `calls` (defaults, typed args, closure) | 0.99 s | 0.47 s | 0.12 s | 7.6x | 3.9x |
 
 `--engine-stats` shows where it comes from. On `collatz`, 515,655,227 bytecode

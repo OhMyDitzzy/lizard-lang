@@ -1,0 +1,35 @@
+# A tree with links to the parents: build it, then walk up from every node.
+class Node {
+  pub link parent: Node = nil
+  pub depth: int = 0
+  pub children: Node[] = []
+}
+
+let N = 150000
+let nodes = [Node()]
+let next = 0
+while len(nodes) < N {
+  let parent = nodes[next]
+  next += 1
+  let a = Node(parent: parent, depth: parent.depth + 1)
+  parent.children.push(a)
+  nodes.push(a)
+  if len(nodes) < N {
+    let b = Node(parent: parent, depth: parent.depth + 1)
+    parent.children.push(b)
+    nodes.push(b)
+  }
+}
+let steps = 0
+let i = 0
+while i < len(nodes) {
+  let n = nodes[i]
+  while n.parent != nil {
+    n = n.parent
+    steps += 1
+  }
+  i += 1
+}
+let l = link(nodes[len(nodes) - 1])
+println(len(nodes), steps, l.alive)
+nodes = nil

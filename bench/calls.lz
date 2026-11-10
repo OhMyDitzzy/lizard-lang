@@ -6,10 +6,11 @@ fn make() {
     return c }
   return tick
 }
+let N = 2000000
 let tick = make()
 let i = 0
 let s = 0
-while i < 2000000 {
+while i < N {
   s = add(s, 2) + add(i) - add(i)
   tick()
   i = i + 1

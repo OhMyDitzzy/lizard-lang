@@ -1,0 +1,8 @@
+date: 2026-11-11T10:00:00Z (fixture)
+head: feature (1111111)
+base: main (2222222)
+gcc: gcc 13.3.0
+valgrind: valgrind-3.22.0
+cpu: Fixture CPU @ 2.0GHz
+cores: 4
+inputs: base=main runs=7 engines=ref,ge,jit profile=true scale=1

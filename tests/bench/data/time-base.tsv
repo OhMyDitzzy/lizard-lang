@@ -1,0 +1,7 @@
+benchmark	engine	min_ms	median_ms	dev_ms	peak_kb	status
+fib	ref	690	700	5	1000	ok
+fib	ge	220	230	4	1000	ok
+fib	jit	45	50	2	1100	ok
+sieve	ref	570	580	6	20000	ok
+sieve	ge	120	130	3	20000	ok
+sieve	jit	-	-	-	-	OUTPUT DIFFERS

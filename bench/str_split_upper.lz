@@ -1,0 +1,22 @@
+# split, to_upper, join and contains on a line of words, repeated.
+let N = 3000
+let words = []
+for k in 0..200 {
+  words.push($"word{k * 37 % 211}")
+}
+let line = words.join(" ")
+let total = 0
+let hits = 0
+let round = 0
+while round < N {
+  let parts = line.split(" ")
+  for w in parts {
+    let u = w.to_upper()
+    total += len(u)
+    if u.contains("7") {
+      hits += 1
+    }
+  }
+  round += 1
+}
+println(total, hits, len(line.to_upper()))

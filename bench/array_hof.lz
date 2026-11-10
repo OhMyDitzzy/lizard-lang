@@ -1,0 +1,22 @@
+# map, filter, reduce and sort on arrays of ints, with lambdas as callbacks.
+let N = 150000
+let xs = []
+let i = 0
+while i < N {
+  xs.push(i * 7919 % 10007)
+  i += 1
+}
+let acc = 0
+let round = 0
+while round < 4 {
+  let sq = xs.map(fn(x) => x * x % 1013 + round)
+  let ev = sq.filter(fn(x) => x % 2 == 0)
+  ev.sort()
+  let mid = 0
+  if len(ev) > 0 {
+    mid = ev[len(ev) // 2]
+  }
+  acc = (acc + sq.reduce(fn(a, x) => (a + x) % 1000003, 0) + mid) % 1000003
+  round += 1
+}
+println(acc, len(xs))

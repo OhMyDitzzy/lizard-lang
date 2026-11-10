@@ -1,0 +1,25 @@
+# Closures: build one per round, call it, and bump a counter captured by reference.
+fn make_adder(k) {
+  return fn(x) => x + k
+}
+fn make_counter() {
+  let c = 0
+  fn inc() {
+    c = c + 1
+    return c
+  }
+  return inc
+}
+
+let N = 300000
+let acc = 0
+let ctr = make_counter()
+let i = 0
+while i < N {
+  let f = make_adder(i % 10)
+  acc = (acc + f(i)) % 1000003
+  ctr()
+  ctr()
+  i += 1
+}
+println(acc, ctr())

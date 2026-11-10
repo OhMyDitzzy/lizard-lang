@@ -23,6 +23,51 @@ Without Autotools: `sh tools/build-plain.sh check` (see [building/plain.md](buil
 The `docs_check` test runs every code example in `docs/` and fails when an example's
 output does not match, so documentation examples are executed by the test suite.
 
+## Benchmarks
+
+`bench/` holds the benchmark programs (`bench/*.lz`) and the scripts that measure them. Every
+program is deterministic, prints a small checksum, and has one size line `let N = ...` that the
+scripts can divide. The measuring runs on GitHub Actions, on one runner, so that a change and
+its base are compared on the same machine.
+
+To run it, open the Actions tab, pick the `bench` workflow and press "Run workflow" on the
+branch to measure. The inputs:
+
+| Input | Meaning |
+| --- | --- |
+| `base` | the ref to compare with, `main` by default; empty measures only this ref |
+| `runs` | timed runs per benchmark and engine, 7 by default |
+| `engines` | `ref`, `ge` (the interpreter, `--jit=off`) and `jit` (`--jit=on`) |
+| `profile` | also count instructions with callgrind, on by default |
+| `scale` | divides every size, 1 is the full size |
+
+The job builds both refs in release mode, runs every benchmark once at a tiny size as a smoke
+test (it fails when an engine prints something different), takes turns timing the base and the
+head one benchmark at a time, and then counts instructions. Numbers never fail the run, only a
+failed build, a failed smoke test or `OUTPUT DIFFERS` does.
+
+The summary of the run shows the whole report. Two artifacts are kept for 30 days:
+`bench-report` is a single file, `bench-report.md`, that stands alone: metadata, the smoke
+results, then tables of time, instructions and peak memory, the top functions of every
+benchmark and the warnings. `bench-data` has the TSV files behind it and the `profile/` folders.
+
+There are two kinds of numbers because they fail in different ways. Wall time is what users
+feel, but on a shared runner it is noisy, so `bench/compare.sh` marks a change smaller than
+twice the combined deviation as `noise`. Instructions (`Ir`) come from callgrind at a smaller
+size and are the same on every run, so a change in `Ir` is a real change. Use time to see what
+matters and `Ir` to decide. The JIT is not profiled: callgrind cannot name the machine code it
+generates.
+
+The scripts also run by hand:
+
+    bench/measure.sh ./lizard times.tsv            # RUNS, ENGINES, SCALE and ONLY change it
+    bench/compare.sh before.tsv after.tsv          # a Markdown table, time or instructions
+    bench/profile.sh ./lizard profile-out          # needs valgrind
+
+The rule is that nothing is optimized without numbers: a change that claims to make something
+faster comes with a `bench-report` that shows it, and one that shows only `noise` in time and no
+change in `Ir` is not an optimization.
+
 ## Sanitizers
 
     mkdir build-san && cd build-san

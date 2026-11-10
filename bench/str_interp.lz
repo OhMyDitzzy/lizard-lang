@@ -1,0 +1,12 @@
+# Template strings, with and without format specs.
+let N = 150000
+let name = "lizard"
+let total = 0
+let i = 0
+while i < N {
+  let a = $"{i}:{i * 2}:{name}"
+  let b = $"{i:06d}|{i % 97:>4}"
+  total += len(a) + len(b)
+  i += 1
+}
+println(total, $"{N:,}")

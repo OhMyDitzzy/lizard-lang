@@ -1,0 +1,24 @@
+# A word counter: make text with a fixed-seed generator, count words in a dict, rank them.
+let N = 120000
+let vocab = ["lizard", "gecko", "skink", "iguana", "anole", "monitor", "chameleon", "basilisk",
+  "agama", "tegu", "komodo", "python", "cobra", "viper", "mamba", "adder"]
+let seed = 12345
+let counts = {}
+let i = 0
+while i < N {
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  let w = vocab[seed // 65536 % len(vocab)]
+  if seed % 7 == 0 {
+    w = w.to_upper()
+  }
+  counts[w] = counts.get(w, 0) + 1
+  i += 1
+}
+let ranked = []
+for k, v in counts {
+  ranked.push($"{v:08d}:{k}")
+}
+ranked.sort()
+ranked.reverse()
+let top = ranked[0:3]
+println(len(counts), top.join(" "), seed)

@@ -1,0 +1,7 @@
+benchmark	engine	min_ms	median_ms	dev_ms	peak_kb	status
+fib	ref	600	610	5	1000	ok
+fib	ge	221	231	4	1000	ok
+fib	jit	40	45	2	1100	ok
+sieve	ref	565	575	6	21000	ok
+sieve	ge	110	120	3	21000	ok
+sieve	jit	60	65	3	21000	ok

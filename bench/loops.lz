@@ -1,7 +1,9 @@
 # Nested counting loops over globals: plain integer arithmetic, no arrays.
+# N rounds of the outer loop, each with 2500 inner steps.
+let N = 2500
 let i = 0
 let acc = 0
-while i < 2500 {
+while i < N {
   let j = 0
   while j < 2500 {
     acc = acc + (i * j) % 7 - j % 3

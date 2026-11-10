@@ -1,0 +1,19 @@
+# Create many instances: most die at once, some are kept in an array.
+class Vec {
+  pub x: int
+  pub y: int
+}
+
+let N = 300000
+let kept = []
+let acc = 0
+let i = 0
+while i < N {
+  let p = Vec(i, i % 10)
+  acc = (acc + p.x + p.y) % 1000003
+  if i % 50 == 0 {
+    push(kept, p)
+  }
+  i += 1
+}
+println(acc, len(kept), kept[len(kept) - 1].x)

@@ -98,7 +98,8 @@ check_SCRIPTS = \
 	skink_cli \
 	error_types_cli \
 	version_cli \
-	sources_sync
+	sources_sync \
+	bench_scripts
 
 TESTS = \
 	test_memory \
@@ -195,7 +196,8 @@ TESTS = \
 	error_types_cli \
 	version_cli \
 	sources_sync \
-	test_typesys
+	test_typesys \
+	bench_scripts
 
 test_memory_SOURCES = tests/test_memory.c
 test_memory_LDADD = $(LZ_LDADD_PLAIN)
@@ -413,6 +415,8 @@ error_types_cli:
 version_cli:
 	@$(lz_make_stub)
 sources_sync:
+	@$(lz_make_stub)
+bench_scripts:
 	@$(lz_make_stub)
 else
 check_PROGRAMS =

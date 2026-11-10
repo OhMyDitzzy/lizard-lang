@@ -1,6 +1,7 @@
+let N = 200000
 let i = 1
 let total_steps = 0
-while i <= 200000 {
+while i <= N {
   let n = i
   while n > 1 {
     if n % 2 == 0 {

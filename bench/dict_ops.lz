@@ -1,0 +1,30 @@
+# Dicts: fill and read with int keys, then count into a few thousand string keys.
+let N = 150000
+let d = {}
+let i = 0
+while i < N {
+  d[i] = i * 2 % 97
+  i += 1
+}
+let acc = 0
+let round = 0
+while round < 3 {
+  i = 0
+  while i < N {
+    acc = (acc + d[i]) % 1000003
+    i += 1
+  }
+  round += 1
+}
+let keys = []
+for k in 0..2000 {
+  keys.push($"key{k}")
+}
+let counts = {}
+i = 0
+while i < N * 2 {
+  let key = keys[i * 31 % 2000]
+  counts[key] = counts.get(key, 0) + 1
+  i += 1
+}
+println(acc, len(d), len(counts), counts.get("key7", 0))

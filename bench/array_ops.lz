@@ -1,0 +1,27 @@
+# Array push, indexed update and read, and pop: three passes over a big array.
+let N = 1200000
+let xs = []
+let i = 0
+while i < N {
+  push(xs, i * 3 % 101)
+  i += 1
+}
+let acc = 0
+let round = 0
+while round < 3 {
+  i = 0
+  while i < N {
+    xs[i] = (xs[i] + i) % 1000
+    i += 1
+  }
+  i = 0
+  while i < N {
+    acc = (acc + xs[i]) % 1000003
+    i += 1
+  }
+  round += 1
+}
+while len(xs) > N // 2 {
+  acc = (acc + pop(xs)) % 1000003
+}
+println(acc, len(xs))

@@ -1,8 +1,10 @@
 # The same Collatz count with block locals (stack slots instead of globals) and `//`.
+let N = 200000
 {
+  let limit = N
   let i = 1
   let total_steps = 0
-  while i <= 200000 {
+  while i <= limit {
     let n = i
     while n > 1 {
       if n % 2 == 0 {

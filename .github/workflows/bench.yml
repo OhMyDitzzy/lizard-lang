@@ -1,0 +1,167 @@
+name: bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Ref to compare against (empty: measure this ref only)"
+        default: main
+        type: string
+      runs:
+        description: "Timed runs per benchmark and engine"
+        default: "7"
+        type: string
+      engines:
+        description: "Engines to time (ref, ge, jit)"
+        default: "ref,ge,jit"
+        type: string
+      profile:
+        description: "Also count instructions with callgrind"
+        default: true
+        type: boolean
+      scale:
+        description: "Divides the size of every benchmark (1 is the full size)"
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    # one job, so that base and head run on the same machine
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      BASE: ${{ inputs.base }}
+      RUNS: ${{ inputs.runs }}
+      ENGINES: ${{ inputs.engines }}
+      PROFILE: ${{ inputs.profile }}
+      SCALE: ${{ inputs.scale }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: sudo apt-get update && sudo apt-get install -y autoconf automake valgrind time
+      - run: sh ./autogen.sh
+
+      - name: Resolve base
+        run: |
+          mkdir -p bench-data
+          base_sha=""
+          if [ -n "$BASE" ]; then
+            for candidate in "$BASE" "origin/$BASE" "refs/tags/$BASE"; do
+              if base_sha=$(git rev-parse --verify --quiet "$candidate^{commit}"); then break; fi
+              base_sha=""
+            done
+            [ -n "$base_sha" ] || { echo "base '$BASE' is not a ref of this repository"; exit 1; }
+          fi
+          echo "BASE_SHA=$base_sha" >>"$GITHUB_ENV"
+
+      - name: Metadata
+        run: |
+          {
+            echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "head: $GITHUB_REF_NAME ($(git rev-parse HEAD))"
+            if [ -n "$BASE_SHA" ]; then echo "base: $BASE ($BASE_SHA)"; else echo "base: none"; fi
+            echo "gcc: $(gcc --version | head -n 1)"
+            echo "valgrind: $(valgrind --version)"
+            echo "cpu: $(grep -m 1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //')"
+            echo "cores: $(nproc)"
+            echo "runner: $RUNNER_OS $(uname -sr)"
+            echo "inputs: base=$BASE runs=$RUNS engines=$ENGINES profile=$PROFILE scale=$SCALE"
+          } >bench-data/meta.txt
+          cat bench-data/meta.txt
+
+      - name: Build head
+        run: |
+          mkdir build-head
+          cd build-head
+          ../configure --with-build-type=release
+          make -j"$(nproc)"
+
+      - name: Build base
+        if: ${{ env.BASE_SHA != '' }}
+        run: |
+          git worktree add --detach base-src "$BASE_SHA"
+          (cd base-src && sh ./autogen.sh)
+          mkdir build-base
+          cd build-base
+          ../base-src/configure --with-build-type=release
+          make -j"$(nproc)"
+
+      - name: Smoke test
+        id: smoke
+        run: |
+          # every benchmark once at a tiny size: it must run and print the same on every engine
+          SCALE=1000 RUNS=1 bench/measure.sh build-head/lizard bench-data/smoke-head.tsv || [ $? -eq 3 ]
+          if [ -x build-base/lizard ]; then
+            SCALE=1000 RUNS=1 bench/measure.sh build-base/lizard bench-data/smoke-base.tsv || [ $? -eq 3 ]
+          fi
+          failed=false
+          awk -F'\t' 'NR > 1 && $7 != "ok" && $7 !~ /^skipped/ { bad = 1 } END { exit bad }' bench-data/smoke-head.tsv || failed=true
+          if grep -q 'OUTPUT DIFFERS' bench-data/smoke-*.tsv; then failed=true; fi
+          echo "failed=$failed" >>"$GITHUB_OUTPUT"
+
+      - name: Time
+        if: ${{ steps.smoke.outputs.failed != 'true' }}
+        run: |
+          # base and head take turns, one benchmark at a time, never in parallel
+          base_bin=-
+          [ -x build-base/lizard ] && base_bin=build-base/lizard
+          bench/ab.sh "$base_bin" build-head/lizard bench-data || [ $? -eq 3 ]
+
+      - name: Instructions
+        if: ${{ steps.smoke.outputs.failed != 'true' && inputs.profile }}
+        run: |
+          bench/profile.sh build-head/lizard bench-data/head || [ $? -eq 3 ]
+          if [ -x build-base/lizard ]; then
+            bench/profile.sh build-base/lizard bench-data/base || [ $? -eq 3 ]
+          fi
+
+      - name: Report
+        if: ${{ always() }}
+        run: |
+          bench/report.sh bench-data bench-report.md
+          cat bench-report.md >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: bench-report
+          path: bench-report.md
+          retention-days: 30
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: bench-data
+          path: bench-data/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Check results
+        if: ${{ always() }}
+        run: |
+          # numbers never fail the run, only a failed smoke test or different output does
+          status=0
+          if [ "${{ steps.smoke.outputs.failed }}" = true ]; then
+            echo "smoke test failed, see the report"
+            status=1
+          fi
+          for f in bench-data/time-head.tsv; do
+            [ -f "$f" ] || continue
+            awk -F'\t' 'NR > 1 && $7 != "ok" && $7 !~ /^skipped/ { bad = 1 } END { exit bad }' "$f" || {
+              echo "head benchmarks failed or differ in $f"
+              status=1
+            }
+          done
+          if grep -q 'OUTPUT DIFFERS' bench-data/*.tsv 2>/dev/null; then
+            echo "OUTPUT DIFFERS in a TSV file"
+            status=1
+          fi
+          exit $status

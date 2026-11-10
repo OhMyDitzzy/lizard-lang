@@ -1,5 +1,6 @@
 # Sieve of Eratosthenes: array reads and writes in tight loops.
-let n = 1000000
+let N = 1000000
+let n = N
 let flags = []
 let i = 0
 while i <= n {

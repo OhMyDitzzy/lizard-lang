@@ -1,0 +1,5 @@
+benchmark	engine	min_ms	median_ms	dev_ms	peak_kb	status
+fib	ref	1	1.0	0.0	900	ok
+fib	ge	1	1.0	0.0	900	ok
+sieve	ref	1	1.0	0.0	900	ok
+sieve	ge	1	1.0	0.0	900	ok

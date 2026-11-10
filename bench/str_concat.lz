@@ -1,0 +1,14 @@
+# String building with +, conversions, len and join.
+let N = 200000
+let total = 0
+let parts = []
+let i = 0
+while i < N {
+  let t = "item-" + string(i) + ":" + string(i % 7)
+  total += len(t)
+  if i % 100 == 0 {
+    push(parts, t)
+  }
+  i += 1
+}
+println(total, len(parts), len(parts.join(",")))

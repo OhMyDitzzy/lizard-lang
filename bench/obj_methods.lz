@@ -1,0 +1,26 @@
+# Field reads and writes, methods and a getter on a few long-lived objects.
+class Counter {
+  pub total: int = 0
+  pub step: int = 1
+  hits: int = 0
+
+  pub fn add(self, n) {
+    self.total = (self.total + n * self.step) % 1000003
+    self.hits += 1
+  }
+
+  pub get count(self) => self.hits
+}
+
+let N = 2000000
+let a = Counter()
+let b = Counter(step: 3)
+let i = 0
+while i < N {
+  a.add(i)
+  if i % 4 == 0 {
+    b.add(a.total)
+  }
+  i += 1
+}
+println(a.total, b.total, a.count, b.count)
