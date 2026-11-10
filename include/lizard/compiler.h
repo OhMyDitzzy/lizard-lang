@@ -20,6 +20,7 @@ typedef struct LzDiagExtras {
     char note[200];
     char help[200]; /* a "= help:" line, and the fallback when the fix can't be drawn */
     bool has_fix;
+    bool keep_help; /* show the help line next to the fix too, instead of only as its fallback */
     bool fix_insert_line;
     bool fix_has_indent;
     uint32_t fix_offset;

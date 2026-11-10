@@ -79,9 +79,10 @@ Pass the declared number of arguments, or use defaults or a rest parameter.
 Calls nest up to 2048 deep, and an error inside a function prints a stack trace.
 Closures run on the reference interpreter and may nest 128 deep per callback.
 
-Parameter and result type annotations are in [Types](TYPES.md). Calling a function
-as a method — `receiver.name(args)` — is in [Methods](METHODS.md). Methods are
-functions whose first parameter is `self`, covered in [Classes](CLASSES.md).
+Parameter and result type annotations are in [Types](TYPES.md). A function is
+called as `f(x)`; `x.f()` looks for a method of x's type and never finds a function. Methods
+are in [Methods](METHODS.md), and the ones you write in a class have `self` as their first
+parameter, covered in [Classes](CLASSES.md).
 
 
 ## Functions as values: types, generics, results

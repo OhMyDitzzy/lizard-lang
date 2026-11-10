@@ -16,6 +16,7 @@ static const LzBuiltin builtins[] = {
     {"bool", lz_builtin_bool, 1, 1, LZ_KIND_BOOL},
     {"identical", lz_builtin_identical, 2, 2, LZ_KIND_BOOL},
     {"link", lz_builtin_link, 1, 1, LZ_KIND_INSTANCE},
+    {"typeof", lz_builtin_typeof, 1, 1, LZ_KIND_STRING},
     {"len", lz_builtin_len, 1, 1, LZ_KIND_INT},
     {"push", lz_builtin_push, 2, 2, LZ_KIND_NIL},
     {"pop", lz_builtin_pop, 1, 1, LZ_KINDS_ANY},
@@ -85,7 +86,7 @@ LzStatus lz_builtin_install(LzVM *vm) {
         /* The few builtins that are about the cell itself or only print it. */
         native->takes_links = (builtin->fn == lz_builtin_print || builtin->fn == lz_builtin_println ||
                                builtin->fn == lz_builtin_string || builtin->fn == lz_builtin_identical ||
-                               builtin->fn == lz_builtin_link)
+                               builtin->fn == lz_builtin_link || builtin->fn == lz_builtin_typeof)
                                   ? LZ_LINKS_ANY
                               : (builtin->fn == lz_builtin_push || builtin->fn == lz_builtin_insert)
                                   ? LZ_LINKS_ITEMS

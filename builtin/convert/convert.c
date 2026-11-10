@@ -1,5 +1,8 @@
+#include <string.h>
 #include "convert/convert.h"
 #include "lizard/class.h"
+#include "lizard/error.h"
+#include "lizard/type.h"
 #include "lizard/link.h"
 
 #include <math.h>
@@ -184,5 +187,27 @@ LzStatus lz_builtin_alive(LzVM *vm, int argc, const LzValue *argv, LzValue *resu
     (void)vm;
     (void)argc;
     *result = lz_value_bool(!lz_value_is_link(&argv[0]) || lz_value_as_link(&argv[0])->target != NULL);
+    return LZ_OK;
+}
+
+/*
+ * typeof(x): the name of the type of the value, as a string. It reads the value and nothing
+ * else: no annotation, no element of an array. An instance gives the name of its class, an
+ * error of an `error` class the name of that class, and a link cell "link", without following
+ * its target.
+ */
+LzStatus lz_builtin_typeof(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
+    (void)argc;
+    const char *name;
+    if (lz_value_is_error(&argv[0]) && ((const LzError *)argv[0].as.object)->payload != NULL) {
+        name = ((const LzError *)argv[0].as.object)->payload->cls->name->data;
+    } else {
+        name = lz_value_kind_name(&argv[0]);
+    }
+    LzString *text = lz_string_new(&vm->heap, name, strlen(name));
+    if (text == NULL) {
+        return lz_vm_out_of_memory(vm);
+    }
+    *result = lz_value_object(&text->base);
     return LZ_OK;
 }

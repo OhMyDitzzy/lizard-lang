@@ -14,9 +14,9 @@ let result = nums
   .map(fn(n) => n * 10)
 println(result)
 
-# Any function is a callback, and any function can be called like a method.
+# Any function is a callback, and a function is called as f(x), not as a method.
 fn double(n) { return n * 2 }
-println(nums.map(double), 21.double())
+println(nums.map(double), double(21))
 println(nums.map(string))
 
 nums.each(fn(n) => println("item", n))

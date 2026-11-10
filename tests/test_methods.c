@@ -170,10 +170,56 @@ static void test_universal_and_array_methods(void) {
     check_output("println(\"a b\".split(\" \").map(fn(s) => s.to_upper()))\n", "[\"A\", \"B\"]\n");
 }
 
+static void check_compile_error(const char *text, const char *message) {
+    Program program;
+    run(&program, text, 0, 0);
+    LZ_CHECK(program.compile_status == LZ_ERR_COMPILE);
+    bool found = false;
+    for (size_t i = 0; i < program.diagnostics.count; i++) {
+        found = found || strstr(program.diagnostics.items[i].message, message) != NULL;
+    }
+    if (!found) {
+        fprintf(stderr, "program:\n%s\nexpected an error containing [%s]\n", text, message);
+    }
+    LZ_CHECK(found);
+    finish(&program);
+}
+
+/* A function is not a method: `value.name()` never falls back to `name(value)`. */
+static void test_no_ufcs(void) {
+    check_compile_error("fn x(z: string) { return z }\nprintln(\"\".x())\n", "'x' is a function, not a method of string");
+    check_compile_error("fn double(n) { return n * 2 }\nprintln(5.double())\n", "'double' is a function, not a method of int");
+    check_compile_error("println(5.println())\n", "'println' is a function, not a method of int");
+    check_compile_error("println(5.typeof())\n", "'typeof' is a function, not a method of int");
+    check_compile_error("println(\"a\".sum())\n", "'sum' is a function, not a method of string");
+    /* A receiver whose type is only known at run time fails when it runs. */
+    check_fails("fn shout(s) { return s + \"!\" }\nfn run(v) { return v.shout() }\nprintln(run(\"a\"))\n", LZ_ERR_RUNTIME,
+                "'shout' is a function, not a method of string", 0);
+    check_fails("class P { pub x: int }\nfn helper(p) { return 1 }\nprintln(P(1).helper())\n", LZ_ERR_RUNTIME,
+                "'helper' is a function, not a method of P", 0);
+    /* An unknown name keeps its own message. */
+    check_fails("println(5.to_lower())\n", LZ_ERR_RUNTIME, "int has no method 'to_lower' (it works on string)", 0);
+    /* What stays: real methods, the global functions, and `extend`. */
+    check_output("let xs = [3, 1, 2]\nxs.push(4)\nxs.sort()\nprintln(xs, xs.len(), xs.sum())\npush(xs, 5)\nprintln(xs)\n", "[1, 2, 3, 4] 4 10\n[1, 2, 3, 4, 5]\n");
+    check_output("println([1, 2, 3].map(fn(n) => n * 2).filter(fn(n) => n > 2).join(\"-\"), \"abc\".len())\n", "4-6 3\n");
+    check_output("fn trim(s) => \"mine\"\nextend string { pub fn shout(self) => self.to_upper() + \"!\" }\nprintln(\" a \".trim(), \"hi\".shout())\n", "a HI!\n");
+    check_output("fn sq(x) => x * x\nclass Box { pub cb = nil }\nprintln(Box(sq).cb(3))\n", "9\n");
+}
+
+static void test_typeof(void) {
+    check_output("println(typeof(\"s\"), typeof(1), typeof(1.5), typeof(true), typeof(nil))\n", "string int float bool nil\n");
+    check_output("fn f() => 1\nprintln(typeof([1]), typeof({\"a\": 1}), typeof(f), typeof(fn(x) => x), typeof(println))\n", "array dict function function function\n");
+    check_output("println(typeof(Error(\"x\")), typeof(ValueError(\"x\")))\n", "error error\n");
+    check_output("class Dog { pub n: string }\nlet d = Dog(\"a\")\nprintln(typeof(d), typeof(link(d)), typeof(link(d).target))\n", "Dog link Dog\n");
+    check_output("error Overdraft : ValueError { pub needed: int }\nprintln(typeof(Overdraft(\"m\", needed: 5)))\n", "Overdraft\n");
+    check_output("println(typeof([\"a\"]) == \"array\", [1] is int[], typeof(typeof(1)))\n", "true true string\n");
+}
+
 static void test_method_resolution(void) {
-    /* Your own function or variable of that name wins over the method. */
-    check_output("fn trim(s) { return \"mine\" }\nprintln(\" x \".trim())\n", "mine\n");
-    check_fails("let trim = 5\nprintln(\" x \".trim())\n", LZ_ERR_RUNTIME, "can only call functions", 0);
+    /* A method is found in the type of the value: your own function or variable of that name
+     * does not replace it, and it is never a method. */
+    check_output("fn trim(s) { return \"mine\" }\nprintln(\" x \".trim(), trim(\" x \"))\n", "x mine\n");
+    check_output("let trim = 5\nprintln(\" x \".trim())\n", "x\n");
     /* Named arguments and a wrong kind. */
     check_fails("println(5.to_lower())\n", LZ_ERR_RUNTIME, "int has no method 'to_lower' (it works on string)", 0);
     check_fails("println(nil.trim())\n", LZ_ERR_RUNTIME, "nil has no method 'trim'", 0);
@@ -214,6 +260,8 @@ int main(void) {
     test_number_methods();
     test_universal_and_array_methods();
     test_method_resolution();
+    test_no_ufcs();
+    test_typeof();
     test_fuel_and_heap();
     return LZ_TEST_RESULT();
 }

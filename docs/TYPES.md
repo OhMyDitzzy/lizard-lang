@@ -109,6 +109,35 @@ Array and dict types are in [Collections](COLLECTIONS.md). Class names as types 
 expressions is in [Syntax](SYNTAX.md).
 
 
+## Every value has one type
+
+A value has exactly one type, and you can ask for it while the program runs with
+`typeof(x)`. It returns the name as a string. The answer comes from the value alone, not
+from any annotation, and not from what an array or dict holds:
+
+```lizard
+class Dog { pub name: string }
+println(typeof(1), typeof("a"), typeof(nil), typeof([1, 2]), typeof(println))
+println(typeof(Dog("Rex")), typeof(link(Dog("Rex"))), typeof(ValueError("x")))
+println(typeof([1]), [1] is int[])
+```
+
+```text
+int string nil array function
+Dog link error
+array true
+```
+
+An instance gives the name of its class, a link cell gives `"link"` without following
+its target, and an error made by `ValueError(...)` gives `"error"` (an error of a class
+you declared with `error` gives that class name). To look inside a collection, use `is`:
+`[1] is int[]`.
+
+The builtin types — `string`, `int`, `float`, `bool`, `nil`, `array`, `dict`, `function` —
+are not classes. Their methods come from a table inside the language and from `extend`;
+the methods of a class and a trait come from their members. `x.name()` looks only in the
+type of `x`, so a function is called as `name(x)` — see [Methods](METHODS.md).
+
 ## Function types
 
 A function can be a value, and a value can have a type. `fn(int, string) -> bool` is
@@ -254,8 +283,8 @@ error: aborting due to 1 previous error
 ```
 
 Type parameters belong to functions and methods; there are no generic classes yet, and no
-constraints. A generic function works as a method too: `[1, 2].first()` passes the array
-as `xs`, and `extend` blocks may declare generic methods.
+constraints. A generic function is called as `first([1, 2])`, and `extend` blocks may declare generic
+methods.
 
 ## Narrowing
 

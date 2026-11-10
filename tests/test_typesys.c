@@ -265,7 +265,7 @@ static void test_generics_as_methods(void) {
                  "println([1, 2].mapped(fn(n: int) -> int { return n * 10 }))\n", "[10, 20]\n");
     check_output("class Box {\n pub item: any\n pub fn get<T>(self, fallback: T) -> T { return fallback }\n}\nprintln(Box(1).get(\"z\"))\n", "z\n");
     /* a free generic function used as a method by its first argument */
-    check_compile_error("fn first<T>(xs: T[]) -> T { return xs[0] }\nlet n: string = [3, 4].first()\n", "expected string, got int");
+    check_compile_error("fn first<T>(xs: T[]) -> T { return xs[0] }\nlet n: string = first([3, 4])\n", "expected string, got int");
 }
 
 /* ---- 3. narrowing ---- */
@@ -345,7 +345,7 @@ static void test_narrowing_leaves_old_programs_alone(void) {
     check_output("class P { pub n: int? = nil }\nlet p = P()\nif p.n != nil { println(1) } else { println(0) }\n", "0\n");
     check_output("let xs: (int | nil)[] = [nil]\nif xs[0] != nil { println(1) } else { println(0) }\n", "0\n");
     /* a nil method call that is not proven stays a run-time error, as it was */
-    check_runtime_error("let n: string? = nil\nprintln(0)\nn.len()\n", "0\n", "len()");
+    check_runtime_error("let n: string? = nil\nprintln(0)\nn.len()\n", "0\n", "nil has no method 'len'");
 }
 
 static void test_narrowing_nil_receiver(void) {

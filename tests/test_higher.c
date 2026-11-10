@@ -169,12 +169,12 @@ static void test_methods(void) {
     check_output("let nums = [1, 2, 3, 4]\n"
                  "println(nums.filter(fn(n) => n > 1).map(fn(n) => n * 10))\n",
                  "[20, 30, 40]\n");
-    check_output("fn double(n) { return n * 2 }\nprintln(5.double(), 2.double().double())\n", "10 8\n");
+    check_output("fn double(n) { return n * 2 }\nprintln(double(5), double(double(2)))\n", "10 8\n");
     /* A chain continues on the next line. */
     check_output("let xs = [1, 2, 3]\nprintln(xs\n  .filter(fn(n) => n > 1)\n  .len())\n", "2\n");
-    /* Spread and named arguments after the receiver. */
+    /* Spread and named arguments in a call of a function. */
     check_output("fn add3(a, b = 10, c = 100) { return a + b + c }\n"
-                 "println(1.add3(), 1.add3(c = 5), 1.add3(*[2, 3]))\n",
+                 "println(add3(1), add3(1, c = 5), add3(1, *[2, 3]))\n",
                  "111 16 6\n");
     check_output("println(\"abc\".len())\n", "3\n");
 }

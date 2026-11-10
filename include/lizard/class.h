@@ -288,6 +288,8 @@ LzStatus lz_class_negate_operator(LzVM *vm, const LzValue *operand, LzValue *res
 bool lz_class_equal_hook(const LzValue *left, const LzValue *right, bool *same);
 void lz_class_equal_scope_begin(LzVM *vm, LzVM **saved);
 LzStatus lz_class_equal_scope_end(LzVM *saved);
+/* `value.name()` where `name` is a function and the type of the value has no such method. */
+LzStatus lz_vm_not_a_method_error(LzVM *vm, const char *name, const char *type);
 LzStatus lz_vm_method_lookup(LzVM *vm, uint64_t owner, const LzString *name, int mode,
                              size_t receiver_index);
 

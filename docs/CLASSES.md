@@ -356,7 +356,8 @@ is not supported yet`).
 * **Only new names.** Fields, constants, static functions, `init`, `operator`, `override` and
   `super` are errors. A name the target already has (builtin method, class member, ancestor,
   trait default, earlier extension) is `'x' is already defined for T`, with a help line.
-  A name that is only a global function (UFCS) may be added; the extension wins over it.
+  A function of your own with the same name is no obstacle: it is not a method, so `extend` may
+  add any name the type does not have yet.
 * **From the statement on.** The block is a hidden class (`LzClass.is_ext`) registered in
   `vm->exts` when its statement runs; it is not hoisted. Two blocks cannot add the same name.
 * **Privacy.** `pub` members are visible everywhere; others only inside the same block. The code in

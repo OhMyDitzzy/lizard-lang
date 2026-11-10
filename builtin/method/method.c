@@ -3,8 +3,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "array/array.h"
+#include "array/higher.h"
 #include "convert/convert.h"
 #include "lizard/array.h"
+#include "lizard/class.h"
 #include "lizard/dict.h"
 #include "lizard/format.h"
 #include "lizard/link.h"
@@ -138,11 +141,13 @@ static const LzMethod methods[] = {
     {"trim_end", K_TEXT, lz_method_trim_end, 0, 0, LZ_KIND_STRING},
     {"split", K_TEXT, lz_method_split, 1, 1, LZ_KIND_ARRAY},
     {"contains", K_TEXT, lz_method_contains, 1, 1, LZ_KIND_BOOL},
+    {"contains", LZ_KIND_ARRAY, lz_builtin_contains, 1, 1, LZ_KIND_BOOL},
     {"starts_with", K_TEXT, lz_method_starts_with, 1, 1, LZ_KIND_BOOL},
     {"ends_with", K_TEXT, lz_method_ends_with, 1, 1, LZ_KIND_BOOL},
     {"replace", K_TEXT, lz_method_replace, 2, 2, LZ_KIND_STRING},
     {"repeat", K_TEXT, lz_method_repeat, 1, 1, LZ_KIND_STRING},
     {"index_of", K_TEXT, lz_method_index_of, 1, 1, LZ_KIND_INT},
+    {"index_of", LZ_KIND_ARRAY, lz_builtin_index_of, 1, 1, LZ_KIND_INT},
     {"chars", K_TEXT, lz_method_chars, 0, 0, LZ_KIND_ARRAY},
     {"slice", K_TEXT, lz_method_slice, 1, 2, LZ_KIND_STRING},
 
@@ -153,6 +158,20 @@ static const LzMethod methods[] = {
     /* array */
     {"first", LZ_KIND_ARRAY, lz_method_first, 0, 0, LZ_KINDS_ANY},
     {"last", LZ_KIND_ARRAY, lz_method_last, 0, 0, LZ_KINDS_ANY},
+    {"push", LZ_KIND_ARRAY, lz_builtin_push, 1, 1, LZ_KIND_NIL},
+    {"pop", LZ_KIND_ARRAY, lz_builtin_pop, 0, 0, LZ_KINDS_ANY},
+    {"insert", LZ_KIND_ARRAY, lz_builtin_insert, 2, 2, LZ_KIND_NIL},
+    {"reverse", LZ_KIND_ARRAY, lz_builtin_reverse, 0, 0, LZ_KIND_NIL},
+    {"sort", LZ_KIND_ARRAY, lz_builtin_sort, 0, 0, LZ_KIND_NIL},
+    {"join", LZ_KIND_ARRAY, lz_builtin_join, 1, 1, LZ_KIND_STRING},
+    {"sum", LZ_KIND_ARRAY, lz_builtin_sum, 0, 0, LZ_KINDS_NUMBER},
+    {"map", LZ_KIND_ARRAY, lz_builtin_map, 1, 1, LZ_KIND_ARRAY},
+    {"filter", LZ_KIND_ARRAY, lz_builtin_filter, 1, 1, LZ_KIND_ARRAY},
+    {"reduce", LZ_KIND_ARRAY, lz_builtin_reduce, 2, 2, LZ_KINDS_ANY},
+    {"each", LZ_KIND_ARRAY, lz_builtin_each, 1, 1, LZ_KIND_NIL},
+    {"find", LZ_KIND_ARRAY, lz_builtin_find, 1, 1, LZ_KINDS_ANY},
+    {"any", LZ_KIND_ARRAY, lz_builtin_any, 1, 1, LZ_KIND_BOOL},
+    {"all", LZ_KIND_ARRAY, lz_builtin_all, 1, 1, LZ_KIND_BOOL},
 
     /* number */
     {"abs", K_NUMBER, lz_method_abs, 0, 0, LZ_KINDS_NUMBER},
@@ -162,9 +181,12 @@ static const LzMethod methods[] = {
     {"sqrt", K_NUMBER, lz_method_sqrt, 0, 0, LZ_KIND_FLOAT},
     {"pow", K_NUMBER, lz_method_pow, 1, 1, LZ_KINDS_NUMBER},
     {"min", K_NUMBER, lz_method_min, 1, 1, LZ_KINDS_NUMBER},
+    {"min", LZ_KIND_ARRAY, lz_builtin_min, 0, 0, LZ_KINDS_NUMBER},
     {"max", K_NUMBER, lz_method_max, 1, 1, LZ_KINDS_NUMBER},
+    {"max", LZ_KIND_ARRAY, lz_builtin_max, 0, 0, LZ_KINDS_NUMBER},
 
     /* dict */
+    {"len", LZ_KIND_STRING | LZ_KIND_ARRAY, lz_builtin_len, 0, 0, LZ_KIND_INT},
     {"len", LZ_KIND_DICT, lz_method_dict_len, 0, 0, LZ_KIND_INT},
     {"keys", LZ_KIND_DICT, lz_method_dict_keys, 0, 0, LZ_KIND_ARRAY},
     {"values", LZ_KIND_DICT, lz_method_dict_values, 0, 0, LZ_KIND_ARRAY},
@@ -172,8 +194,11 @@ static const LzMethod methods[] = {
     {"get", LZ_KIND_DICT, lz_method_dict_get, 1, 2, LZ_KINDS_ANY},
     {"has", LZ_KIND_DICT, lz_method_dict_has, 1, 1, LZ_KIND_BOOL},
     {"remove", LZ_KIND_DICT, lz_method_dict_remove, 1, 1, LZ_KINDS_ANY},
+    {"remove", LZ_KIND_ARRAY, lz_builtin_remove, 1, 1, LZ_KINDS_ANY},
     {"clear", LZ_KIND_DICT, lz_method_dict_clear, 0, 0, LZ_KIND_NIL},
+    {"clear", LZ_KIND_ARRAY, lz_builtin_clear, 0, 0, LZ_KIND_NIL},
     {"copy", LZ_KIND_DICT, lz_method_dict_copy, 0, 0, LZ_KIND_DICT},
+    {"copy", LZ_KIND_ARRAY, lz_builtin_copy, 0, 0, LZ_KIND_ARRAY},
     {"merge", LZ_KIND_DICT, lz_method_dict_merge, 1, 1, LZ_KIND_DICT},
 
     /* int only */
@@ -240,13 +265,12 @@ static LzStatus dispatch(LzVM *vm, int argc, const LzValue *argv, LzValue *resul
         return m->fn(vm, argc, argv, result);
     }
 
-    /* No row for this kind: a function of the same name (`xs.contains(3)`, `xs.min()`). */
+    /* No row for this kind. There is no fallback to a function of the same name: a method is
+     * found in the type of the value and nowhere else. */
     const LzValue *global = lz_vm_lookup(vm, self->name);
-    if (global != NULL && (lz_kind_of(global) & LZ_KIND_FUNCTION) != 0) {
-        if (global->type == LZ_VAL_OBJECT && global->as.object->type == LZ_OBJ_NATIVE) {
-            return lz_native_call(vm, (const LzNative *)global->as.object, argc, argv, result);
-        }
-        return lz_vm_call_value(vm, global, (size_t)argc, argv, result);
+    /* nil has no methods at all, which says more than naming a function. */
+    if (kind != LZ_KIND_NIL && global != NULL && (lz_kind_of(global) & LZ_KIND_FUNCTION) != 0) {
+        return lz_vm_not_a_method_error(vm, self->name->data, lz_kind_name(kind));
     }
 
     char served[64];
@@ -285,12 +309,12 @@ LzStatus lz_method_install(LzVM *vm) {
                                   ? LZ_LINKS_ITEMS
                                   : LZ_LINKS_NONE;
 
-        /* What a call can return: what the rows return, unless another function can answer too. */
+        /* What a call can return: what the rows return. */
         uint16_t kinds = 0;
         for (const LzMethod *m = first; m < methods + METHOD_COUNT && same_group(m, first); m++) {
             kinds = (uint16_t)(kinds | m->result_kinds);
         }
-        native->result_kinds = lz_vm_lookup(vm, name) != NULL ? (uint16_t)LZ_KINDS_ANY : kinds;
+        native->result_kinds = kinds;
 
         bool defined = lz_vm_define_method(vm, name, lz_value_object(&native->base));
         lz_object_release(&vm->heap, &native->base);

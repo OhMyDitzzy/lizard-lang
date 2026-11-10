@@ -1894,6 +1894,21 @@ LzStatus lz_vm_member_set(LzVM *vm, uint64_t owner, const LzValue *target,
  * Replaces the fallback on top of the stack by `callee`, which is a new reference and is
  * consumed.
  */
+/* "a string", "an int": the noun with its article, for a label. */
+static const char *article_for(const char *noun) {
+    return strchr("aeiou", noun[0]) != NULL ? "an" : "a";
+}
+
+LzStatus lz_vm_not_a_method_error(LzVM *vm, const char *name, const char *type) {
+    LzStatus status =
+        lz_vm_set_error(vm, LZ_ERR_RUNTIME, "'%s' is a function, not a method of %s", name, type);
+    lz_vm_set_label(vm, "%s %s has no method '%s'", article_for(type), type, name);
+    lz_vm_set_help(vm,
+                   "call it as a function, %s(value), or make it a method of %s: extend %s { pub fn %s(self) { ... } }",
+                   name, type, type, name);
+    return status;
+}
+
 static LzStatus set_callee(LzVM *vm, size_t index, LzValue callee) {
     LzValue old = vm->stack[index];
     vm->stack[index] = callee;
@@ -2003,7 +2018,10 @@ static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, 
     }
     const LzValue *found = lz_table_get(&vm->methods, name);
     if (found == NULL) {
-        found = lz_vm_lookup(vm, name);
+        const LzValue *global = lz_vm_lookup(vm, name);
+        if (global != NULL && (lz_kind_of(global) & LZ_KIND_FUNCTION) != 0) {
+            return lz_vm_not_a_method_error(vm, name->data, cls->name->data); /* no fallback to functions */
+        }
     }
     if (found == NULL) {
         char suggestion[160];
@@ -2386,9 +2404,10 @@ LzStatus lz_vm_method_lookup(LzVM *vm, uint64_t owner, const LzString *name, int
     }
     const LzValue *found = lz_table_get(&vm->methods, name);
     if (found == NULL) {
-        found = lz_vm_lookup(vm, name);
-    }
-    if (found == NULL) {
+        const LzValue *global = lz_vm_lookup(vm, name);
+        if (global != NULL && (lz_kind_of(global) & LZ_KIND_FUNCTION) != 0) {
+            return lz_vm_not_a_method_error(vm, name->data, lz_kind_name(lz_kind_of(receiver)));
+        }
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "undefined variable '%s'", name->data);
     }
     LzValue callee = *found;

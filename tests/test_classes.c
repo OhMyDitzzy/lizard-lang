@@ -366,6 +366,8 @@ static void test_class_identity(void) {
     check_two_sources(first, "class A { pub y: int }\nfn f2(p: A) => p.y\nprintln(g(old), old.get_x())\n"
                              "println(f2(A(3)))\n",
                       "1 1\n3\n");
+    /* typeof names the class of the value, so the old and the new A are both "A". */
+    check_two_sources(first, "class A { pub y: int }\nprintln(typeof(old), typeof(A(2)))\n", "A A\n");
     /* A class of an earlier source can be named in a type of a later one. */
     check_two_sources(first, "fn h(p: A) => p.x + 1\nprintln(h(old))\n", "2\n");
     /* A name bound to something that is not a type. */

@@ -9,6 +9,7 @@ LzStatus lz_builtin_string(LzVM *vm, int argc, const LzValue *argv, LzValue *res
 LzStatus lz_builtin_bool(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 LzStatus lz_builtin_identical(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 LzStatus lz_builtin_link(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
+LzStatus lz_builtin_typeof(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 LzStatus lz_builtin_target(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 LzStatus lz_builtin_alive(LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 

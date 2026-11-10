@@ -10,9 +10,9 @@
  * Each implementation is a plain native whose argv[0] is the receiver. All the
  * implementations of one name (to_string for every kind, is_empty for strings and
  * arrays, ...) share one dispatcher native in vm->methods; it picks the row whose kinds
- * include the receiver's. A kind without a row falls back to the global function of the
- * same name, so `xs.contains(3)` still reaches the builtin `contains(xs, v)` while
- * `"abc".contains("b")` finds the string method.
+ * include the receiver's. A kind without a row has no such method: there is no fallback to a
+ * global function of the same name. The array operations have their own rows that share the
+ * implementation of the global function, so `xs.push(1)` and `push(xs, 1)` do the same.
  */
 
 typedef struct LzMethod {

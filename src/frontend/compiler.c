@@ -4694,6 +4694,81 @@ static void report_nil_method(Parser *parser, const Expr *receiver, const LzToke
     error_at(parser, &span, message);
 }
 
+/* Is `name` a function a call could find by that name: a local, a function of the script or a builtin? */
+static bool function_named(Parser *parser, const LzString *name) {
+    const Symbol *symbol = find_symbol(parser, name);
+    if (symbol != NULL) {
+        return (lz_type_possible_kinds(&symbol->type) & LZ_KIND_FUNCTION) != 0;
+    }
+    const LzValue *global = lz_vm_lookup(parser->vm, name);
+    return global != NULL && (lz_kind_of(global) & LZ_KIND_FUNCTION) != 0;
+}
+
+/*
+ * `value.name(args)` where `name` is a function, and the type of value has no method of that
+ * name. Say what it is and offer the call that works, `name(value, args)`.
+ */
+static void report_function_as_method(Parser *parser, const Expr *receiver, const LzToken *method) {
+    char method_name[48];
+    token_text(parser, method, method_name, sizeof method_name);
+    unsigned kinds = lz_type_possible_kinds(&receiver->type);
+    char type[48];
+    (void)snprintf(type, sizeof type, "%s", lz_kind_name((uint16_t)kinds));
+    char message[160];
+    (void)snprintf(message, sizeof message, "'%s' is a function, not a method of %s", method_name, type);
+    diag_label(parser, "%s %s has no method '%s'", strchr("aeiou", type[0]) != NULL ? "an" : "a", type,
+               method_name);
+    diag_help(parser, "or make it a method of %s: extend %s { pub fn %s(self) { ... } }", type, type,
+              method_name);
+    parser->pending.keep_help = true; /* the fix says how to call it, this says the other way */
+    /* The fix rewrites the whole call, `a.f(b, c)` to `f(a, b, c)`, when it fits on one line. */
+    uint32_t begin = receiver->start.offset;
+    uint32_t dot_end = method->offset + method->length;
+    const char *text = parser->source->text;
+    if (text[dot_end] == '(' && dot_end > begin) {
+        /* find the closing ')' of this call on the same line */
+        uint32_t depth = 0;
+        uint32_t end = dot_end;
+        bool closed = false;
+        for (uint32_t i = dot_end; text[i] != '\0' && text[i] != '\n'; i++) {
+            if (text[i] == '(') {
+                depth++;
+            } else if (text[i] == ')' && --depth == 0) {
+                end = i + 1;
+                closed = true;
+                break;
+            }
+        }
+        /* the receiver text ends at the '.' before the method name */
+        uint32_t receiver_end = method->offset;
+        while (receiver_end > begin && text[receiver_end - 1] != '.') {
+            receiver_end--;
+        }
+        receiver_end = receiver_end > begin ? receiver_end - 1 : begin;
+        if (closed && receiver_end > begin && end - begin < 100) {
+            char args[100];
+            uint32_t arg_len = end - 1 - (dot_end + 1);
+            char fixed[200];
+            (void)snprintf(args, sizeof args, "%.*s", (int)arg_len, text + dot_end + 1);
+            (void)snprintf(fixed, sizeof fixed, "%s(%.*s%s%s)", method_name, (int)(receiver_end - begin),
+                           text + begin, arg_len > 0 ? ", " : "", args);
+            if (strchr(fixed, '\n') == NULL) {
+                char headline[96];
+                (void)snprintf(headline, sizeof headline, "call it as a function: %s(...)", method_name);
+                diag_fix(parser, headline, begin, end - begin, fixed);
+            }
+        }
+    }
+    LzToken span = *method;
+    error_at(parser, &span, message);
+}
+
+/* A name after '.' that is no method and no function: the error of an undefined name. */
+static Expr unknown_method(Parser *parser, const LzToken *name) {
+    (void)name;
+    return variable(parser);
+}
+
 static Expr dot_call(Parser *parser, Expr receiver) {
     if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
         error_at_current(parser, "expected a method name after '.'");
@@ -4745,15 +4820,13 @@ static Expr dot_call(Parser *parser, Expr receiver) {
     }
 
     /*
-     * Your own functions and variables of that name win. Then come the methods of the kinds of
-     * value, with one dispatcher per name, see builtin/method, and then the other builtins.
+     * A method is looked up in the type of the receiver and nowhere else: the methods of the
+     * kinds of value, with one dispatcher per name, see builtin/method, and then, for a value
+     * that may be an object, its class and the `extend` blocks at run time. A function of the
+     * same name is not a method, whoever wrote it.
      */
     LzString *interned = intern_token(parser, &name);
-    const LzValue *method = NULL;
-    if (interned != NULL && find_symbol(parser, interned) == NULL &&
-        lz_table_get(&parser->vm->globals, interned) == NULL) {
-        method = lz_table_get(&parser->vm->methods, interned);
-    }
+    const LzValue *method = interned != NULL ? lz_table_get(&parser->vm->methods, interned) : NULL;
     Expr callee;
     bool classes = receiver_may_be_object(parser, &receiver);
     if (!classes && (lz_type_possible_kinds(&receiver.type) & LZ_KIND_ERROR) != 0 && interned != NULL &&
@@ -4762,21 +4835,33 @@ static Expr dot_call(Parser *parser, Expr receiver) {
         classes = true; /* every error has copy() and with(): the run-time lookup finds them */
     }
     int lookup_mode = 0;
-    if (method != NULL) {
+    bool misuse = false; /* a function used as a method, reported below */
+    if (!classes && !proven_nil && interned != NULL && function_named(parser, interned)) {
+        unsigned kinds = lz_type_possible_kinds(&receiver.type);
+        if (kinds != 0 && (parser->vm->method_row_check == NULL ||
+                           !parser->vm->method_row_check(interned->data, kinds))) {
+            misuse = true;
+        }
+    }
+    if (misuse) {
+        report_function_as_method(parser, &receiver, &name);
+        emit_op_at(parser, LZ_OP_NIL, name.offset); /* the call below is only parsed */
+        callee = any_expr();
+    } else if (method != NULL) {
         (void)emit_constant(parser, *method);
         callee = expr_of(lz_type_of_kinds(LZ_KIND_FUNCTION));
         callee.native = (const LzNative *)method->as.object;
-    } else if (classes && interned != NULL && find_symbol(parser, interned) == NULL &&
-               lz_vm_lookup(parser->vm, interned) == NULL) {
-        /* No function of that name is known: an object's own method may answer, else the lookup
-         * fails at run time like an undefined name does. */
+    } else if (classes && interned != NULL) {
+        /* No builtin method has that name: an object's own method may answer, else the lookup
+         * fails at run time. */
         record_name_hint(parser, &name, true, false, true);
         emit_op_at(parser, LZ_OP_NIL, name.offset);
         callee = any_expr();
         lookup_mode = 1;
     } else {
+        /* Not a method of anything, and not a function either: the name is unknown. */
         parser->method_name = true;
-        callee = variable(parser);
+        callee = unknown_method(parser, &name);
         parser->method_name = false;
     }
     if (classes && interned != NULL) {
@@ -9765,6 +9850,9 @@ void lz_diagnostics_report(const LzDiagnostics *diagnostics, const LzSource *sou
             fix.insert_line = extras->fix_insert_line;
             fix.insert_indent = extras->fix_has_indent ? extras->fix_indent : NULL;
             report.fix = &fix;
+            if (extras->keep_help && extras->help[0] != '\0') {
+                report.help = extras->help;
+            }
         } else if (extras->help[0] != '\0') {
             report.help = extras->help;
         }

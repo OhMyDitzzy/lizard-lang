@@ -380,7 +380,7 @@ static void test_row_failure(void) {
 /* A real failing allocation of the cell itself (heap limit), also through copy(). */
 static void test_cell_failure(void) {
     size_t compiled = 0;
-    for (size_t limit = 6000; limit < 15000; limit += 8) {
+    for (size_t limit = 9000; limit < 18000; limit += 8) { /* the builtin method rows take part of the heap first */
         Program program;
         run_limited(&program,
                     "class N { pub v: int = 1\n  pub link up: N = nil }\nlet a = N()\nlet b = N(up: a)\n"
