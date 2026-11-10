@@ -1,0 +1,3 @@
+# string
+let name = "Ditzzy"
+println(typeof(name)) # string
