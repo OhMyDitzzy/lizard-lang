@@ -1,24 +1,24 @@
 /*
- * The Gecko JIT, AArch64 backend (Linux, Android/Termux, macOS). Same design as the x86-64
- * backend (ge_jit_x64.c, docs/ENGINE.md): native code works on the VM's own value stack and
- * frame stack, every fast path checks what it assumes before changing anything, and a check
- * that fails "bails out" to the interpreter at the same instruction.
+ * The Gecko JIT, AArch64 backend for Linux, Android/Termux and macOS. The design is the same as the
+ * x86-64 backend (ge_jit_x64.c, docs/ENGINE.md). Native code works on the VM's own value stack and
+ * frame stack, every fast path checks what it assumes before changing anything, and a check that
+ * fails "bails out" to the interpreter at the same instruction.
  *
- * Registers:
+ * The registers are:
  *
  *   x19  the LzVM                     x20  the GeJitExit of this entry
  *   x21  base index of the frame      x22  &vm->stack[base]
- *   x23  instructions executed since entry (added to vm->instructions on exit)
+ *   x23  instructions executed since entry, added to vm->instructions on exit
  *   x24  &vm->stack_count             x25  &vm->frame_count
- *        (anchors: the fields after the big stack array are out of reach of a
- *         scaled load offset from x19, but not from these)
- *   x0-x15 scratch, x16 call target / immediates, x17 address scratch (ge_a64.h),
- *   x18 untouched (reserved by the platform), x30 saved in every native frame.
+ *        The last two are anchors, because the fields after the big stack array are out of
+ *        reach of a scaled load offset from x19 but not from these.
+ *   x0-x15 scratch, x16 call target and immediates, x17 address scratch (ge_a64.h),
+ *   x18 untouched because the platform reserves it, x30 saved in every native frame.
  *
- * A native function is entered by `blr` and keeps 16 bytes at sp: [sp] the return address,
- * [sp + 8] a scratch slot. Entering in the middle of a body (from the trampoline) builds the
- * same frame by hand, so `ret` works the same way everywhere. Exits other than a function's
- * return restore sp from the exit block and leave through the trampoline's thunk.
+ * A native function is entered by `blr` and keeps 16 bytes at sp, with the return address at [sp]
+ * and a scratch slot at [sp + 8]. Entering in the middle of a body from the trampoline builds the
+ * same frame by hand, so `ret` works the same way everywhere. Exits other than a function's return
+ * restore sp from the exit block and leave through the trampoline's thunk.
  */
 
 #define _DEFAULT_SOURCE
@@ -54,10 +54,6 @@ _Static_assert(O_FRAMES - O_SC >= 0 && O_FRAMES - O_SC < 4096, "frames must be n
 _Static_assert(O_OPENUPV - O_FC >= 0 && O_OPENUPV - O_FC < 4096, "open_upvalues must be near frame_count");
 _Static_assert(O_INSTR - O_FC >= 0 && O_INSTR - O_FC < 4096, "instructions must be near frame_count");
 
-/* ---------------------------------------------------------------------------------
- * The entry trampoline
- * ------------------------------------------------------------------------------- */
-
 typedef uint32_t (*TrampolineFn)(LzVM *vm, size_t base_index, LzValue *base_ptr, void *target,
                                  GeJitExit *exit);
 
@@ -68,9 +64,9 @@ static bool g_tramp_failed;
 #define TRAMP_FRAME 96
 
 /*
- * enter(vm, base_index, base_ptr, target, exit): saves the callee-saved registers, sets up
- * x19-x25, and branches to `target` laid out as the body of a native function. Native code
- * leaves by `ret` (a function returned) or by the exit thunk (everything else).
+ * enter(vm, base_index, base_ptr, target, exit) saves the callee-saved registers, sets up x19 to
+ * x25, and branches to `target`, which is laid out as the body of a native function. Native code
+ * leaves by `ret` when a function returned, or by the exit thunk for everything else.
  */
 static bool tramp_init(void) {
     if (g_tramp != NULL) {
@@ -160,14 +156,10 @@ bool ge_jit_enter(LzVM *vm, const struct GeJit *jit, size_t pc, size_t base, siz
     return true;
 }
 
-/* ---------------------------------------------------------------------------------
- * Compilation
- * ------------------------------------------------------------------------------- */
-
 typedef struct Cx {
     A64 x;
     JitIR ir;
-    int *lab; /* instruction -> label */
+    int *lab; /* maps each instruction to its label */
     /* emission state */
     size_t i;
     int d;
@@ -179,7 +171,7 @@ typedef struct Cx {
 #define X (&c->x)
 #define INS(c) (&(c)->ir.prog->ins[(c)->i])
 
-/* operand pointer registers (preserved across the slow path of a global lookup) */
+/* operand pointer registers, which are preserved across the slow path of a global lookup */
 #define P_A 10
 #define P_B 11
 #define P_S 12
@@ -187,8 +179,6 @@ typedef struct Cx {
 static inline uint64_t u64(int64_t v) {
     return (uint64_t)v;
 }
-
-/* ---- emission helpers ---- */
 
 static void emit_flush(Cx *c) {
     if (c->pend != 0) {
@@ -217,7 +207,10 @@ static void emit_sync_sc(Cx *c, int depth) {
     str_x(X, 9, R_SC, A_SC);
 }
 
-/* A cold stub that returns to the interpreter at instruction pc, with `depth` values on the stack. */
+/*
+ * A cold stub that returns to the interpreter at instruction pc, with `depth` values on the
+ * stack.
+ */
 static void emit_bail_stub(Cx *c, uint32_t pc, int depth, int pend) {
     if (pend != 0) {
         add_imm(X, R_EXEC, R_EXEC, pend);
@@ -256,13 +249,16 @@ static int fail_label(Cx *c) {
     return l;
 }
 
-static void emit_rc_inc(Cx *c, int obj) { /* ++object->refcount (x9 is clobbered) */
+static void emit_rc_inc(Cx *c, int obj) { /* x9 is clobbered, so we can do ++object->refcount */
     ldr_w(X, 9, obj, O_RC);
     addsub_iw(X, A_ADD, 9, 9, 1);
     str_w(X, 9, obj, O_RC);
 }
 
-/* The real release of the object in x1 (refcount known to be <= 1), reached from the slow path. */
+/*
+ * The real release of the object in x1, whose refcount is known to be <= 1, reached from the
+ * slow path.
+ */
 static void emit_drop_slow(Cx *c, int skip, int slow, bool keep_pair) {
     int saved = X->sec;
     a_section(X, SEC_COLD);
@@ -316,7 +312,7 @@ static void emit_drop_obj(Cx *c, int reg) {
     a_section(X, saved);
 }
 
-/* Stores x2 (tag) and x0 (payload) at [base+off]; an object that was there is released. */
+/* Stores x2, the tag, and x0, the payload, at [base+off]. An object that was there is released. */
 static void emit_store_drop(Cx *c, int base, int32_t off) {
     int done = a_label(X);
     int slow = a_label(X);
@@ -336,7 +332,10 @@ static void emit_store_drop(Cx *c, int base, int32_t off) {
     a_section(X, saved);
 }
 
-/* A value just copied (x0 = tag word, x2 = payload) gets a reference when it is an object. */
+/*
+ * A value just copied, with x0 as the tag word and x2 as the payload, gets a reference when it's
+ * an object.
+ */
 static void emit_grab_pair(Cx *c) {
     int skip = a_label(X);
     cmp_iw(X, 0, LZ_VAL_OBJECT);
@@ -350,8 +349,6 @@ static void emit_copy_grab(Cx *c, int sb, int32_t so, int db, int32_t dof) {
     stp_x(X, 0, 2, db, dof);
     emit_grab_pair(c);
 }
-
-/* ---- operands ---- */
 
 enum { OPD_MEM, OPD_INT, OPD_FLT };
 
@@ -400,7 +397,7 @@ static void emit_global(Cx *c, int reg, uint16_t name_index, JitSite *site, bool
     a_section(X, saved);
 }
 
-/* Where an assignment to an existing global goes (ge_exec.c: global_store). */
+/* Where an assignment to an existing global goes, see global_store in ge_exec.c. */
 static void emit_global_store_cell(Cx *c, int reg, uint16_t name_index, JitSite *site, int bail) {
     ldr_x(X, 0, R_VM, O_GCAP);
     mov_imm(X, 1, 3);
@@ -455,7 +452,10 @@ static void load_tag(Cx *c, const Opd *o, int reg) {
     ldr_w(X, reg, o->base, o->disp);
 }
 
-/* d<dreg> = the operand as a double; jumps to bail when it is not a number. Clobbers x0, x1, x3. */
+/*
+ * d<dreg> gets the operand as a double, and it jumps to bail when the operand isn't a number.
+ * Clobbers x0, x1 and x3.
+ */
 static void load_double(Cx *c, const Opd *o, int dreg, int bail, bool exact) {
     if (o->kind == OPD_INT) {
         mov_imm(X, 0, u64(o->iv));
@@ -512,7 +512,7 @@ static int log2_exact(int64_t v) {
     return k;
 }
 
-/* x0 = x op y on ints (y in x1 unless a constant); the result tag goes to x2. */
+/* x0 = x op y on ints, with y in x1 unless it's a constant. The result tag goes to x2. */
 static void emit_int_op(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int bail) {
     bool bconst = b->kind == OPD_INT;
     load_int(c, a, 0);
@@ -622,7 +622,10 @@ static void emit_float_op(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int ba
         fop(X, F_DIV, 0, 0, 1);
         break;
     case LZ_OP_MODULO: {
-        /* Whole-number operands only (ge_exec.c: arith): y in (0, 2^53], x in [-2^53, 2^53]. */
+        /*
+         * Whole-number operands only, see arith in ge_exec.c. y is in (0, 2^53] and x in [-2^53,
+         * 2^53].
+         */
         int ok = a_label(X);
         mov_imm(X, 0, double_bits((double)GE_TWO_53_I));
         fmov_dx(X, 3, 0);
@@ -662,7 +665,7 @@ static void emit_float_op(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int ba
     mov_imm(X, 2, LZ_VAL_FLOAT);
 }
 
-/* The arithmetic of a binary operation; leaves x0 = payload, x2 = tag. */
+/* The arithmetic of a binary operation. Leaves x0 = payload and x2 = tag. */
 static void emit_arith(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int bail) {
     bool a_int = a->kind == OPD_INT;
     bool b_int = b->kind == OPD_INT;
@@ -709,7 +712,7 @@ static int not_cc_int(uint8_t sub) {
     }
 }
 
-/* The float comparison, ending in a branch to lfalse; falls through when true. */
+/* The float comparison, ending in a branch to lfalse. It falls through when true. */
 static void emit_float_compare(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int lfalse, int commit,
                                int bail) {
     bool a_exact = a->kind != OPD_INT || (a->iv >= -GE_TWO_53_I && a->iv <= GE_TWO_53_I);
@@ -745,9 +748,9 @@ static void emit_float_compare(Cx *c, uint8_t sub, const Opd *a, const Opd *b, i
 }
 
 /*
- * Compares two numbers. Falls through when the comparison is true, branches to lfalse when
- * it is false, bails when an operand is not a number. `commit` instructions are added to
- * the counter on both paths (before the flags are set).
+ * Compares two numbers. Falls through when the comparison is true, branches to lfalse when it's
+ * false, and bails when an operand isn't a number. `commit` instructions are added to the
+ * counter on both paths, before the flags are set.
  */
 static void emit_compare(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int lfalse, int commit, int bail) {
     bool a_int = a->kind == OPD_INT;
@@ -792,7 +795,10 @@ static void emit_compare(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int lfa
     }
 }
 
-/* Continue at instruction `next` after the code just emitted (a branch unless it follows). */
+/*
+ * Continue at instruction `next` after the code just emitted, which is a branch unless it
+ * follows.
+ */
 static void finish_group(Cx *c, uint32_t next) {
     if (c->ir.nexte[c->i] != next) {
         emit_flush(c);
@@ -804,8 +810,6 @@ static void end_plain(Cx *c, int span) {
     c->pend += span;
     finish_group(c, (uint32_t)(c->i + (size_t)span));
 }
-
-/* ---- the instructions ---- */
 
 static void emit_unconditional_bail(Cx *c) {
     b_l(X, bail_label(c));
@@ -925,9 +929,9 @@ static void emit_plain_arith(Cx *c, uint8_t sub) {
 }
 
 /*
- * A plain bitwise instruction on the two ints on top of the stack. Anything else (a value
- * that is not an int, a shift count outside 0..63) goes back to the interpreter, which
- * reports the error with the source position. Nothing is written before the last check.
+ * A plain bitwise instruction on the two ints on top of the stack. Anything else, like a value
+ * that isn't an int or a shift count outside 0..63, goes back to the interpreter, which reports
+ * the error with the source position. Nothing is written before the last check.
  */
 static void emit_plain_bitwise(Cx *c, uint8_t sub) {
     int bail = bail_label(c);
@@ -1052,7 +1056,10 @@ static void emit_cmpj(Cx *c, const GeIns *in, bool left_on_stack) {
     finish_group(c, (uint32_t)(c->i + in->span));
 }
 
-/* array[index] with the array operand a and the index operand b; leaves x0 = array, x3:x4 = item. */
+/*
+ * array[index] with the array operand a and the index operand b. Leaves x0 = array and x3:x4 =
+ * item.
+ */
 static void emit_array_load(Cx *c, const Opd *a, const Opd *b, int bail) {
     load_tag(c, a, 9);
     cmp_iw(X, 9, LZ_VAL_OBJECT);
@@ -1091,7 +1098,7 @@ static void emit_grab_item(Cx *c) { /* the item in x3:x4 gets a reference when i
     a_bind(X, skip);
 }
 
-/* [load a] [load b] INDEX and [load b] INDEX (array on the stack). */
+/* [load a] [load b] INDEX, and [load b] INDEX with the array on the stack. */
 static void emit_index_fused(Cx *c, const GeIns *in, bool array_on_stack) {
     int bail = bail_label(c);
     unsigned ka = (unsigned)(in->kinds & 3u);
@@ -1197,9 +1204,9 @@ static void emit_delegate(Cx *c) {
 }
 
 /*
- * The cold path of an instruction with an inline fast path: the reference semantics through
- * lz_vm_exec_one, then back to `back`. The hot path counts this instruction lazily (in
- * c->pend), so the cold path adds it for the call and takes it off again afterwards.
+ * The cold path of an instruction with an inline fast path. It runs the reference semantics
+ * through lz_vm_exec_one and then goes back to `back`. The hot path counts this instruction
+ * lazily in c->pend, so the cold path adds it for the call and takes it off again afterwards.
  */
 static void emit_delegate_cold(Cx *c, int slow, int back) {
     const GeIns *in = INS(c);
@@ -1219,7 +1226,10 @@ static void emit_delegate_cold(Cx *c, int slow, int back) {
     a_section(X, saved);
 }
 
-/* CHECK_TYPE / CHECK_RETURN / CHECK_PARAM: a nil, bool, int or float the type accepts passes inline. */
+/*
+ * CHECK_TYPE, CHECK_RETURN and CHECK_PARAM let a nil, bool, int or float that the type accepts
+ * pass inline.
+ */
 static void emit_check(Cx *c, int32_t disp, uint16_t type_index) {
     if (type_index >= c->ir.chunk->type_count || (c->ir.chunk->types[type_index].kinds & 0xFu) == 0) {
         emit_delegate(c);
@@ -1234,7 +1244,7 @@ static void emit_check(Cx *c, int32_t disp, uint16_t type_index) {
     lsrv_x(X, 1, 1, 0); /* x1 = kinds >> tag */
     mov_imm(X, 2, 1);
     logic_r(X, L_AND, 1, 1, 2);
-    cbz_l(X, 1, slow); /* the kind is not in the type (a literal type, or a mismatch) */
+    cbz_l(X, 1, slow); /* the kind is not in the type, because of a literal type or a mismatch */
     a_bind(X, done);
     emit_delegate_cold(c, slow, done);
     end_plain(c, 1);
@@ -1250,7 +1260,7 @@ static void emit_frame_closure(Cx *c, int slow) {
     cbz_l(X, 0, slow);
 }
 
-/* x5 = the location of the closure's upvalue `index` (slow path when out of range). */
+/* x5 = the location of the closure's upvalue `index`, and the slow path when it's out of range. */
 static void emit_upvalue_location(Cx *c, uint16_t index, int slow) {
     emit_frame_closure(c, slow);
     ldr_h(X, 1, 0, O_CL_UPVC);
@@ -1279,10 +1289,10 @@ static void emit_set_upvalue(Cx *c, uint16_t index) {
     mov_rr(X, P_S, 5);
     /*
      * An object stored into a closed upvalue may close a reference cycle, and the reference
-     * implementation tells the cycle collector (lz_skink_note_store). Everything that cannot
-     * need that is stored inline: a number, bool or nil, a string, any store into an upvalue
-     * that is already watched, and any store into one that is still open (its frame's close
-     * reports it). This is before the ldp below, which overwrites x0.
+     * implementation tells the cycle collector (lz_skink_note_store). Everything that can't need
+     * that is stored inline. That's a number, bool or nil, a string, any store into an upvalue
+     * that is already watched, and any store into one that is still open, because its frame's
+     * close reports it. This is before the ldp below, which overwrites x0.
      */
     ldr_w(X, 1, R_BPTR, 16 * (c->d - 1));
     cmp_iw(X, 1, LZ_VAL_OBJECT);
@@ -1377,7 +1387,10 @@ static void emit_call(Cx *c, uint16_t argc) {
     pop_pair(X, R_BIDX, R_BPTR, 16);
     a_bind(X, after);
 
-    /* Everything else: natives, defaults, a rest parameter, errors, functions without native code. */
+    /*
+     * Everything else: natives, defaults, a rest parameter, errors, functions without native
+     * code.
+     */
     int saved = X->sec;
     a_section(X, SEC_COLD);
     a_bind(X, slow);

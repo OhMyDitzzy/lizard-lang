@@ -104,7 +104,9 @@ lizard_examples = \
 	examples/extend.lz \
 	examples/fizzbuzz.lz \
 	examples/for.lz \
+	examples/function_types.lz \
 	examples/functions.lz \
+	examples/generics.lz \
 	examples/hello.lz \
 	examples/higher.lz \
 	examples/if_expr.lz \
@@ -113,9 +115,10 @@ lizard_examples = \
 	examples/loops.lz \
 	examples/membership.lz \
 	examples/methods.lz \
+	examples/narrowing.lz \
 	examples/operators.lz \
+	examples/pub.lz \
 	examples/strings.lz \
 	examples/switch.lz \
 	examples/traits.lz \
-	examples/types.lz \
-	examples/pub.lz 
+	examples/types.lz

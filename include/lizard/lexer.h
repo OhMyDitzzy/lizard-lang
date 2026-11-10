@@ -59,7 +59,7 @@ typedef enum LzTokenType {
     LZ_TOKEN_ARROW,
     LZ_TOKEN_FAT_ARROW, /* => */
 
-    /* Compound assignment, appended last so the earlier token numbers keep theirs. */
+    /* Compound assignment. Added last so the earlier token numbers keep theirs. */
     LZ_TOKEN_PLUS_EQUAL,           /* += */
     LZ_TOKEN_MINUS_EQUAL,          /* -= */
     LZ_TOKEN_STAR_EQUAL,           /* *= */
@@ -72,15 +72,15 @@ typedef enum LzTokenType {
     LZ_TOKEN_LESS_LESS_EQUAL,      /* <<= */
     LZ_TOKEN_GREATER_GREATER_EQUAL, /* >>= */
 
-    /* `for` loops. Appended last so the earlier token numbers keep theirs. */
+    /* `for` loops. Added last so the earlier token numbers keep theirs. */
     LZ_TOKEN_FOR,     /* for */
     LZ_TOKEN_IN,      /* in */
     LZ_TOKEN_BY,      /* by */
     LZ_TOKEN_DOT_DOT, /* .. */
     LZ_TOKEN_DOT_DOT_EQUAL, /* ..= */
 
-    /* Membership and nil fallback. Appended last so the earlier token numbers keep theirs. */
-    LZ_TOKEN_NOT_IN,        /* `not in`: `not`, blanks, `in`, as one token */
+    /* Membership and nil fallback. Added last so the earlier token numbers keep theirs. */
+    LZ_TOKEN_NOT_IN,        /* `not in`, which is `not`, blanks and `in` as one token */
     LZ_TOKEN_QUESTION_QUESTION, /* ?? */
 
     LZ_TOKEN_SWITCH,
@@ -93,10 +93,10 @@ typedef enum LzTokenType {
 } LzTokenType;
 
 /*
- * A token is a span of the source: [offset, offset + length). The lexeme is
- * never copied. INTEGER and FLOAT carry their value (an integer literal is a
- * magnitude, and 2^63 is returned as INT64_MIN: valid only after a unary minus);
- * ERROR carries a static message. A string token spans the whole literal (markers, fences and all); use lz_token_string_value to get
+ * A token is a span of the source, [offset, offset + length). The lexeme is never copied. INTEGER
+ * and FLOAT carry their value. An integer literal is a magnitude, and 2^63 is returned as
+ * INT64_MIN, which is valid only after a unary minus. ERROR carries a static message. A string
+ * token spans the whole literal, markers and fences and all, so use lz_token_string_value to get
  * its decoded contents.
  */
 typedef struct LzToken {
@@ -126,23 +126,21 @@ typedef struct LzLexer {
 void lz_lexer_init(LzLexer *lexer, const LzSource *source);
 
 /*
- * Returns the next token and never fails: malformed input becomes an ERROR
- * token and scanning resumes after it, so one pass reports every error. After
- * the last token it returns EOF forever.
+ * Returns the next token and never fails. Malformed input becomes an ERROR token and scanning
+ * resumes after it, so one pass reports every error. After the last token it returns EOF forever.
  *
- * Newlines end statements, so they are tokens, but runs of blank or comment-only
- * lines produce one NEWLINE, none is produced at the start of the file, and a
- * final one is added before EOF if the last line has none. Line breaks inside
- * ( ) and [ ] are ignored so calls and lists can span lines.
+ * Newlines end statements, so they are tokens. Runs of blank or comment-only lines produce one
+ * NEWLINE, none is produced at the start of the file, and a final one is added before EOF if the
+ * last line has none. Line breaks inside ( ) and [ ] are ignored so calls and lists can span lines.
  */
 LzToken lz_lexer_next(LzLexer *lexer);
 
 const char *lz_token_type_name(LzTokenType type);
 
 /*
- * Appends the decoded contents of a STRING token to out, which the caller
- * frees with lz_buffer_free. Use out->length; out->data stays NULL while the
- * contents are empty. Returns false on allocation failure.
+ * Appends the decoded contents of a STRING token to out, which the caller frees with
+ * lz_buffer_free. Use out->length, because out->data stays NULL while the contents are empty.
+ * Returns false on allocation failure.
  */
 bool lz_token_string_value(const LzSource *source, const LzToken *token, LzBuffer *out);
 

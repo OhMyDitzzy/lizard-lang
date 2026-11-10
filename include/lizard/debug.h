@@ -6,8 +6,8 @@
 #include "lizard/writer.h"
 
 /*
- * source may be NULL. With it, the position column shows line numbers; without
- * it, the raw source offset stored in the chunk.
+ * source may be NULL. With it the position column shows line numbers, and without it the raw
+ * source offset stored in the chunk.
  */
 void lz_disassemble_chunk(const LzChunk *chunk, const char *name, const LzSource *source,
                           const LzWriter *out);

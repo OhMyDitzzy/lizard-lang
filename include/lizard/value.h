@@ -13,8 +13,8 @@ typedef enum LzValueType {
 } LzValueType;
 
 /*
- * Scalars live inline in the value. Everything else is a pointer to a heap
- * object owned through the refcount in LzObject.
+ * Scalars live inline in the value. Everything else is a pointer to a heap object owned through
+ * the refcount in LzObject.
  */
 typedef struct LzValue {
     LzValueType type;
@@ -36,10 +36,10 @@ typedef struct LzString {
 struct LzType;
 
 /*
- * A growable list. `element` is the type every item must have, or NULL for any
- * (an unannotated array). It is set when the array is stored under an annotated
- * type such as `int[]`, and every later store is checked against it. Types
- * pointed at here are owned by the VM (lz_vm_array_of).
+ * A growable list. `element` is the type every item must have, or NULL for any, which is an
+ * unannotated array. It's set when the array is stored under an annotated type such as `int[]`,
+ * and every later store is checked against it. Types pointed at here are owned by the VM, see
+ * lz_vm_array_of.
  */
 typedef struct LzArray {
     LzObject base;
@@ -49,7 +49,7 @@ typedef struct LzArray {
     const struct LzType *element;
     size_t holders;   /* how many array items currently hold this array */
     uint32_t mark;    /* graph-walk stamp, see lz_heap_next_epoch */
-    bool has_arrays;  /* some item may be an array (never reset); lets walks skip flat arrays */
+    bool has_arrays;  /* some item may be an array, and it's never reset, so walks can skip flat arrays */
 } LzArray;
 
 typedef enum LzOrder {
@@ -79,28 +79,27 @@ void lz_value_release(LzHeap *heap, const LzValue *value);
 bool lz_value_is_truthy(const LzValue *value);
 
 /*
- * Exact comparison of two numbers (int or float), including int against float
- * without losing precision above 2^53. Both values must be numbers.
+ * Exact comparison of two numbers, int or float, including int against float without losing
+ * precision above 2^53. Both values must be numbers.
  */
 LzOrder lz_number_order(const LzValue *left, const LzValue *right);
 
 /*
- * No implicit conversion between types, except that ints and floats compare
- * by numeric value. Strings compare by content; other objects by identity.
+ * There's no implicit conversion between types, except that ints and floats compare by numeric
+ * value. Strings compare by content and other objects by identity.
  */
 bool lz_value_equal(const LzValue *left, const LzValue *right);
 
 /*
- * Same result as lz_value_equal, but arrays are compared by content with a
- * work budget (one unit per item pair). *work is the budget on entry and the
- * work done on exit; when the budget runs out the walk stops, returns false
- * and sets *work to UINT64_MAX so the caller can report it.
+ * Same result as lz_value_equal, but arrays are compared by content with a work budget of one unit
+ * per item pair. *work is the budget on entry and the work done on exit. When the budget runs out
+ * the walk stops, returns false and sets *work to UINT64_MAX so the caller can report it.
  */
 bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *work);
 
 /*
- * Writes the user-visible text form of a value. Strings inside an array are
- * quoted. Returns false on an output error (or out of memory for a deep array).
+ * Writes the user-visible text form of a value. Strings inside an array are quoted. Returns false
+ * on an output error, or out of memory for a deep array.
  */
 bool lz_value_write(const LzValue *value, const LzWriter *writer);
 

@@ -242,6 +242,88 @@ static void check_pub_let(const char *text, const char *help, const char *fixed_
     }
 }
 
+
+/* The signature of the pub fn `name`, written out through the API: <type params>(params) -> result [declared]. */
+static void check_fn_sig(const char *text, const char *name, const char *expected) {
+    LzVM vm;
+    LzBuffer out = {0};
+    LzBuffer err = {0};
+    LzBuffer dump = {0};
+    LzChunk chunk;
+    LzDiagnostics diagnostics;
+    LzSource source;
+    memset(&vm, 0, sizeof vm);
+    lz_vm_init(&vm, lz_writer_from_buffer(&out), lz_writer_from_buffer(&err));
+    LZ_CHECK(lz_builtin_install(&vm) == LZ_OK);
+    lz_source_from_string(&source, "t.lz", text);
+    lz_chunk_init(&chunk);
+    LZ_CHECK(lz_compile(&vm, &source, &chunk, &diagnostics) == LZ_OK);
+    const LzInterface *iface = lz_interface_of(&chunk);
+    LZ_CHECK(iface != NULL);
+    const LzIfaceSig *sig = NULL;
+    for (size_t i = 0; iface != NULL && i < lz_interface_count(iface); i++) {
+        const LzIfaceEntry *entry = lz_interface_entry(iface, i);
+        if (lz_interface_entry_kind(entry) == LZ_IFACE_FN && strcmp(lz_interface_entry_name(entry), name) == 0) {
+            sig = lz_interface_entry_sig(entry);
+        }
+    }
+    LZ_CHECK(sig != NULL);
+    if (sig != NULL) {
+        for (size_t i = 0; i < lz_interface_sig_type_param_count(sig); i++) {
+            put(&dump, i == 0 ? "<" : ", ");
+            put(&dump, lz_interface_sig_type_param_name(sig, i));
+            if (i + 1 == lz_interface_sig_type_param_count(sig)) {
+                put(&dump, ">");
+            }
+        }
+        put_sig(&dump, sig);
+        put(&dump, lz_interface_sig_result_declared(sig) ? " declared" : " inferred");
+    }
+    const char *actual = dump.data != NULL ? dump.data : "";
+    if (strcmp(actual, expected) != 0) {
+        fprintf(stderr, "program:\n%s\nexpected: %s\nactual:   %s\n", text, expected, actual);
+        lz_test_failures++;
+    }
+    lz_buffer_free(&dump);
+    lz_chunk_free(&vm.heap, &chunk);
+    lz_vm_release_roots(&vm);
+    lz_vm_free(&vm);
+    lz_buffer_free(&out);
+    lz_buffer_free(&err);
+}
+
+static void test_interface_function_types(void) {
+    check_fn_sig("pub fn apply(f: fn(int, string) -> bool, x: int) -> int => 1\n", "apply",
+                 "(f: fn(int, string) -> bool, x: int) -> int declared");
+    check_fn_sig("pub type Pred = fn(int) -> bool\npub fn pick(p: Pred, xs: int[]) -> int[] => xs\n", "pick",
+                 "(p: fn(int) -> bool, xs: int[]) -> int[] declared");
+    /* a function type with a result is parenthesised where something follows it */
+    check_fn_sig("pub fn maybe(f: (fn(int) -> int)?, gs: (fn(int))[]) -> (fn(int) -> int)[] => []\n", "maybe",
+                 "(f: nil | (fn(int) -> int), gs: fn(int)[]) -> (fn(int) -> int)[] declared");
+    check_fn_sig("pub fn make() -> fn(int) -> int => fn(n) => n\n", "make", "() -> fn(int) -> int declared");
+}
+
+static void test_interface_generics(void) {
+    check_fn_sig("pub fn first<T>(xs: T[]) -> T => xs[0]\n", "first", "<T>(xs: T[]) -> T declared");
+    check_fn_sig("pub fn map<T, U>(xs: T[], f: fn(T) -> U) -> U[] {\n  let out: U[] = []\n  return out\n}\n", "map",
+                 "<T, U>(xs: T[], f: fn(T) -> U) -> U[] declared");
+    check_fn_sig("pub fn or_else<T>(x: T?, d: T) -> T => d\n", "or_else", "<T>(x: T?, d: T) -> T declared");
+    check_fn_sig("pub fn plain(x: int) -> int => x\n", "plain", "(x: int) -> int declared");
+    /* a generic with no declared result: inside the body T is any, so the result is not worked out as T */
+    check_fn_sig("pub fn id<T>(x: T) => x\n", "id", "<T>(x: T) -> any inferred");
+}
+
+static void test_interface_inferred_results(void) {
+    check_fn_sig("pub fn one() => 1\n", "one", "() -> int inferred");
+    check_fn_sig("pub fn two(c) {\n  if c { return 1 }\n  return \"s\"\n}\n", "two", "(c: any) -> int | string inferred");
+    check_fn_sig("pub fn maybe(c) {\n  if c { return 1 }\n}\n", "maybe", "(c: any) -> int | nil inferred");
+    check_fn_sig("pub fn nothing() {\n  println(1)\n}\n", "nothing", "() -> nil inferred");
+    check_fn_sig("pub fn fact(n) {\n  if n <= 1 { return 1 }\n  return n * fact(n - 1)\n}\n", "fact", "(n: any) -> any inferred");
+    check_fn_sig("pub fn unknown(x) => x\n", "unknown", "(x: any) -> any inferred");
+    check_fn_sig("pub fn declared() -> number => 1\n", "declared", "() -> number declared");
+    check_fn_sig("pub fn list() => [1, 2]\n", "list", "() -> int[] inferred");
+}
+
 static void test_interface_cases(void) {
     /* 1: every kind */
     check_interface(
@@ -257,7 +339,7 @@ static void test_interface_cases(void) {
         "fn hidden() => 1\n",
         
         "fn add(a: int, b: int) -> int\n"
-        "fn greet(name: any, greeting: any =, *rest: int) -> any\n"
+        "fn greet(name: any, greeting: any =, *rest: int) -> nil\n"
         "const MAX: int\n"
         "const counter: int\n"
         "const names: string[]\n"
@@ -269,7 +351,7 @@ static void test_interface_cases(void) {
         "  method sum() -> any\n"
         "trait Shape\n"
         "  method area() -> any required\n"
-        "  method label() -> any\n"
+        "  method label() -> string\n"
         "error NotFound : Error\n"
         "  init init(message: string, needed: int) -> nil\n"
         "  field needed: int\n");
@@ -311,9 +393,9 @@ static void test_interface_cases(void) {
         "  field read age: int\n"
         "  field breed: string =\n"
         "  const LEGS: int\n"
-        "  static origin() -> any\n"
+        "  static origin() -> int\n"
         "  method override to_string() -> any\n"
-        "  operator ==(other: any) -> any\n");
+        "  operator ==(other: any) -> bool\n");
     /* 6: trait with a parent trait, class using a trait, error with a parent error */
     check_interface(
         "trait Named {\n    get label(self)\n}\n"
@@ -328,7 +410,7 @@ static void test_interface_cases(void) {
         "  init init(side: int) -> nil\n"
         "  field side: int\n"
         "  method area() -> any\n"
-        "  get label() -> any\n"
+        "  get label() -> string\n"
         "error Child : Base\n"
         "  init init(message: string, code: int, extra: string =) -> nil\n"
         "  field extra: string =\n");
@@ -387,5 +469,8 @@ static void test_interface_cases(void) {
 
 int main(void) {
     test_interface_cases();
+    test_interface_function_types();
+    test_interface_generics();
+    test_interface_inferred_results();
     return LZ_TEST_RESULT();
 }

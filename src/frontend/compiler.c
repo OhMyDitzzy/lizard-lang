@@ -24,6 +24,7 @@
 #define LZ_MAX_LOCALS 256
 #define LZ_MAX_NESTING 128
 #define LZ_MAX_ARGUMENTS 255
+#define LZ_MAX_TPARAMS 8
 
 typedef enum SymbolKind {
     SYMBOL_LOCAL,    /* stack slot, declared inside a block */
@@ -34,8 +35,8 @@ typedef enum SymbolKind {
 struct FuncState;
 
 /*
- * What the compiler knows about a declared function: enough to check a call of it
- * at compile time (argument count, names, types) and to type its result.
+ * What the compiler knows about a declared function, which is enough to check a call of it at
+ * compile time for argument count, names and types, and to type its result.
  */
 typedef struct FuncSig {
     struct FuncSig *next; /* every signature is freed together when compilation ends */
@@ -48,6 +49,14 @@ typedef struct FuncSig {
     LzType rest_item; /* type of each surplus argument */
     LzString *names[LZ_MAX_PARAMS + 1];
     LzType types[LZ_MAX_PARAMS];
+    /*
+     * Type parameters of a generic function: `fn first<T>(xs: T[]) -> T`. `types`, `rest_item`
+     * and, once the body is compiled, `result` name them as markers (LzType.tparam) so that a
+     * call can work out what they stand for. Inside the body they are plain `any`.
+     */
+    uint8_t tparam_count;
+    LzString *tparams[LZ_MAX_TPARAMS];
+    LzType generic_result;
 } FuncSig;
 
 typedef struct Symbol {
@@ -66,7 +75,39 @@ typedef struct Symbol {
     bool dict_value;         /* initialised from a dict literal: `x[k]` reads a key */
     bool array_value;        /* initialised from an array: `x[k]` needs an int index */
     const FuncSig *sig;      /* set for a declared function: calls of it are checked */
+    /*
+     * Narrowing: inside `if x != nil { ... }` the type of x is `narrowed`, not `type`, see
+     * narrow_push.
+     */
+    bool has_narrow;
+    LzType narrowed;
+    uint32_t assign_count;  /* bumped by every assignment: a narrowing from before it no longer holds */
+    int8_t closure_assigned; /* -1 not looked at yet, 0 no, 1 a function body assigns this name */
 } Symbol;
+
+/* What a condition says about variables when it is true and when it is false. */
+#define LZ_MAX_FACTS 4
+typedef struct Fact {
+    uint16_t symbol;
+    LzType type;
+} Fact;
+
+typedef struct Facts {
+    struct Facts *next; /* every Facts of a compilation is chained here, to be freed at the end */
+    uint8_t true_count;
+    uint8_t false_count;
+    Fact when_true[LZ_MAX_FACTS];
+    Fact when_false[LZ_MAX_FACTS];
+} Facts;
+
+/* One change of a symbol's narrowing, so that leaving a branch can put the old state back. */
+typedef struct NarrowEntry {
+    size_t symbol;
+    int depth;
+    bool had;
+    LzType old;
+    uint32_t count;
+} NarrowEntry;
 
 #define LZ_MAX_ALIASES 64
 
@@ -80,12 +121,12 @@ typedef struct Alias {
 } Alias;
 
 /*
- * Identical constants of a chunk are stored once, so a program that mentions one
- * variable or literal many times does not run out of the 65536 slots of a chunk.
- * The index is an open-addressing table of constant indexes plus one, kept at
- * most half full. It is exact: truncating the chunk after a folded const removes
- * the entries of the dropped constants (stale entries for a value that keeps
- * coming back would pile up into one long probe chain).
+ * Identical constants of a chunk are stored once, so a program that mentions one variable or
+ * literal many times doesn't run out of the 65536 slots of a chunk. The index is an
+ * open-addressing table of constant indexes plus one, kept at most half full. It's exact,
+ * because truncating the chunk after a folded const removes the entries of the dropped
+ * constants. Otherwise stale entries for a value that keeps coming back would pile up into one
+ * long probe chain.
  */
 typedef struct ConstantIndex {
     uint32_t *slots;
@@ -94,8 +135,8 @@ typedef struct ConstantIndex {
 } ConstantIndex;
 
 /*
- * The function being compiled. The parser's chunk, constant index and local count
- * always belong to the innermost one; the enclosing function's are parked here.
+ * The function being compiled. The parser's chunk, constant index and local count always belong
+ * to the innermost one, and the enclosing function's are parked here.
  */
 typedef struct FuncState {
     struct FuncState *enclosing;
@@ -110,7 +151,9 @@ typedef struct FuncState {
     size_t saved_local_count;
     bool saved_terminated;
     bool static_member;   /* a function without `self` in a class body: `self` is not available */
-    bool method_member;   /* a method or property of a class (it has `self`): `super` is available */
+    LzType inferred;      /* the union of what its `return`s give, for a function without `->` */
+    bool has_inferred;
+    bool method_member;   /* a method or property of a class, which has `self`, so `super` is available */
 } FuncState;
 
 typedef struct LoopFrame LoopFrame;
@@ -126,8 +169,8 @@ typedef struct FinallySnapshot {
 } FinallySnapshot;
 
 /*
- * A region guarded by a handler (an open OP_TRY_BEGIN) that `return`, `break` and `continue`
- * leave: each must close it, and run the `finally` body of a try that has one.
+ * A region guarded by a handler, which is an open OP_TRY_BEGIN, that `return`, `break` and
+ * `continue` leave. Each must close it, and run the `finally` body of a try that has one.
  */
 typedef struct TryContext {
     struct TryContext *enclosing;
@@ -147,8 +190,8 @@ typedef struct FinallyGuard {
 } FinallyGuard;
 
 /*
- * An `error Name : Parent` declaration found by the prescan, which declares every one of them
- * in the VM before the first statement is compiled (see prescan_errors). The mistakes it met are
+ * An `error Name : Parent` declaration found by the prescan, which declares every one of them in
+ * the VM before the first statement is compiled, see prescan_errors. The mistakes it met are
  * kept here and told when the parser reaches the declaration, so they come in source order.
  */
 typedef enum ErrorProblem {
@@ -169,17 +212,17 @@ typedef struct ErrorDecl {
     bool is_pub;          /* declared `pub error` */
     uint32_t decl_offset; /* the `error` keyword, where a `pub ` would go */
     bool told;            /* a public signature already said this one is not pub */
-    LzIfaceSig *ctor;     /* the fields its constructor takes after the message (own and inherited) */
+    LzIfaceSig *ctor;     /* the fields its constructor takes after the message, own and inherited */
 } ErrorDecl;
 
-/* A user type named while the signature of a `pub` declaration is parsed (see check_pub_refs). */
+/* A user type named while the signature of a `pub` declaration is parsed, see check_pub_refs. */
 typedef enum TypeRefKind { REF_CLASS, REF_ALIAS, REF_ERROR } TypeRefKind;
 
 typedef struct TypeRef {
     uint32_t offset;
     uint32_t length;
     TypeRefKind kind;
-    size_t index; /* REF_CLASS: index in Parser.classes; REF_ALIAS: index in Parser.aliases */
+    size_t index; /* REF_CLASS is an index in Parser.classes and REF_ALIAS an index in Parser.aliases */
 } TypeRef;
 
 #define LZ_MAX_TYPE_REFS 16
@@ -205,16 +248,15 @@ typedef struct Parser {
     size_t alias_count;
     FuncState *fs;      /* innermost function being compiled */
     FuncSig *sigs;      /* every signature made so far */
-    bool terminated;    /* the statement just compiled never falls through (return, ...) */
-    bool method_name;   /* the identifier being compiled follows a '.' (receiver.name(...)) */
+    bool terminated;    /* the statement just compiled never falls through, like a return */
+    bool method_name;   /* the identifier being compiled follows a '.', as in receiver.name(...) */
     bool for_range_ok;  /* a `..` here belongs to the header of the `for` being compiled */
-    bool comma_list;    /* a `,` may separate this statement from the next (a `for` header) */
+    bool comma_list;    /* a `,` may separate this statement from the next, in a `for` header */
     bool range_case;    /* a range is being read as the item of a `case`: no step, no value pushed */
     int bracket_depth;  /* ( [ { opened and not yet closed, as tokens are consumed */
-    int no_in_depth;    /* `in` is not an operator at this bracket depth (-1: nowhere): the
-                           iterable of a `for ... in` header, where `in` is part of the loop */
+    int no_in_depth;    /* `in` is not an operator at this bracket depth, and -1 means nowhere. It's the iterable of a `for ... in` header, where `in` is part of the loop */
     LoopFrame *loop; /* innermost while being compiled, NULL outside a loop */
-    TryContext *try_ctx; /* innermost open try (or its finally region), see TryContext */
+    TryContext *try_ctx; /* innermost open try or its finally region, see TryContext */
     FinallyGuard guard;
     ErrorDecl *error_decls; /* the `error` declarations of the file, in order, see prescan_errors */
     size_t error_decl_count;
@@ -223,15 +265,19 @@ typedef struct Parser {
     LzString *class_name;     /* the class whose body is being compiled, or NULL */
     bool member_pending;      /* the next compile_function is a member of that class */
     bool member_static;       /* ...and it has no `self` */
+    Facts *facts_list;        /* narrowing facts made so far, freed at the end */
+    NarrowEntry *journal;     /* narrowings applied and not yet undone */
+    size_t journal_count;
+    size_t journal_capacity;
     bool in_default;          /* compiling a field default or a constant initialiser */
     size_t class_parent_count; /* parents named in the head of the class being compiled */
     bool is_rhs;              /* parsing the type after `is`: an unknown name is "not a type" */
     bool in_trait;            /* the body being compiled is a trait's */
     bool in_extend;           /* the body being compiled is an `extend` block's */
-    uint64_t error_class_kinds[4]; /* bit k: the error kind k has a class (declared in this file) */
-    uint16_t extend_kinds;    /* ...and the builtin kinds it extends (0: a class) */
+    uint64_t error_class_kinds[4]; /* bit k is set if the error kind k has a class declared in this file */
+    uint16_t extend_kinds;    /* and the builtin kinds it extends, where 0 means a class */
     uint16_t error_self_kind; /* the body being compiled is of an error class: its kind + 1, else 0 */
-    bool last_bodiless;       /* the member function just compiled had no body (a trait's requirement) */
+    bool last_bodiless;       /* the member function just compiled had no body, which is a trait's requirement */
     LzString *classes[64];    /* the classes declared so far: valid names in a type */
     uint64_t class_ids[64];   /* their identities (LzClass.id), parallel to classes */
     uint64_t current_class_id; /* identity of the class whose body is being compiled, or 0 */
@@ -251,14 +297,13 @@ typedef struct Parser {
     LzIfaceEntry *class_entry; /* the entry of the `pub` class, trait or error being compiled, or NULL */
     bool class_has_init;      /* the class being compiled writes an `init(self)` */
     LzType thunk_type;        /* the type of the expression compile_thunk just compiled */
-    LzIfaceSig *error_own;    /* the constructor arguments of the error class just compiled (own fields only) */
+    LzIfaceSig *error_own;    /* the constructor arguments of the error class just compiled, own fields only */
 } Parser;
 
 /*
- * A `while` being compiled, so that `break` and `continue` in its body know where to
- * jump and what to pop. A function compiled inside the loop keeps the frame (the
- * error message names it), but its body may not jump to it: `func` is the function
- * that owns the loop.
+ * A `while` being compiled, so that `break` and `continue` in its body know where to jump and
+ * what to pop. A function compiled inside the loop keeps the frame, because the error message
+ * names it, but its body may not jump to it. `func` is the function that owns the loop.
  */
 typedef struct LoopFrame {
     LoopFrame *enclosing;
@@ -311,7 +356,12 @@ typedef struct Expr {
     bool base_member; /* ...an index whose container came from a member: base_pos is that GET_FIELD */
     size_t base_pos;
     bool is_member; /* the expression is `a.name`: its last instruction is a GET_FIELD at op_pos */
-    bool from_equality; /* the result of `==` or `!=` (`is` does not chain with them) */
+    bool from_equality; /* the result of `==` or `!=`, because `is` does not chain with them */
+    bool loose;         /* its type came from arithmetic on a value that might be an object with operators: do not trust it */
+    int32_t var_sym;    /* the expression is a bare local or global variable: its symbol, else -1 */
+    size_t var_end;     /* ...and its load is the last code emitted, up to this offset */
+    const Facts *facts; /* a condition, and what it tells about variables. Valid while facts_end == code size */
+    size_t facts_end;
     LzToken start;  /* the first token of the expression, for an error about the whole of it */
 } Expr;
 
@@ -359,8 +409,8 @@ static Expr parse_precedence(Parser *parser, Precedence precedence);
 
 /*
  * Help for the mistakes beginners make most, keyed by the start of the message. Only fixes that
- * are the same every time live here; a help that needs the code around it is set where the
- * error is found (diag_help).
+ * are the same every time live here. A help that needs the code around it is set where the error
+ * is found, see diag_help.
  */
 static const struct {
     const char *message;
@@ -443,7 +493,7 @@ static void record(Parser *parser, uint32_t offset, uint32_t length, const char 
     record_full(parser, offset, length, message, NULL, NULL);
 }
 
-/* Extras for the next recorded error (set them just before the call that reports it). */
+/* Extras for the next recorded error. Set them just before the call that reports it. */
 static void diag_label(Parser *parser, const char *format, ...) LZ_PRINTF_FORMAT(2, 3);
 static void diag_label(Parser *parser, const char *format, ...) {
     va_list args;
@@ -468,7 +518,10 @@ static void diag_help(Parser *parser, const char *format, ...) {
     va_end(args);
 }
 
-/* A fix: replace [offset, offset + delete) with `text`; the help text stays as the fallback. */
+/*
+ * A fix that replaces [offset, offset + delete) with `text`. The help text stays as the
+ * fallback.
+ */
 static void diag_fix(Parser *parser, const char *headline, uint32_t offset, uint32_t delete_length,
                      const char *text) {
     LzDiagExtras *extras = &parser->pending;
@@ -671,9 +724,9 @@ static uint32_t hash_constant(const LzValue *value) {
 }
 
 /*
- * Names must match by identity: GET_GLOBAL needs the interned string itself, and
- * a string literal with the same text is a different object. Everything else
- * matches by value (floats by their bits, so 0.0 and -0.0 stay apart).
+ * Names must match by identity, because GET_GLOBAL needs the interned string itself and a string
+ * literal with the same text is a different object. Everything else matches by value, and floats
+ * by their bits, so 0.0 and -0.0 stay apart.
  */
 static bool constants_match(const LzValue *a, const LzValue *b, bool by_identity) {
     if (a->type != b->type) {
@@ -748,7 +801,10 @@ static bool rebuild_constant_index(Parser *parser, size_t capacity) {
 static void remember_constant(Parser *parser, uint16_t index) {
     ConstantIndex *table = &parser->constants;
     if ((table->used + 1) * 2 > table->capacity) {
-        /* Grow, or build the index again after a failed allocation. It covers every live constant. */
+        /*
+         * Grow, or build the index again after a failed allocation. It covers every live
+         * constant.
+         */
         size_t capacity = table->capacity != 0 ? table->capacity : 64;
         while ((parser->chunk->constant_count + 1) * 2 > capacity) {
             capacity *= 2;
@@ -771,7 +827,10 @@ static void remember_constant(Parser *parser, uint16_t index) {
     table->used++;
 }
 
-/* Drops the entry of the constant at index (backward-shift deletion: no tombstones). */
+/*
+ * Drops the entry of the constant at index with backward-shift deletion, so there are no
+ * tombstones.
+ */
 static void forget_constant(Parser *parser, size_t index) {
     ConstantIndex *table = &parser->constants;
     if (table->capacity == 0) {
@@ -922,6 +981,9 @@ static Symbol *add_symbol(Parser *parser, const LzToken *token, LzString *name, 
     symbol->loop_var = false;
     symbol->catch_var = false;
     symbol->sig = NULL;
+    symbol->has_narrow = false;
+    symbol->assign_count = 0;
+    symbol->closure_assigned = -1;
     return symbol;
 }
 
@@ -930,10 +992,10 @@ static void begin_scope(Parser *parser) {
 }
 
 /*
- * Drops every local declared inside the body of loop (the loop body's own scope and
- * anything nested in it), exactly as end_scope would when the block ended normally:
- * a captured local is closed, the rest are popped. The symbols stay in the table
- * because the code that follows is still compiled against them.
+ * Drops every local declared inside the body of loop, which is the loop body's own scope and
+ * anything nested in it, exactly as end_scope would when the block ended normally. A captured
+ * local is closed and the rest are popped. The symbols stay in the table because the code that
+ * follows is still compiled against them.
  */
 static void discard_loop_locals(Parser *parser, LoopFrame *loop, uint32_t offset,
                                 bool for_continue) {
@@ -981,8 +1043,11 @@ static void add_loop_continue(Parser *parser, LoopFrame *loop, size_t operand) {
 }
 
 /* Emits nothing: a `continue` of a `for` jumps forward to the step, patched later. */
+static void narrow_unwind_depth(Parser *parser, int depth);
+
 static void end_scope(Parser *parser) {
     uint32_t offset = parser->previous.offset;
+    narrow_unwind_depth(parser, parser->scope_depth - 1); /* what this block narrowed ends with it */
     while (parser->symbol_count > 0 &&
            parser->symbols[parser->symbol_count - 1].depth == parser->scope_depth) {
         Symbol *symbol = &parser->symbols[--parser->symbol_count];
@@ -1016,6 +1081,11 @@ static Expr expr_of(LzType type) {
     expr.is_call = false;
     expr.is_member = false;
     expr.from_equality = false;
+    expr.loose = false;
+    expr.var_sym = -1;
+    expr.var_end = 0;
+    expr.facts = NULL;
+    expr.facts_end = 0;
     expr.base_member = false;
     expr.base_pos = 0;
     memset(&expr.start, 0, sizeof expr.start);
@@ -1036,9 +1106,9 @@ static void describe_type(const LzType *type, char *out, size_t size) {
 
 
 /*
- * A value that fits `type`, written as source ("text" for string, 0 for int, [] for T[] ...),
- * for a help that says what to return. False when there is no good example (any, functions,
- * literal unions): then the help is left out rather than guessed.
+ * A value that fits `type`, written as source, like "text" for string, 0 for int and [] for T[].
+ * It's for a help that says what to return. False when there's no good example, as for any,
+ * functions and literal unions, and then the help is left out rather than guessed.
  */
 static bool example_value_for_type(const LzType *type, char *out, size_t size) {
     if (type->literal_count > 0) {
@@ -1092,7 +1162,10 @@ static bool conversion_for(const LzType *from, const LzType *to, const char *exp
     return true;
 }
 
-/* The indentation (spaces and tabs) of the line that holds `offset`; false if code comes before it. */
+/*
+ * The indentation, spaces and tabs, of the line that holds `offset`. False if code comes before
+ * it.
+ */
 static bool line_is_just_indent_before(const Parser *parser, uint32_t offset, char *indent, size_t size) {
     const char *text = parser->source->text;
     size_t start = offset;
@@ -1115,15 +1188,19 @@ static bool line_is_just_indent_before(const Parser *parser, uint32_t offset, ch
 static LzToken span_from(const Parser *parser, const LzToken *start);
 
 /*
- * When `from` converts clearly into `to`, set the help (and, when `with_fix`, the visual fix that
- * replaces the expression in `span` with the conversion) for the mismatch about to be reported.
+ * When `from` converts clearly into `to`, set the help for the mismatch about to be reported.
+ * With `with_fix` it also sets the visual fix that replaces the expression in `span` with the
+ * conversion.
  */
 static void convert_help(Parser *parser, const LzType *from, const LzType *to, const LzToken *span,
                          bool with_fix) {
     if (parser->panic || parser->pending.help[0] != '\0' || parser->pending.has_fix) {
         return;
     }
-    /* The span can run on to the end of the statement: the expression stops at its last real character. */
+    /*
+     * The span can run on to the end of the statement: the expression stops at its last real
+     * character.
+     */
     const char *text = parser->source->text + span->offset;
     size_t length = span->length;
     for (size_t i = 0; i < length; i++) {
@@ -1204,14 +1281,14 @@ static void error_operator(Parser *parser, const LzToken *op, const LzType *left
 }
 
 /*
- * Checks a value of type from against the type it is stored under. A value that
- * always fits needs nothing, one that never fits is a compile error, and one
- * that might fit (any, a union, a wider type) gets a run-time check.
+ * Checks a value of type from against the type it is stored under. A value that always fits
+ * needs nothing, one that never fits is a compile error, and one that might fit, like any, a
+ * union or a wider type, gets a run-time check.
  */
-/* Would assigning `from` to `to` emit a runtime check (as opposed to a compile-time verdict)? */
+/* Would assigning `from` to `to` emit a runtime check, as opposed to a compile-time verdict? */
 static bool check_is_runtime(const LzType *from, const LzType *to) {
     if (lz_type_assignable(from, to) != LZ_ASSIGN_ALWAYS) {
-        return true; /* MAYBE needs the check; NEVER is a compile error and needs nothing */
+        return true; /* MAYBE needs the check, and NEVER is a compile error and needs nothing */
     }
     /*
      * An array stored under `T[]` is checked and restricted to T even when it
@@ -1248,11 +1325,14 @@ static void emit_check_if_needed(Parser *parser, const LzType *from, const LzTyp
     }
 }
 
+static void fn_mismatch_help(Parser *parser, const LzType *expected, const LzType *got);
+
 static void check_flow(Parser *parser, const LzType *from, const LzType *to, const LzToken *start,
                        uint32_t offset, LzOpCode check_op, const char *mismatch) {
     if (lz_type_assignable(from, to) == LZ_ASSIGN_NEVER) {
         LzToken span = span_from(parser, start);
         convert_help(parser, from, to, &span, strncmp(mismatch, "return", 6) == 0);
+        fn_mismatch_help(parser, to, from);
         error_types(parser, &span, mismatch, to, ", got ", from);
         return;
     }
@@ -1298,7 +1378,7 @@ static Expr union_expr(Expr left, Expr right) {
     return expr_of(merged);
 }
 
-/* The type `item[]`; a limit or memory error is reported once and gives `any[]`. */
+/* The type `item[]`. A limit or memory error is reported once and gives `any[]`. */
 static LzType array_type(Parser *parser, const LzType *item) {
     LzType out = lz_type_of_kinds(LZ_KIND_ARRAY);
     LzStatus status = lz_vm_array_of(parser->vm, item, &out);
@@ -1315,7 +1395,7 @@ static LzType array_type(Parser *parser, const LzType *item) {
 
 static bool is_any_type(const LzType *type);
 
-/* The type `dict[keys, values]`; a limit or memory error is reported once. */
+/* The type `dict[keys, values]`. A limit or memory error is reported once. */
 static LzType dict_type(Parser *parser, const LzType *keys, const LzType *values) {
     LzType shape = lz_type_of_kinds(LZ_KIND_DICT);
     LzType *stored = NULL;
@@ -1350,6 +1430,136 @@ static LzType dict_type(Parser *parser, const LzType *keys, const LzType *values
     out.element = found->element;
     out.value_element = found->value_element;
     return out;
+}
+
+/*
+ * The type `fn(params) -> result`, where a NULL result means nobody cares what it returns. The
+ * types are interned in the VM. A limit or memory error is reported once and gives plain
+ * `function`.
+ */
+static LzType fn_type_make(Parser *parser, size_t count, const LzType *params, size_t required,
+                           bool has_rest, const LzType *rest, const LzType *result) {
+    const LzType *pointers[LZ_MAX_PARAMS];
+    for (size_t i = 0; i < count && i < LZ_MAX_PARAMS; i++) {
+        pointers[i] = &params[i];
+    }
+    LzType out = lz_type_of_kinds(LZ_KIND_FUNCTION);
+    LzStatus status = lz_vm_fn_of(parser->vm, count, required, has_rest, pointers, result, rest, &out);
+    if (status == LZ_ERR_MEMORY || status == LZ_ERR_HEAP_LIMIT) {
+        fail(parser, status);
+    } else if (status != LZ_OK) {
+        error_at_previous(parser, parser->vm->error);
+    }
+    if (status != LZ_OK) {
+        out = lz_type_of_kinds(LZ_KIND_FUNCTION);
+    }
+    return out;
+}
+
+/* What a call of a generic function has worked out so far about its type parameters. */
+typedef struct Infer {
+    const FuncSig *sig; /* NULL: the callee is not generic */
+    LzType bound[LZ_MAX_TPARAMS];
+    bool has[LZ_MAX_TPARAMS];
+} Infer;
+
+static bool type_mentions_tparam(const LzType *type, int depth) {
+    if (type == NULL || depth > 8) {
+        return false;
+    }
+    if (type->tparam != NULL) {
+        return true;
+    }
+    if ((type->kinds & LZ_KIND_ARRAY) != 0 && type->element != NULL && type_mentions_tparam(type->element, depth + 1)) {
+        return true;
+    }
+    if ((type->kinds & LZ_KIND_DICT) != 0 &&
+        (type_mentions_tparam(type->element, depth + 1) || type_mentions_tparam(type->value_element, depth + 1))) {
+        return true;
+    }
+    if ((type->kinds & LZ_KIND_FUNCTION) != 0 && type->fn != NULL) {
+        const LzFnType *fn = type->fn;
+        for (size_t i = 0; i < fn->param_count; i++) {
+            if (type_mentions_tparam(fn->params[i], depth + 1)) {
+                return true;
+            }
+        }
+        return type_mentions_tparam(fn->result, depth + 1) || type_mentions_tparam(fn->rest, depth + 1);
+    }
+    return false;
+}
+
+/*
+ * `type` with its type parameters replaced by what `infer` bound them to, and `any` for those it
+ * did not. With no infer they all become `any`, which is how a type is erased before a run-time
+ * check.
+ */
+static LzType subst_tparams(Parser *parser, const LzType *type, const Infer *infer, int depth) {
+    if (depth > 8 || !type_mentions_tparam(type, 0)) {
+        return *type;
+    }
+    if (type->tparam != NULL) {
+        LzType any = lz_type_of_kinds(LZ_KINDS_ANY);
+        if (infer != NULL && infer->sig != NULL) {
+            for (size_t k = 0; k < infer->sig->tparam_count; k++) {
+                if (infer->sig->tparams[k] == type->tparam && infer->has[k]) {
+                    any = infer->bound[k];
+                    if (type->tparam_nullable) {
+                        LzType nil = lz_type_of_kinds(LZ_KIND_NIL);
+                        LzType merged;
+                        if (lz_type_union(&merged, &any, &nil)) {
+                            any = merged;
+                        }
+                    }
+                }
+            }
+        }
+        return any;
+    }
+    LzType out = *type;
+    if ((type->kinds & LZ_KIND_ARRAY) != 0 && type->element != NULL) {
+        LzType item = subst_tparams(parser, type->element, infer, depth + 1);
+        out.element = array_type(parser, &item).element;
+    }
+    if ((type->kinds & LZ_KIND_DICT) != 0) {
+        LzType keys = type->element != NULL ? subst_tparams(parser, type->element, infer, depth + 1)
+                                            : lz_type_of_kinds(LZ_KINDS_ANY);
+        LzType values = type->value_element != NULL ? subst_tparams(parser, type->value_element, infer, depth + 1)
+                                                    : lz_type_of_kinds(LZ_KINDS_ANY);
+        LzType shaped = dict_type(parser, &keys, &values);
+        out.element = shaped.element;
+        out.value_element = shaped.value_element;
+    }
+    if ((type->kinds & LZ_KIND_FUNCTION) != 0 && type->fn != NULL) {
+        const LzFnType *fn = type->fn;
+        LzType params[LZ_MAX_PARAMS];
+        for (size_t i = 0; i < fn->param_count && i < LZ_MAX_PARAMS; i++) {
+            params[i] = fn->params[i] != NULL ? subst_tparams(parser, fn->params[i], infer, depth + 1)
+                                              : lz_type_of_kinds(LZ_KINDS_ANY);
+        }
+        LzType result = fn->result != NULL ? subst_tparams(parser, fn->result, infer, depth + 1)
+                                           : lz_type_of_kinds(LZ_KINDS_ANY);
+        LzType rest = fn->rest != NULL ? subst_tparams(parser, fn->rest, infer, depth + 1)
+                                       : lz_type_of_kinds(LZ_KINDS_ANY);
+        out.fn = fn_type_make(parser, fn->param_count, params, fn->required, fn->has_rest, &rest,
+                              fn->result != NULL ? &result : NULL)
+                     .fn;
+    }
+    return out;
+}
+
+/*
+ * The type of a reference to a declared function, which is what its signature says, or `any`
+ * where it says nothing.
+ */
+static LzType fn_type_of_sig(Parser *parser, const FuncSig *sig) {
+    LzType params[LZ_MAX_PARAMS];
+    for (size_t i = 0; i < sig->param_count; i++) {
+        params[i] = subst_tparams(parser, &sig->types[i], NULL, 0); /* a value of it is not generic */
+    }
+    LzType result = subst_tparams(parser, &sig->result, NULL, 0);
+    LzType rest = subst_tparams(parser, &sig->rest_item, NULL, 0);
+    return fn_type_make(parser, sig->param_count, params, sig->required, sig->has_rest, &rest, &result);
 }
 
 /* Type syntax */
@@ -1479,7 +1689,7 @@ static LzType literal_type(const LzLiteral *literal) {
 
 static bool parse_type_union(Parser *parser, LzType *out);
 
-/* While a `pub` signature is parsed, every user type it names is noted (see check_pub_refs). */
+/* While a `pub` signature is parsed, every user type it names is noted, see check_pub_refs. */
 static void note_type_ref(Parser *parser, const LzToken *token, TypeRefKind kind, size_t index) {
     if (!parser->track_refs || parser->ref_count >= LZ_MAX_TYPE_REFS) {
         return;
@@ -1512,7 +1722,7 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
             for (size_t i = 0; i < parser->class_count; i++) {
                 if (parser->classes[i] == id) {
                     *out = lz_type_of_kinds(LZ_KIND_INSTANCE);
-                    out->class_name = id; /* a subclass will match too (stage 2) */
+                    out->class_name = id; /* a subclass will match too, in stage 2 */
                     out->class_id = parser->class_ids[i];
                     note_type_ref(parser, &token, REF_CLASS, i);
                     return true;
@@ -1557,14 +1767,46 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
         advance(parser);
         *out = lz_type_of_kinds(LZ_KIND_NIL);
         return true;
-    case LZ_TOKEN_FN:
+    case LZ_TOKEN_FN: {
         advance(parser);
-        if (check(parser, LZ_TOKEN_LEFT_PAREN)) {
-            error_at_current(parser, "function types with a signature are not supported yet; write 'fn'");
-            return false;
+        if (!check(parser, LZ_TOKEN_LEFT_PAREN)) {
+            *out = lz_type_of_kinds(LZ_KIND_FUNCTION); /* plain `fn`: any function */
+            return true;
         }
-        *out = lz_type_of_kinds(LZ_KIND_FUNCTION);
-        return true;
+        /* fn(int, string) -> bool, and without `->` the result is not described and is any */
+        advance(parser);
+        parser->nesting++;
+        LzType params[LZ_MAX_PARAMS];
+        size_t count = 0;
+        bool ok = true;
+        skip_newlines(parser);
+        while (!check(parser, LZ_TOKEN_RIGHT_PAREN) && !check(parser, LZ_TOKEN_EOF) && !parser->panic) {
+            LzType param = lz_type_of_kinds(LZ_KINDS_ANY);
+            LzToken at = parser->current;
+            ok = parse_type_union(parser, &param) && ok;
+            if (count >= LZ_MAX_PARAMS) {
+                error_at(parser, &at, "too many parameters in a function type (limit 64)");
+                ok = false;
+            } else {
+                params[count++] = param;
+            }
+            skip_newlines(parser);
+            if (!match(parser, LZ_TOKEN_COMMA)) {
+                break;
+            }
+            skip_newlines(parser);
+        }
+        consume(parser, LZ_TOKEN_RIGHT_PAREN, "expected ')' after the parameter types of a function type");
+        LzType result = lz_type_of_kinds(LZ_KINDS_ANY);
+        bool has_result = false;
+        if (!parser->panic && match(parser, LZ_TOKEN_ARROW)) {
+            has_result = true;
+            ok = parse_type_union(parser, &result) && ok;
+        }
+        parser->nesting--;
+        *out = fn_type_make(parser, count, params, count, false, NULL, has_result ? &result : NULL);
+        return ok;
+    }
     case LZ_TOKEN_TRUE:
     case LZ_TOKEN_FALSE: {
         advance(parser);
@@ -1640,7 +1882,10 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
 static bool parse_type_postfix(Parser *parser, LzType *out) {
     bool ok = parse_type_primary(parser, out);
     for (;;) {
-        /* `int??` is `int?` written twice: nullable twice is nullable (the lexer made it `??`). */
+        /*
+         * `int??` is `int?` written twice, and nullable twice is nullable. The lexer made it
+         * `??`.
+         */
         if (match(parser, LZ_TOKEN_QUESTION) || match(parser, LZ_TOKEN_QUESTION_QUESTION)) {
             LzType nil = lz_type_of_kinds(LZ_KIND_NIL);
             LzType merged;
@@ -1693,9 +1938,16 @@ static bool parse_type_union(Parser *parser, LzType *out) {
         LzType next;
         ok = parse_type_postfix(parser, &next) && ok;
         LzType merged;
-        if ((out->kinds & next.kinds & LZ_KIND_ARRAY) != 0 && out->element != next.element) {
+        if ((out->kinds & next.kinds & LZ_KIND_ARRAY) != 0 && out->element != next.element &&
+            out->tparam == NULL && next.tparam == NULL) {
             error_at_previous(parser, "a union cannot hold two different array types; "
                                       "write (A | B)[] instead");
+            ok = false;
+        }
+        if ((out->kinds & next.kinds & LZ_KIND_FUNCTION) != 0 && out->fn != NULL && next.fn != NULL &&
+            out->fn != next.fn) {
+            error_at_previous(parser, "a union cannot hold two different function types; "
+                                      "write a plain fn, or one signature with a union result");
             ok = false;
         }
         if (!lz_type_union(&merged, out, &next)) {
@@ -1712,13 +1964,14 @@ static bool parse_type_union(Parser *parser, LzType *out) {
 
 /* Expressions */
 
-/* ---- `pub`: the interface, and what it must not leak ---- */
-
 static void iface_oom(Parser *parser) {
     fail(parser, lz_vm_out_of_memory(parser->vm));
 }
 
-/* parse_type_union for the type of a public signature: user types it names are noted when `track`. */
+/*
+ * parse_type_union for the type of a public signature: user types it names are noted when
+ * `track`.
+ */
 static bool parse_sig_type(Parser *parser, bool track, LzType *out) {
     parser->track_refs = track;
     bool ok = parse_type_union(parser, out);
@@ -1726,7 +1979,10 @@ static bool parse_sig_type(Parser *parser, bool track, LzType *out) {
     return ok;
 }
 
-/* Reports the user types named in the signature of `owner` (a `pub` declaration) that are not pub. */
+/*
+ * Reports the user types named in the signature of `owner`, a `pub` declaration, that are not
+ * pub.
+ */
 static void check_pub_refs(Parser *parser, const char *owner, const char *what) {
     size_t count = parser->ref_count;
     parser->ref_count = 0;
@@ -1765,7 +2021,7 @@ static void check_pub_refs(Parser *parser, const char *owner, const char *what) 
             decl_offset = decl->decl_offset;
         }
         if (*told) {
-            continue; /* said once; the fix for that one is the fix for all uses */
+            continue; /* said once, because the fix for that one is the fix for all uses */
         }
         *told = true;
         char name[48];
@@ -1782,7 +2038,10 @@ static void check_pub_refs(Parser *parser, const char *owner, const char *what) 
     }
 }
 
-/* The user types a value's type is made of, for a pub `let` or `const` whose type was worked out. */
+/*
+ * The user types a value's type is made of, for a pub `let` or `const` whose type was worked
+ * out.
+ */
 static void check_pub_type(Parser *parser, const LzType *type, const LzToken *at, const char *owner, int depth) {
     if (type == NULL || depth > 8) {
         return;
@@ -1843,6 +2102,13 @@ static LzIfaceSig *build_sig(Parser *parser, const FuncSig *sig, bool skip_self)
             return NULL;
         }
     }
+    for (size_t k = 0; k < sig->tparam_count; k++) {
+        if (!lz_iface_sig_add_type_param(out, sig->tparams[k]->data)) {
+            lz_iface_sig_free(out);
+            iface_oom(parser);
+            return NULL;
+        }
+    }
     (void)type_text(&sig->result, text, sizeof text);
     if (!lz_iface_sig_set_result(out, text, sig->result_declared)) {
         lz_iface_sig_free(out);
@@ -1898,7 +2164,7 @@ static void iface_add_alias(Parser *parser, const LzString *name, const LzType *
     }
 }
 
-/* A `pub` member of the class (or trait, or error) being compiled. */
+/* A `pub` member of the class, trait or error being compiled. */
 static void iface_add_member_sig(Parser *parser, LzIfaceMemberKind kind, const char *name, const FuncSig *sig,
                                  bool is_override, bool required) {
     if (!compiling_clean(parser) || parser->class_entry == NULL || sig == NULL) {
@@ -1944,7 +2210,10 @@ static void iface_add_const(Parser *parser, const LzMember *constant, const LzTy
     }
 }
 
-/* The constructor arguments a class takes: its `pub` fields, in order (what lz_class_seal worked out). */
+/*
+ * The constructor arguments a class takes, which are its `pub` fields in order, as lz_class_seal
+ * worked out.
+ */
 static bool add_class_params(LzIfaceSig *sig, const LzClass *cls) {
     char text[128];
     for (size_t i = 0; i < cls->param_count; i++) {
@@ -1977,7 +2246,10 @@ static size_t find_class_index(const Parser *parser, const LzString *name) {
     return SIZE_MAX;
 }
 
-/* Is the name in a class head a trait? From this file, else from the class an earlier source made. */
+/*
+ * Is the name in a class head a trait? From this file, else from the class an earlier source
+ * made.
+ */
 static bool head_name_is_trait(const Parser *parser, const LzString *name, bool *known) {
     size_t index = find_class_index(parser, name);
     *known = true;
@@ -1994,7 +2266,8 @@ static bool head_name_is_trait(const Parser *parser, const LzString *name, bool 
 
 /*
  * The constructor of a class: the parent's arguments, then its own. Kept for every class, `pub` or
- * not, because a pub child of a private parent still takes the parent's fields. NULL when out of memory.
+ * not, because a pub child of a private parent still takes the parent's fields. NULL when out of
+ * memory.
  */
 static LzIfaceSig *build_constructor(Parser *parser, const LzClass *cls, const LzString *parent) {
     LzIfaceSig *sig = lz_iface_sig_new();
@@ -2021,7 +2294,7 @@ static LzIfaceSig *build_constructor(Parser *parser, const LzClass *cls, const L
 
 static Expr number(Parser *parser) {
     if (parser->previous.type == LZ_TOKEN_INTEGER) {
-        /* The lexer returns the magnitude 2^63 as INT64_MIN; only unary() accepts it. */
+        /* The lexer returns the magnitude 2^63 as INT64_MIN, and only unary() accepts it. */
         if (parser->previous.value.integer == INT64_MIN) {
             error_at_previous(parser, "integer literal out of range");
             return any_expr();
@@ -2140,7 +2413,7 @@ static void format_error(Parser *parser, size_t base, const LzFormatError *error
                 error->suggestion != 0 ? &suggestions : NULL);
 }
 
-/* The spec of {x:spec} as one string on the stack; {w} parts are filled in at run time. */
+/* The spec of {x:spec} as one string on the stack. {w} parts are filled in at run time. */
 static void compile_spec(Parser *parser, const LzStringPart *part) {
     const char *text = parser->source->text;
     size_t p = part->spec_start;
@@ -2312,8 +2585,8 @@ static int add_upvalue(Parser *parser, FuncState *fs, uint16_t index, bool is_lo
 }
 
 /*
- * The index of the upvalue through which fs reaches a local of an enclosing
- * function, creating it (and one in every function in between). -1 after an error.
+ * The index of the upvalue through which fs reaches a local of an enclosing function, creating
+ * it and one in every function in between. -1 after an error.
  */
 static int resolve_upvalue(Parser *parser, FuncState *fs, Symbol *symbol) {
     if (symbol->owner == fs->enclosing) {
@@ -2328,7 +2601,7 @@ static int resolve_upvalue(Parser *parser, FuncState *fs, Symbol *symbol) {
 }
 
 /* The expression that reads the variable named by `token`. */
-static Expr call_args(Parser *parser, Expr callee, bool receiver);
+static Expr call_args(Parser *parser, Expr callee, bool receiver, const Expr *receiver_value);
 
 /*
  * `super.name(args)` and `super.name`: the parent's method or property, with `self` as the
@@ -2420,10 +2693,400 @@ static Expr super_expr(Parser *parser, const LzToken *token) {
     emit_byte_at(parser, 0, member.offset);
     emit_op_at(parser, LZ_OP_SWAP, member.offset);
     advance(parser); /* the '(' */
-    Expr result = call_args(parser, any_expr(), true);
+    Expr result = call_args(parser, any_expr(), true, NULL);
     Expr any = any_expr();
     any.is_call = result.is_call;
     return any;
+}
+
+static bool narrowing_here(const Parser *parser, const Symbol *symbol) {
+    if (symbol->kind == SYMBOL_LOCAL) {
+        return symbol->owner == parser->fs; /* a closure may run when it likes: no narrowing across */
+    }
+    return symbol->kind == SYMBOL_GLOBAL && parser->fs->enclosing == NULL;
+}
+
+static Facts *facts_new(Parser *parser) {
+    Facts *facts = calloc(1, sizeof *facts);
+    if (facts == NULL) {
+        fail(parser, LZ_ERR_MEMORY);
+        return NULL;
+    }
+    facts->next = parser->facts_list;
+    parser->facts_list = facts;
+    return facts;
+}
+
+static void facts_add(Facts *facts, bool when, size_t symbol, const LzType *type) {
+    Fact *list = when ? facts->when_true : facts->when_false;
+    uint8_t *count = when ? &facts->true_count : &facts->false_count;
+    for (size_t i = 0; i < *count; i++) {
+        if (list[i].symbol == symbol) {
+            list[i].type = *type;
+            return;
+        }
+    }
+    if (*count < LZ_MAX_FACTS) {
+        list[*count].symbol = (uint16_t)symbol;
+        list[*count].type = *type;
+        (*count)++;
+    }
+}
+
+/*
+ * The facts of a condition, if nothing was emitted after it that could have changed what they
+ * say.
+ */
+static const Facts *facts_of(const Parser *parser, const Expr *expr) {
+    return expr->facts != NULL && expr->facts_end == parser->chunk->count ? expr->facts : NULL;
+}
+
+static void attach_facts(Parser *parser, Expr *expr, const Facts *facts) {
+    expr->facts = facts;
+    expr->facts_end = parser->chunk->count;
+}
+
+static bool is_nil_only(const LzType *type) {
+    return type->kinds == LZ_KIND_NIL && type->literal_count == 0;
+}
+
+/* Does the source assign `name` inside a function body nested deeper than base_depth, anywhere? */
+typedef enum ScanMode { SCAN_LOOP_BODY, SCAN_FIND } ScanMode;
+
+static bool token_is_name(const Parser *parser, const LzToken *token, const LzString *name) {
+    return token->type == LZ_TOKEN_IDENTIFIER && token->length == name->length &&
+           memcmp(parser->source->text + token->offset, name->data, name->length) == 0;
+}
+
+static void drop_narrowing_named(Parser *parser, const LzToken *token) {
+    for (size_t i = 0; i < parser->symbol_count; i++) {
+        Symbol *symbol = &parser->symbols[i];
+        if (symbol->has_narrow && token_is_name(parser, token, symbol->name)) {
+            symbol->has_narrow = false;
+            symbol->assign_count++; /* and every older narrowing of it is void too */
+        }
+    }
+}
+
+/*
+ * Reads ahead over the tokens. SCAN_LOOP_BODY goes from the current token to the end of the next
+ * `{ ... }` and drops the narrowing of every variable assigned in it, because a loop runs the
+ * body again, so what held before it may not hold at the top. SCAN_FIND starts at the beginning
+ * of the source and looks for an assignment to `name` inside a function nested deeper than
+ * base_depth.
+ */
+static bool scan_assignments(Parser *parser, ScanMode mode, const LzString *name, int base_depth) {
+    LzLexer lexer;
+    LzToken prev;
+    LzToken cur;
+    memset(&prev, 0, sizeof prev);
+    if (mode == SCAN_LOOP_BODY) {
+        lexer = parser->lexer;
+        prev = parser->previous;
+        cur = parser->current;
+    } else {
+        lz_lexer_init(&lexer, parser->source);
+        cur = lz_lexer_next(&lexer);
+    }
+    LzToken next = lz_lexer_next(&lexer);
+    bool is_function[256];
+    int stack = 0;
+    int fn_depth = 0;
+    int paren = 0;
+    bool pending_fn = false;
+    bool started = false;
+    for (size_t guard = 0; cur.type != LZ_TOKEN_EOF && guard < 400000; guard++) {
+        if (cur.type == LZ_TOKEN_FN) {
+            pending_fn = true;
+        } else if (cur.type == LZ_TOKEN_FAT_ARROW) {
+            pending_fn = false;
+        } else if (cur.type == LZ_TOKEN_LEFT_PAREN || cur.type == LZ_TOKEN_LEFT_BRACKET) {
+            paren++;
+        } else if (cur.type == LZ_TOKEN_RIGHT_PAREN || cur.type == LZ_TOKEN_RIGHT_BRACKET) {
+            paren--;
+        } else if (cur.type == LZ_TOKEN_LEFT_BRACE) {
+            bool body = paren <= 0 && (pending_fn || prev.type == LZ_TOKEN_RIGHT_PAREN);
+            if (stack < 256) {
+                is_function[stack] = body;
+            }
+            stack++;
+            if (body) {
+                fn_depth++;
+            }
+            pending_fn = false;
+            started = true;
+        } else if (cur.type == LZ_TOKEN_RIGHT_BRACE) {
+            if (stack == 0) {
+                if (mode == SCAN_LOOP_BODY) {
+                    return false; /* the block around the loop ends before any body opened */
+                }
+            } else {
+                stack--;
+                if (stack < 256 && is_function[stack]) {
+                    fn_depth--;
+                }
+            }
+            if (mode == SCAN_LOOP_BODY && started && stack == 0) {
+                return false;
+            }
+        } else if (cur.type == LZ_TOKEN_IDENTIFIER && prev.type != LZ_TOKEN_DOT && prev.type != LZ_TOKEN_LET &&
+                   prev.type != LZ_TOKEN_CONST && (next.type == LZ_TOKEN_EQUAL || is_compound(next.type))) {
+            if (mode == SCAN_LOOP_BODY) {
+                if (started) {
+                    drop_narrowing_named(parser, &cur);
+                }
+            } else if (fn_depth > base_depth && token_is_name(parser, &cur, name)) {
+                return true;
+            }
+        }
+        prev = cur;
+        cur = next;
+        next = lz_lexer_next(&lexer);
+    }
+    return false;
+}
+
+static bool assigned_in_nested_function(Parser *parser, Symbol *symbol) {
+    if (symbol->closure_assigned < 0) {
+        int depth = 0;
+        for (const FuncState *f = parser->fs; f->enclosing != NULL; f = f->enclosing) {
+            depth++;
+        }
+        symbol->closure_assigned = scan_assignments(parser, SCAN_FIND, symbol->name, depth) ? 1 : 0;
+    }
+    return symbol->closure_assigned == 1;
+}
+
+static void narrow_pop(Parser *parser) {
+    NarrowEntry *entry = &parser->journal[--parser->journal_count];
+    if (entry->symbol >= parser->symbol_count) {
+        return;
+    }
+    Symbol *symbol = &parser->symbols[entry->symbol];
+    if (symbol->assign_count != entry->count) {
+        symbol->has_narrow = false; /* assigned since: the old narrowing is void as well */
+    } else {
+        symbol->has_narrow = entry->had;
+        symbol->narrowed = entry->old;
+    }
+}
+
+static void narrow_unwind_mark(Parser *parser, size_t mark) {
+    while (parser->journal_count > mark) {
+        narrow_pop(parser);
+    }
+}
+
+static void narrow_unwind_depth(Parser *parser, int depth) {
+    while (parser->journal_count > 0 && parser->journal[parser->journal_count - 1].depth > depth) {
+        narrow_pop(parser);
+    }
+}
+
+static void narrow_push(Parser *parser, size_t index, const LzType *type) {
+    if (parser->journal_count == parser->journal_capacity) {
+        size_t capacity = parser->journal_capacity != 0 ? parser->journal_capacity * 2 : 16;
+        NarrowEntry *grown = realloc(parser->journal, capacity * sizeof *grown);
+        if (grown == NULL) {
+            fail(parser, LZ_ERR_MEMORY);
+            return;
+        }
+        parser->journal = grown;
+        parser->journal_capacity = capacity;
+    }
+    Symbol *symbol = &parser->symbols[index];
+    NarrowEntry *entry = &parser->journal[parser->journal_count++];
+    entry->symbol = index;
+    entry->depth = parser->scope_depth;
+    entry->had = symbol->has_narrow;
+    entry->old = symbol->narrowed;
+    entry->count = symbol->assign_count;
+    symbol->narrowed = *type;
+    symbol->has_narrow = true;
+}
+
+static void apply_facts(Parser *parser, const Facts *facts, bool when) {
+    if (facts == NULL) {
+        return;
+    }
+    const Fact *list = when ? facts->when_true : facts->when_false;
+    size_t count = when ? facts->true_count : facts->false_count;
+    for (size_t i = 0; i < count; i++) {
+        Symbol *symbol = &parser->symbols[list[i].symbol];
+        if (list[i].symbol < parser->symbol_count && narrowing_here(parser, symbol) &&
+            !assigned_in_nested_function(parser, symbol)) {
+            narrow_push(parser, list[i].symbol, &list[i].type);
+        }
+    }
+}
+
+/* What `value` can be when `value is T` holds. False when nothing is certain. */
+static bool narrow_to(const LzType *from, const LzType *to, LzType *out) {
+    if (lz_type_is_any(from)) {
+        *out = *to;
+        return true;
+    }
+    LzType shared = lz_type_of_kinds(0);
+    uint16_t detailed = LZ_KIND_ARRAY | LZ_KIND_DICT | LZ_KIND_INSTANCE | LZ_KIND_FUNCTION | LZ_KIND_ERROR;
+    shared.kinds = (uint16_t)(from->kinds & to->kinds & ~detailed);
+    uint16_t both = (uint16_t)(from->kinds & to->kinds & detailed);
+    if ((both & LZ_KIND_ARRAY) != 0) {
+        shared.kinds |= LZ_KIND_ARRAY;
+        shared.element = to->element != NULL ? to->element : from->element;
+    }
+    if ((both & LZ_KIND_DICT) != 0) {
+        shared.kinds |= LZ_KIND_DICT;
+        shared.element = to->element != NULL ? to->element : from->element;
+        shared.value_element = to->value_element != NULL ? to->value_element : from->value_element;
+    }
+    if ((both & LZ_KIND_FUNCTION) != 0) {
+        shared.kinds |= LZ_KIND_FUNCTION;
+        shared.fn = to->fn != NULL ? to->fn : from->fn;
+    }
+    if ((both & (LZ_KIND_INSTANCE | LZ_KIND_ERROR)) != 0) {
+        shared.kinds |= (uint16_t)(both & (LZ_KIND_INSTANCE | LZ_KIND_ERROR));
+        shared.class_name = to->class_name;
+        shared.class_id = to->class_id;
+    }
+    for (size_t i = 0; i < from->literal_count && shared.literal_count < LZ_TYPE_MAX_LITERALS; i++) {
+        LzType one = lz_type_of_kinds(0);
+        one.literal_count = 1;
+        one.literals[0] = from->literals[i];
+        if (lz_type_assignable(&one, to) == LZ_ASSIGN_ALWAYS) {
+            shared.literals[shared.literal_count++] = from->literals[i];
+        }
+    }
+    for (size_t i = 0; i < to->literal_count && shared.literal_count < LZ_TYPE_MAX_LITERALS; i++) {
+        LzType one = lz_type_of_kinds(0);
+        one.literal_count = 1;
+        one.literals[0] = to->literals[i];
+        if ((from->kinds & lz_type_possible_kinds(&one)) != 0 && lz_type_assignable(&one, from) == LZ_ASSIGN_ALWAYS) {
+            shared.literals[shared.literal_count++] = to->literals[i];
+        }
+    }
+    if (shared.kinds == 0 && shared.literal_count == 0) {
+        return false;
+    }
+    *out = shared;
+    return true;
+}
+
+/*
+ * What `value` can be when `value is T` does not hold: the kinds `T` fully covers are taken
+ * away.
+ */
+static LzType narrow_without(const LzType *from, const LzType *to) {
+    if (lz_type_is_any(from)) {
+        return *from;
+    }
+    LzType rest = *from;
+    uint16_t plain = (uint16_t)~(LZ_KIND_ARRAY | LZ_KIND_DICT | LZ_KIND_INSTANCE | LZ_KIND_FUNCTION | LZ_KIND_ERROR);
+    rest.kinds = (uint16_t)(rest.kinds & ~(to->kinds & plain));
+    if ((to->kinds & LZ_KIND_ARRAY) != 0 && (to->element == NULL || to->element == from->element)) {
+        rest.kinds = (uint16_t)(rest.kinds & ~LZ_KIND_ARRAY);
+    }
+    if ((to->kinds & LZ_KIND_DICT) != 0 && (to->element == NULL || (to->element == from->element && to->value_element == from->value_element))) {
+        rest.kinds = (uint16_t)(rest.kinds & ~LZ_KIND_DICT);
+    }
+    if ((to->kinds & LZ_KIND_FUNCTION) != 0 && to->fn == NULL) {
+        rest.kinds = (uint16_t)(rest.kinds & ~LZ_KIND_FUNCTION);
+    }
+    if ((to->kinds & LZ_KIND_INSTANCE) != 0 && (to->class_id == 0 || to->class_id == from->class_id)) {
+        rest.kinds = (uint16_t)(rest.kinds & ~LZ_KIND_INSTANCE);
+    }
+    /* literals the type accepts are gone too */
+    size_t kept = 0;
+    for (size_t i = 0; i < rest.literal_count; i++) {
+        LzType one = lz_type_of_kinds(0);
+        one.literal_count = 1;
+        one.literals[0] = rest.literals[i];
+        if (lz_type_assignable(&one, to) != LZ_ASSIGN_ALWAYS) {
+            rest.literals[kept++] = rest.literals[i];
+        }
+    }
+    rest.literal_count = (uint8_t)kept;
+    if (rest.kinds == 0 && rest.literal_count == 0) {
+        rest = *from; /* nothing left means this branch can't happen, so say nothing rather than guess */
+    }
+    return rest;
+}
+
+/* `x == nil` and `x != nil`, and `nil == x` too, say what each branch knows about x. */
+static void nil_facts(Parser *parser, Expr *result, const Expr *variable, bool equal) {
+    if (variable->var_sym < 0 || lz_type_is_any(&variable->type) ||
+        (lz_type_possible_kinds(&variable->type) & LZ_KIND_NIL) == 0) {
+        return;
+    }
+    LzType without = variable->type;
+    without.kinds = (uint16_t)(without.kinds & ~LZ_KIND_NIL);
+    if (without.kinds == 0 && without.literal_count == 0) {
+        return;
+    }
+    LzType only = lz_type_of_kinds(LZ_KIND_NIL);
+    Facts *facts = facts_new(parser);
+    if (facts == NULL) {
+        return;
+    }
+    facts_add(facts, equal, (size_t)variable->var_sym, &only);
+    facts_add(facts, !equal, (size_t)variable->var_sym, &without);
+    attach_facts(parser, result, facts);
+}
+
+/* Both sides of `a and b` and `a or b`. `and` knows everything either side knew when true. */
+static const Facts *combine_facts(Parser *parser, const Facts *a, const Facts *b, bool is_and) {
+    if (a == NULL && b == NULL) {
+        return NULL;
+    }
+    Facts *out = facts_new(parser);
+    if (out == NULL) {
+        return NULL;
+    }
+    /* the side that the operator keeps whole: when true for and, when false for or */
+    bool whole = is_and;
+    const Facts *sides[2] = {a, b};
+    for (int k = 0; k < 2; k++) {
+        if (sides[k] == NULL) {
+            continue;
+        }
+        const Fact *list = whole ? sides[k]->when_true : sides[k]->when_false;
+        size_t count = whole ? sides[k]->true_count : sides[k]->false_count;
+        for (size_t i = 0; i < count; i++) {
+            facts_add(out, whole, list[i].symbol, &list[i].type);
+        }
+    }
+    /* the other branch only knows what both sides said about the same variable: one or the other */
+    if (a != NULL && b != NULL) {
+        const Fact *left = whole ? a->when_false : a->when_true;
+        size_t left_count = whole ? a->false_count : a->true_count;
+        const Fact *right = whole ? b->when_false : b->when_true;
+        size_t right_count = whole ? b->false_count : b->true_count;
+        for (size_t i = 0; i < left_count; i++) {
+            for (size_t j = 0; j < right_count; j++) {
+                LzType merged;
+                if (left[i].symbol == right[j].symbol && lz_type_union(&merged, &left[i].type, &right[j].type)) {
+                    facts_add(out, !whole, left[i].symbol, &merged);
+                }
+            }
+        }
+    }
+    return out;
+}
+
+static const Facts *negate_facts(Parser *parser, const Facts *facts) {
+    if (facts == NULL) {
+        return NULL;
+    }
+    Facts *out = facts_new(parser);
+    if (out == NULL) {
+        return NULL;
+    }
+    for (size_t i = 0; i < facts->true_count; i++) {
+        facts_add(out, false, facts->when_true[i].symbol, &facts->when_true[i].type);
+    }
+    for (size_t i = 0; i < facts->false_count; i++) {
+        facts_add(out, true, facts->when_false[i].symbol, &facts->when_false[i].type);
+    }
+    return out;
 }
 
 static Expr variable_at(Parser *parser, const LzToken *token) {
@@ -2461,8 +3124,18 @@ static Expr variable_at(Parser *parser, const LzToken *token) {
         }
         Expr found = expr_of(symbol->type);
         found.sig = symbol->sig;
+        if (found.sig != NULL && symbol->type.kinds == LZ_KIND_FUNCTION && symbol->type.fn == NULL) {
+            found.type = fn_type_of_sig(parser, found.sig); /* a declared function: its signature is its type */
+        }
         found.dict_value = symbol->dict_value;
         found.array_value = symbol->array_value;
+        if (symbol->kind != SYMBOL_CONSTANT && narrowing_here(parser, symbol)) {
+            found.var_sym = (int32_t)(symbol - parser->symbols);
+            found.var_end = parser->chunk->count;
+            if (symbol->has_narrow && found.sig == NULL) {
+                found.type = symbol->narrowed; /* what the conditions around this say it is */
+            }
+        }
         return found;
     }
 
@@ -2518,7 +3191,10 @@ static void describe_bit_operand(const LzType *type, char *out, size_t size) {
     }
 }
 
-/* "operator '&' needs two ints, got float and int", the message lz_arith_binary gives at run time. */
+/*
+ * "operator '&' needs two ints, got float and int", the message lz_arith_binary gives at run
+ * time.
+ */
 static void error_bitwise(Parser *parser, const LzToken *op, const LzType *left,
                           const LzType *right) {
     char symbol[16];
@@ -2543,6 +3219,19 @@ static void error_bitwise(Parser *parser, const LzToken *op, const LzType *left,
     error_at(parser, op, message);
 }
 
+static Expr arithmetic_result_strict(Parser *parser, const LzToken *op, const Expr *left, const Expr *right);
+
+/*
+ * Arithmetic on a value of type any, which may be an object, is typed as numbers, but a class can define
+ * the operator.
+ */
+static Expr arithmetic_result(Parser *parser, const LzToken *op, const Expr *left, const Expr *right) {
+    Expr result = arithmetic_result_strict(parser, op, left, right);
+    result.loose = left->loose || right->loose ||
+                   ((lz_type_possible_kinds(&left->type) | lz_type_possible_kinds(&right->type)) & LZ_KIND_INSTANCE) != 0;
+    return result;
+}
+
 static Expr unary(Parser *parser) {
     LzToken op = parser->previous;
     if (op.type == LZ_TOKEN_MINUS && check(parser, LZ_TOKEN_INTEGER) &&
@@ -2561,9 +3250,14 @@ static Expr unary(Parser *parser) {
         }
         return expr_of(lz_type_of_kinds(LZ_KIND_INT));
     }
+    const Facts *operand_facts = op.type == LZ_TOKEN_BANG ? facts_of(parser, &operand) : NULL;
     emit_op_at(parser, op.type == LZ_TOKEN_BANG ? LZ_OP_NOT : LZ_OP_NEGATE, op.offset);
     if (op.type == LZ_TOKEN_BANG) {
-        return expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
+        Expr negated = expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
+        if (operand_facts != NULL) {
+            attach_facts(parser, &negated, negate_facts(parser, operand_facts));
+        }
+        return negated;
     }
 
     uint16_t numbers = (uint16_t)(lz_type_possible_kinds(&operand.type) & LZ_KINDS_NUMBER);
@@ -2598,9 +3292,9 @@ static void if_skip_to_close(Parser *parser) {
 }
 
 /*
- * The `{ ... }` of one branch: exactly one expression, and its value stays on the
- * stack. A statement where the expression should be is an error; the branch is
- * then skipped whole so the rest of the expression still parses.
+ * The `{ ... }` of one branch has exactly one expression, and its value stays on the stack. A
+ * statement where the expression should be is an error, and the branch is then skipped whole so
+ * the rest of the expression still parses.
  */
 static Expr if_expression_branch(Parser *parser) {
     static const LzTokenType statements[] = {LZ_TOKEN_LET,  LZ_TOKEN_CONST,  LZ_TOKEN_WHILE,
@@ -2714,9 +3408,9 @@ static bool key_kind_ok(const LzType *type);
 static void error_key(Parser *parser, const LzToken *at, const LzType *type);
 
 /*
- * Does the `{` after `=>` open a dict literal? `{"a": 1}` and `{}` do; a block of
- * statements does not. A statement keyword or a ';' settles it, otherwise the first
- * `:` outside any bracket does.
+ * Does the `{` after `=>` open a dict literal? `{"a": 1}` and `{}` do, and a block of statements
+ * does not. A statement keyword or a ';' settles it, otherwise the first `:` outside any bracket
+ * does.
  */
 static bool arrow_starts_dict(Parser *parser) {
     LzLexer ahead = parser->lexer;
@@ -2844,9 +3538,9 @@ static void describe_key(const LzLiteral *literal, char *out, size_t size) {
 }
 
 /*
- * {...}: a dict literal, in expression position only. The keys and values go on the
- * stack in source order and OP_DICT builds the dict from them. A duplicate literal key
- * is a compile error; a duplicate computed key stores over the first (last wins).
+ * {...} is a dict literal, in expression position only. The keys and values go on the stack in
+ * source order and OP_DICT builds the dict from them. A duplicate literal key is a compile
+ * error, and a duplicate computed key stores over the first, so the last wins.
  */
 static Expr dict_literal(Parser *parser) {
     uint32_t offset = parser->previous.offset;
@@ -2985,7 +3679,7 @@ static void check_bound(Parser *parser, const LzToken *at, const Expr *bound, bo
     }
 }
 
-/* a[i] and a[i:j]; either bound of a slice may be left out. */
+/* a[i] and a[i:j], where either bound of a slice may be left out */
 static Expr subscript(Parser *parser, Expr left) {
     LzToken bracket = parser->previous;
     uint32_t offset = bracket.offset;
@@ -2998,7 +3692,7 @@ static Expr subscript(Parser *parser, Expr left) {
      * index must be an int there, and the run time also accepts a dict key. */
     bool dict = container_kinds == LZ_KIND_DICT ||
                 (left.dict_value && container_kinds == LZ_KINDS_ANY);
-    /* A value of unknown kind may be either; only the run time can say which. */
+    /* A value of unknown kind may be either, and only the run time can say which. */
     bool array = container_kinds == LZ_KIND_ARRAY ||
                  (left.array_value && container_kinds == LZ_KINDS_ANY);
 
@@ -3154,9 +3848,9 @@ static ParseRule rule_for(LzTokenType type) {
 static bool word_is(const Parser *parser, const LzToken *token, const char *word);
 
 /*
- * `value is T` / `value is not T`. The right side is a type, read by the parser of annotations, and
- * the test is the one an annotation makes, so `x is T` holds exactly when `: T` would accept x.
- * Like `==`, it does not chain: `a is B == c` needs parentheses.
+ * `value is T` and `value is not T`. The right side is a type, read by the parser of
+ * annotations, and the test is the one an annotation makes, so `x is T` holds exactly when `: T`
+ * would accept x. Like `==`, it doesn't chain, so `a is B == c` needs parentheses.
  */
 static Expr is_(Parser *parser, Expr left, const LzToken *is_token) {
     Expr result = expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
@@ -3165,6 +3859,7 @@ static Expr is_(Parser *parser, Expr left, const LzToken *is_token) {
         return result;
     }
     bool negate = match(parser, LZ_TOKEN_BANG);
+    bool left_is_last = left.var_sym >= 0 && left.var_end == parser->chunk->count;
     skip_newlines(parser);
     LzType type;
     bool saved = parser->is_rhs;
@@ -3191,6 +3886,18 @@ static Expr is_(Parser *parser, Expr left, const LzToken *is_token) {
     if (check(parser, LZ_TOKEN_EQUAL_EQUAL) || check(parser, LZ_TOKEN_BANG_EQUAL) ||
         (check(parser, LZ_TOKEN_IDENTIFIER) && word_is(parser, &parser->current, "is"))) {
         error_at_current(parser, "'is' cannot be chained with '==', '!=' or another 'is'; add parentheses");
+    }
+    if (left_is_last) {
+        Facts *facts = facts_new(parser);
+        if (facts != NULL) {
+            LzType yes;
+            LzType no = narrow_without(&left.type, &type);
+            if (narrow_to(&left.type, &type, &yes)) {
+                facts_add(facts, !negate, (size_t)left.var_sym, &yes);
+            }
+            facts_add(facts, negate, (size_t)left.var_sym, &no);
+            attach_facts(parser, &result, facts);
+        }
     }
     return result;
 }
@@ -3249,8 +3956,8 @@ static Expr expression(Parser *parser) {
 }
 
 /* The type of an arithmetic result, or a compile error when no operand pairing can work. */
-static Expr arithmetic_result(Parser *parser, const LzToken *op, const Expr *left,
-                              const Expr *right) {
+static Expr arithmetic_result_strict(Parser *parser, const LzToken *op, const Expr *left,
+                                     const Expr *right) {
     uint16_t a = lz_type_possible_kinds(&left->type);
     uint16_t b = lz_type_possible_kinds(&right->type);
     bool numbers = (a & LZ_KINDS_NUMBER) != 0 && (b & LZ_KINDS_NUMBER) != 0;
@@ -3291,7 +3998,7 @@ static Expr arithmetic_result(Parser *parser, const LzToken *op, const Expr *lef
         if (x == y) {
             result.element = x;
         } else if (x != NULL && y != NULL) {
-            /* int[] + string[] holds both: (int | string)[] */
+            /* int[] + string[] holds both, as (int | string)[] */
             LzType merged;
             if (lz_type_union(&merged, x, y)) {
                 result.element = array_type(parser, &merged).element;
@@ -3305,7 +4012,9 @@ static Expr binary(Parser *parser, Expr left) {
     LzToken op = parser->previous;
     ParseRule rule = rule_for(op.type);
     skip_newlines(parser);
+    bool left_is_last = left.var_sym >= 0 && left.var_end == parser->chunk->count;
     Expr right = parse_precedence(parser, (Precedence)(rule.precedence + 1));
+    bool right_is_last = right.var_sym >= 0 && right.var_end == parser->chunk->count;
 
     switch (op.type) {
     case LZ_TOKEN_PLUS:
@@ -3347,6 +4056,11 @@ static Expr binary(Parser *parser, Expr left) {
         emit_op_at(parser, LZ_OP_EQUAL, op.offset);
         Expr equal = expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
         equal.from_equality = true;
+        if (left_is_last && is_nil_only(&right.type)) {
+            nil_facts(parser, &equal, &left, true);
+        } else if (right_is_last && is_nil_only(&left.type)) {
+            nil_facts(parser, &equal, &right, true);
+        }
         return equal;
     }
     case LZ_TOKEN_BANG_EQUAL: {
@@ -3354,6 +4068,11 @@ static Expr binary(Parser *parser, Expr left) {
         emit_op_at(parser, LZ_OP_NOT, op.offset);
         Expr unequal = expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
         unequal.from_equality = true;
+        if (left_is_last && is_nil_only(&right.type)) {
+            nil_facts(parser, &unequal, &left, false);
+        } else if (right_is_last && is_nil_only(&left.type)) {
+            nil_facts(parser, &unequal, &right, false);
+        }
         return unequal;
     }
     default:
@@ -3384,7 +4103,7 @@ static Expr binary(Parser *parser, Expr left) {
 }
 
 static bool is_any_type(const LzType *type) {
-    return type->kinds == LZ_KINDS_ANY && type->literal_count == 0 && type->element == NULL;
+    return lz_type_is_any(type);
 }
 
 /* Is the argument list that starts at the current token one with `*spread` or `name = value`? */
@@ -3434,8 +4153,149 @@ static const char *sig_name(const FuncSig *sig) {
 }
 
 /* A statically known callee: does the argument fit the parameter it lands in? */
+
+typedef struct Conflict {
+    bool found;
+    const LzString *name;
+    LzType first;  /* what the earlier arguments made it */
+    LzType second; /* what this argument says */
+} Conflict;
+
+static void unify(Parser *parser, Infer *infer, const LzType *param, const LzType *arg, Conflict *conflict,
+                  int depth) {
+    if (depth > 6 || param == NULL || arg == NULL || !type_mentions_tparam(param, 0)) {
+        return;
+    }
+    if (param->tparam != NULL) {
+        size_t k = 0;
+        while (k < infer->sig->tparam_count && infer->sig->tparams[k] != param->tparam) {
+            k++;
+        }
+        if (k == infer->sig->tparam_count || lz_type_is_any(arg) || arg->tparam != NULL) {
+            return; /* an argument of unknown type tells nothing */
+        }
+        LzType seen = lz_type_widen(arg);
+        if (param->tparam_nullable) {
+            seen.kinds = (uint16_t)(seen.kinds & ~LZ_KIND_NIL);
+            if (seen.kinds == 0 && seen.literal_count == 0) {
+                return; /* only nil: nothing about T */
+            }
+        }
+        if (!infer->has[k]) {
+            infer->bound[k] = seen;
+            infer->has[k] = true;
+        } else if (lz_type_assignable(&seen, &infer->bound[k]) == LZ_ASSIGN_ALWAYS) {
+            /* fits what it already is */
+        } else if (lz_type_assignable(&infer->bound[k], &seen) == LZ_ASSIGN_ALWAYS) {
+            infer->bound[k] = seen; /* int, then number: T is number */
+        } else if (!conflict->found) {
+            conflict->found = true;
+            conflict->name = param->tparam;
+            conflict->first = infer->bound[k];
+            conflict->second = seen;
+        }
+        return;
+    }
+    if ((param->kinds & LZ_KIND_ARRAY) != 0 && param->element != NULL && (arg->kinds & LZ_KIND_ARRAY) != 0 &&
+        arg->element != NULL) {
+        unify(parser, infer, param->element, arg->element, conflict, depth + 1);
+    }
+    if ((param->kinds & LZ_KIND_DICT) != 0 && (arg->kinds & LZ_KIND_DICT) != 0) {
+        unify(parser, infer, param->element, arg->element, conflict, depth + 1);
+        unify(parser, infer, param->value_element, arg->value_element, conflict, depth + 1);
+    }
+    if ((param->kinds & LZ_KIND_FUNCTION) != 0 && param->fn != NULL && (arg->kinds & LZ_KIND_FUNCTION) != 0 &&
+        arg->fn != NULL) {
+        for (size_t i = 0; i < param->fn->param_count && i < arg->fn->param_count; i++) {
+            unify(parser, infer, param->fn->params[i], arg->fn->params[i], conflict, depth + 1);
+        }
+        unify(parser, infer, param->fn->result, arg->fn->result, conflict, depth + 1);
+    }
+}
+
+static void infer_init(Infer *infer, const FuncSig *sig) {
+    memset(infer, 0, sizeof *infer);
+    infer->sig = sig != NULL && sig->tparam_count > 0 ? sig : NULL;
+}
+
+/* The parameter an argument lands in, as written with its type parameters, or NULL. */
+static const LzType *sig_param_type(const FuncSig *sig, size_t index) {
+    if (index < sig->param_count) {
+        return &sig->types[index];
+    }
+    return sig->has_rest ? &sig->rest_item : NULL;
+}
+
+/*
+ * Reads the argument into the bindings. A contradiction is reported and the call goes on as
+ * `any`.
+ */
+static bool infer_argument(Parser *parser, Infer *infer, size_t index, const Expr *arg, const LzToken *start) {
+    if (infer->sig == NULL) {
+        return true;
+    }
+    const LzType *param = sig_param_type(infer->sig, index);
+    Conflict conflict = {0};
+    unify(parser, infer, param, &arg->type, &conflict, 0);
+    if (!conflict.found) {
+        return true;
+    }
+    char first[96];
+    char second[96];
+    char message[200];
+    LzToken span = span_from(parser, start);
+    describe_type(&conflict.first, first, sizeof first);
+    describe_type(&conflict.second, second, sizeof second);
+    diag_label(parser, "this is %s", second);
+    diag_note(parser, "%s was already %s from an earlier argument", conflict.name->data, first);
+    diag_help(parser, "pass values of one type, or write the parameters as %s | %s instead of %s", first, second,
+              conflict.name->data);
+    (void)snprintf(message, sizeof message, "conflicting types for %s in a call of %s(): %s and %s",
+                   conflict.name->data, sig_name(infer->sig), first, second);
+    error_at(parser, &span, message);
+    return false;
+}
+
+/* Why a function does not fit a function type, for the label and help of the mismatch. */
+static void fn_mismatch_help(Parser *parser, const LzType *expected, const LzType *got) {
+    if (parser->panic || expected->fn == NULL || got->fn == NULL || (got->kinds & LZ_KIND_FUNCTION) == 0) {
+        return;
+    }
+    const LzFnType *want = expected->fn;
+    const LzFnType *have = got->fn;
+    if (want->param_count < have->required || (!have->has_rest && want->param_count > have->param_count)) {
+        diag_label(parser, "this takes %u argument%s, but %u will be passed", (unsigned)have->param_count,
+                   have->param_count == 1 ? "" : "s", (unsigned)want->param_count);
+        diag_help(parser, "give the function %u parameter%s, or change the parameters of the type",
+                  (unsigned)want->param_count, want->param_count == 1 ? "" : "s");
+        return;
+    }
+    for (size_t i = 0; i < want->param_count && i < have->param_count; i++) {
+        LzType given = want->params[i] != NULL ? *want->params[i] : lz_type_of_kinds(LZ_KINDS_ANY);
+        LzType taken = have->params[i] != NULL ? *have->params[i] : lz_type_of_kinds(LZ_KINDS_ANY);
+        if (lz_type_assignable(&given, &taken) == LZ_ASSIGN_NEVER) {
+            char a[96];
+            char b[96];
+            describe_type(&given, a, sizeof a);
+            describe_type(&taken, b, sizeof b);
+            diag_label(parser, "parameter %zu takes %s, but it will be given %s", i + 1, b, a);
+            diag_help(parser, "change the parameter to %s, or the function type to take %s", a, b);
+            return;
+        }
+    }
+    if (want->result != NULL) {
+        LzType produced = have->result != NULL ? *have->result : lz_type_of_kinds(LZ_KINDS_ANY);
+        char a[96];
+        char b[96];
+        describe_type(&produced, a, sizeof a);
+        describe_type(want->result, b, sizeof b);
+        diag_label(parser, "this returns %s, not %s", a, b);
+        diag_help(parser, "return %s from the function, or change the result of the type to %s", b, a);
+    }
+}
+
 static void check_argument(Parser *parser, const FuncSig *sig, size_t index, const Expr *arg,
-                           const LzToken *start) {
+                           const LzToken *start, const Infer *infer) {
     if (sig == NULL) {
         return;
     }
@@ -3450,13 +4310,20 @@ static void check_argument(Parser *parser, const FuncSig *sig, size_t index, con
     } else {
         return;
     }
+    LzType substituted;
+    const LzType *written = expected; /* shown in the message: `T[]`, not what T was worked out to be */
+    if (sig->tparam_count > 0) {
+        substituted = subst_tparams(parser, expected, infer, 0); /* T is what the earlier arguments made it */
+        expected = &substituted;
+    }
     if (lz_type_assignable(&arg->type, expected) == LZ_ASSIGN_NEVER) {
         LzToken span = span_from(parser, start);
         char prefix[128];
         (void)snprintf(prefix, sizeof prefix, "type mismatch: argument '%s' of %s() expects ", name,
                        sig_name(sig));
         convert_help(parser, &arg->type, expected, &span, false);
-        error_types(parser, &span, prefix, expected, ", got ", &arg->type);
+        fn_mismatch_help(parser, expected, &arg->type);
+        error_types(parser, &span, prefix, written, ", got ", &arg->type);
     }
 }
 
@@ -3489,20 +4356,84 @@ static void check_arity(Parser *parser, const FuncSig *sig, size_t given, const 
     error_at(parser, at, message);
 }
 
-static Expr call_result(Expr callee) {
+/*
+ * A callee that is only known by its type, like `f: fn(int) -> int`, gives the signature the
+ * type carries. It gives NULL when the callee is a declared function or a builtin, because those
+ * are checked by their own FuncSig and aren't looked at twice, or when it says nothing about its
+ * parameters.
+ */
+static const LzFnType *callee_fn_type(const Expr *callee) {
+    if (callee->sig != NULL || callee->native != NULL || (callee->type.kinds & LZ_KIND_FUNCTION) == 0) {
+        return NULL;
+    }
+    return callee->type.fn;
+}
+
+static void check_fn_argument(Parser *parser, const Expr *callee, size_t index, const Expr *arg,
+                              const LzToken *start) {
+    const LzFnType *fn = callee_fn_type(callee);
+    if (fn == NULL) {
+        return;
+    }
+    const LzType *wanted;
+    if (index < fn->param_count) {
+        wanted = fn->params[index];
+    } else if (fn->has_rest) {
+        wanted = fn->rest;
+    } else {
+        return; /* too many arguments: the arity check tells */
+    }
+    LzType expected = wanted != NULL ? *wanted : lz_type_of_kinds(LZ_KINDS_ANY);
+    if (lz_type_assignable(&arg->type, &expected) == LZ_ASSIGN_NEVER) {
+        LzToken span = span_from(parser, start);
+        char shape[160];
+        char prefix[96];
+        describe_type(&callee->type, shape, sizeof shape);
+        diag_note(parser, "the function being called has type %s", shape);
+        convert_help(parser, &arg->type, &expected, &span, false);
+        fn_mismatch_help(parser, &expected, &arg->type);
+        (void)snprintf(prefix, sizeof prefix, "type mismatch: argument %zu of this call expects ", index + 1);
+        error_types(parser, &span, prefix, &expected, ", got ", &arg->type);
+    }
+}
+
+static void check_fn_arity(Parser *parser, const Expr *callee, size_t given, const LzToken *at) {
+    const LzFnType *fn = callee_fn_type(callee);
+    if (fn == NULL || (given >= fn->required && (given <= fn->param_count || fn->has_rest))) {
+        return;
+    }
+    char shape[160];
+    char message[240];
+    describe_type(&callee->type, shape, sizeof shape);
+    unsigned wanted = given < fn->required ? fn->required : fn->param_count;
+    (void)snprintf(message, sizeof message, "this call has %zu argument%s, but the function type %s takes %s%u",
+                   given, given == 1 ? "" : "s", shape,
+                   fn->required != fn->param_count || fn->has_rest ? (given < fn->required ? "at least " : "at most ") : "",
+                   wanted);
+    diag_help(parser, "pass %u argument%s, or change the parameter list of the type", wanted,
+              wanted == 1 ? "" : "s");
+    error_at(parser, at, message);
+}
+
+static Expr call_result(Parser *parser, Expr callee, const Infer *infer) {
     if (callee.native != NULL) {
         return expr_of(lz_type_of_kinds(callee.native->result_kinds));
     }
     if (callee.sig != NULL) {
+        if (callee.sig->tparam_count > 0) {
+            return expr_of(subst_tparams(parser, &callee.sig->result, infer, 0));
+        }
         return expr_of(callee.sig->result);
+    }
+    const LzFnType *fn = callee_fn_type(&callee);
+    if (fn != NULL && fn->result != NULL) {
+        return expr_of(*fn->result);
     }
     return any_expr();
 }
 
 /*
- * A call with `*spread` or `name = value` arguments. The positional arguments are
- * collected into one array (the callee spreads it again on entry), and the named
- * values stay on the stack after it:
+ * A call with `*spread` or `name = value` arguments. The positional arguments are collected into one array, which the callee spreads again on entry, and the named values stay on the stack after it:
  *     [callee] [array of positional arguments] [named values...]  OP_CALL_EX
  */
 static Expr call_special(Parser *parser, Expr callee, const LzToken *paren, bool receiver) {
@@ -3516,7 +4447,7 @@ static Expr call_special(Parser *parser, Expr callee, const LzToken *paren, bool
                             lz_vm_error_class(parser->vm, error_kind_made) != NULL);
     emit_op_at(parser, LZ_OP_ARRAY_NEW, offset);
     if (receiver) {
-        /* [callee][receiver][array] -> [callee][array][receiver] -> [callee][array] */
+        /* [callee][receiver][array] becomes [callee][array][receiver] and then [callee][array] */
         emit_op_at(parser, LZ_OP_SWAP, offset);
         emit_op_at(parser, LZ_OP_ARRAY_PUSH, offset);
     }
@@ -3593,7 +4524,7 @@ static Expr call_special(Parser *parser, Expr callee, const LzToken *paren, bool
                 if (sig != NULL && name != NULL) {
                     for (size_t index = 0; index < sig->param_count; index++) {
                         if (sig->names[index] == name) {
-                            check_argument(parser, sig, index, &value, &start);
+                            check_argument(parser, sig, index, &value, &start, NULL);
                         }
                     }
                 }
@@ -3613,7 +4544,7 @@ static Expr call_special(Parser *parser, Expr callee, const LzToken *paren, bool
                 }
                 LzToken start = parser->current;
                 Expr value = expression(parser);
-                check_argument(parser, sig, positional, &value, &start);
+                check_argument(parser, sig, positional, &value, &start, NULL);
                 emit_op_at(parser, LZ_OP_ARRAY_PUSH, offset);
                 positional++;
             }
@@ -3653,16 +4584,16 @@ static Expr call_special(Parser *parser, Expr callee, const LzToken *paren, bool
     emit_op_at(parser, LZ_OP_CALL_EX, offset);
     emit_byte_at(parser, (uint8_t)named, offset);
     emit_u16_at(parser, names_index, offset);
-    Expr result = call_result(callee);
+    Expr result = call_result(parser, callee, NULL);
     result.is_call = true;
     return result;
 }
 
 /*
- * receiver: a method call, `receiver.name(args)`. The receiver is already on the stack
- * with the callee on top of it (see dot_call), so it counts as the first argument.
+ * receiver is a method call, `receiver.name(args)`. The receiver is already on the stack with
+ * the callee on top of it, see dot_call, so it counts as the first argument.
  */
-static Expr call_args(Parser *parser, Expr callee, bool receiver) {
+static Expr call_args(Parser *parser, Expr callee, bool receiver, const Expr *receiver_value) {
     LzToken paren = parser->previous;
     uint32_t offset = paren.offset;
     unsigned count = receiver ? 1 : 0;
@@ -3677,6 +4608,12 @@ static Expr call_args(Parser *parser, Expr callee, bool receiver) {
     if (call_has_special_args(parser, true)) {
         return call_special(parser, callee, &paren, receiver);
     }
+    Infer infer;
+    infer_init(&infer, callee.sig);
+    if (receiver && receiver_value != NULL) {
+        LzToken here = parser->previous;
+        (void)infer_argument(parser, &infer, 0, receiver_value, &here); /* the receiver is the first argument */
+    }
 
     if (!check(parser, LZ_TOKEN_RIGHT_PAREN)) {
         do {
@@ -3685,7 +4622,10 @@ static Expr call_args(Parser *parser, Expr callee, bool receiver) {
             }
             LzToken start = parser->current;
             Expr arg = expression(parser);
-            check_argument(parser, callee.sig, count, &arg, &start);
+            if (infer_argument(parser, &infer, count, &arg, &start)) {
+                check_argument(parser, callee.sig, count, &arg, &start, &infer);
+            }
+            check_fn_argument(parser, &callee, count, &arg, &start);
             if (++count > LZ_MAX_ARGUMENTS) {
                 error_at_previous(parser, "too many arguments");
                 count = LZ_MAX_ARGUMENTS;
@@ -3694,23 +4634,24 @@ static Expr call_args(Parser *parser, Expr callee, bool receiver) {
     }
     consume(parser, LZ_TOKEN_RIGHT_PAREN, "expected ')' after arguments");
     check_arity(parser, callee.sig, count, &paren);
+    check_fn_arity(parser, &callee, count, &paren);
 
     emit_op_at(parser, LZ_OP_CALL, offset);
     emit_byte_at(parser, (uint8_t)count, offset);
-    Expr result = call_result(callee);
+    Expr result = call_result(parser, callee, &infer);
     result.is_call = true;
     return result;
 }
 
 static Expr call(Parser *parser, Expr callee) {
-    return call_args(parser, callee, false);
+    return call_args(parser, callee, false, NULL);
 }
 
 /*
- * Whether `receiver.name` may be a member of an object (or a class). A receiver whose type
- * is known and cannot be an object keeps the older error/builtin handling; anything else,
- * including every value of unknown type (a parameter, a result from another file), takes the
- * conservative path and is typed `any`. A VM that has seen a class keeps that path for all
+ * Whether `receiver.name` may be a member of an object or a class. A receiver whose type is
+ * known and can't be an object keeps the older error and builtin handling. Anything else,
+ * including every value of unknown type like a parameter or a result from another file, takes
+ * the conservative path and is typed `any`. A VM that has seen a class keeps that path for all
  * receivers, as before.
  */
 static bool receiver_may_be_object(const Parser *parser, const Expr *receiver) {
@@ -3718,10 +4659,41 @@ static bool receiver_may_be_object(const Parser *parser, const Expr *receiver) {
 }
 
 /*
- * receiver.name(args) is name(receiver, args): the callee is looked up like any other
- * name (locals, functions of the script, builtins), pushed above the receiver, and the
+ * receiver.name(args) is name(receiver, args). The callee is looked up like any other name,
+ * meaning locals, functions of the script and builtins, and pushed above the receiver, and the
  * two are swapped so the call finds [callee][receiver][args...].
  */
+/* `name.method()` where narrowing proved `name` is nil: say so, and offer the check as a fix. */
+static void report_nil_method(Parser *parser, const Expr *receiver, const LzToken *method) {
+    char variable[64];
+    char method_name[48];
+    LzToken var_token = receiver->start;
+    token_text(parser, &var_token, variable, sizeof variable);
+    token_text(parser, method, method_name, sizeof method_name);
+    char message[160];
+    (void)snprintf(message, sizeof message, "nil has no method '%s'", method_name);
+    diag_label(parser, "%s is nil here", variable);
+    diag_help(parser, "check `%s != nil` first", variable);
+    /* the whole statement on its own line: wrap it in the check */
+    char indent[40];
+    uint32_t begin = var_token.offset;
+    uint32_t end = parser->previous.offset + parser->previous.length;
+    bool alone = line_is_just_indent_before(parser, begin, indent, sizeof indent) &&
+                 (check(parser, LZ_TOKEN_NEWLINE) || check(parser, LZ_TOKEN_EOF));
+    if (alone && end > begin && end - begin < 60) {
+        char wrapped[128];
+        (void)snprintf(wrapped, sizeof wrapped, "if %s != nil { %.*s }", variable, (int)(end - begin),
+                       parser->source->text + begin);
+        if (strchr(wrapped, '\n') == NULL) {
+            char headline[96];
+            (void)snprintf(headline, sizeof headline, "check `%s != nil` first", variable);
+            diag_fix(parser, headline, begin, end - begin, wrapped);
+        }
+    }
+    LzToken span = *method;
+    error_at(parser, &span, message);
+}
+
 static Expr dot_call(Parser *parser, Expr receiver) {
     if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
         error_at_current(parser, "expected a method name after '.'");
@@ -3729,6 +4701,10 @@ static Expr dot_call(Parser *parser, Expr receiver) {
     }
     advance(parser);
     LzToken name = parser->previous;
+    /* A variable that the conditions around the call prove to be nil has no methods. */
+    bool proven_nil = check(parser, LZ_TOKEN_LEFT_PAREN) && receiver.var_sym >= 0 &&
+                      receiver.var_end == parser->chunk->count && is_nil_only(&receiver.type) &&
+                      parser->symbols[receiver.var_sym].has_narrow;
     if (!check(parser, LZ_TOKEN_LEFT_PAREN)) {
         /* `value.name` with no parentheses is a field of an error, or of an object. */
         bool classes = receiver_may_be_object(parser, &receiver);
@@ -3769,8 +4745,8 @@ static Expr dot_call(Parser *parser, Expr receiver) {
     }
 
     /*
-     * Your own functions and variables of that name win; then the methods of the kinds of
-     * value (one dispatcher per name, see builtin/method); then the other builtins.
+     * Your own functions and variables of that name win. Then come the methods of the kinds of
+     * value, with one dispatcher per name, see builtin/method, and then the other builtins.
      */
     LzString *interned = intern_token(parser, &name);
     const LzValue *method = NULL;
@@ -3810,6 +4786,7 @@ static Expr dot_call(Parser *parser, Expr receiver) {
         emit_byte_at(parser, (uint8_t)lookup_mode, name.offset);
         callee.sig = NULL;
         callee.native = NULL;
+        callee.type = lz_type_of_kinds(LZ_KIND_FUNCTION);
     }
     emit_op_at(parser, LZ_OP_SWAP, name.offset);
     advance(parser); /* the '(' */
@@ -3817,7 +4794,10 @@ static Expr dot_call(Parser *parser, Expr receiver) {
      * dict row of the method answered, which `result_kinds` alone cannot tell. */
     bool dict_receiver = receiver.dict_value ||
                          lz_type_possible_kinds(&receiver.type) == LZ_KIND_DICT;
-    Expr result = call_args(parser, callee, true);
+    Expr result = call_args(parser, callee, true, &receiver);
+    if (proven_nil) {
+        report_nil_method(parser, &receiver, &name);
+    }
     if (classes) {
         bool is_call = result.is_call;
         result = any_expr(); /* the receiver's own method may return anything */
@@ -3831,23 +4811,38 @@ static Expr dot_call(Parser *parser, Expr receiver) {
 
 static Expr and_(Parser *parser, Expr left) {
     uint32_t offset = parser->previous.offset;
+    const Facts *left_facts = facts_of(parser, &left);
     size_t end_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
     emit_op_at(parser, LZ_OP_POP, offset);
     skip_newlines(parser);
+    /* The right side only runs when the left was true, so it is read under what the left says. */
+    size_t mark = parser->journal_count;
+    apply_facts(parser, left_facts, true);
     /* One level up: the caller's loop absorbs the next "and", so a long chain iterates. */
     Expr right = parse_precedence(parser, PREC_EQUALITY);
+    narrow_unwind_mark(parser, mark);
+    const Facts *right_facts = facts_of(parser, &right);
     patch_jump(parser, end_jump);
-    return union_expr(left, right);
+    Expr both = union_expr(left, right);
+    attach_facts(parser, &both, combine_facts(parser, left_facts, right_facts, true));
+    return both;
 }
 
 static Expr or_(Parser *parser, Expr left) {
     uint32_t offset = parser->previous.offset;
+    const Facts *left_facts = facts_of(parser, &left);
     size_t end_jump = emit_jump(parser, LZ_OP_JUMP_IF_TRUE, offset);
     emit_op_at(parser, LZ_OP_POP, offset);
     skip_newlines(parser);
+    size_t mark = parser->journal_count;
+    apply_facts(parser, left_facts, false); /* the right side runs when the left was false */
     Expr right = parse_precedence(parser, PREC_AND);
+    narrow_unwind_mark(parser, mark);
+    const Facts *right_facts = facts_of(parser, &right);
     patch_jump(parser, end_jump);
-    return union_expr(left, right);
+    Expr either = union_expr(left, right);
+    attach_facts(parser, &either, combine_facts(parser, left_facts, right_facts, false));
+    return either;
 }
 
 /*
@@ -3958,8 +4953,8 @@ static LzType without_nil(const LzType *type) {
 }
 
 /*
- * `a ?? b`: b only when a is nil (0, "", false and [] are values and stay). The lowest binary
- * operator, so `a or b ?? c` is `(a or b) ?? c`, and it chains to the left.
+ * `a ?? b` gives b only when a is nil, and 0, "", false and [] are values and stay. It's the lowest
+ * binary operator, so `a or b ?? c` is `(a or b) ?? c`, and it chains to the left.
  *
  *     a  NIL_TEST  JUMP_IF_FALSE .keep  POP POP  b  JUMP .end  .keep: POP  .end:
  */
@@ -3978,7 +4973,7 @@ static Expr coalesce(Parser *parser, Expr left) {
     Expr right = parse_precedence(parser, PREC_OR);
     size_t end_jump = emit_jump(parser, LZ_OP_JUMP, offset);
     patch_jump(parser, keep_jump);
-    emit_op_at(parser, LZ_OP_POP, offset); /* the test; the value stays */
+    emit_op_at(parser, LZ_OP_POP, offset); /* the test, and the value stays */
     patch_jump(parser, end_jump);
 
     /* a without nil, joined with b. A left that cannot be nil is allowed all the same. */
@@ -4088,13 +5083,13 @@ static void loop_variable(Parser *parser, const LzToken *name_token, LzString *n
         return;
     }
     symbol->loop_var = true;
-    emit_op_at(parser, LZ_OP_NIL, name_token->offset); /* the slot; the store below fills it */
+    emit_op_at(parser, LZ_OP_NIL, name_token->offset); /* the slot, and the store below fills it */
 }
 
 /*
- * `for x in xs`, `for i, x in xs`, `for ch: string in s`, and the ranges
- * `for i in a..b` / `a..=b` / `... by step`. The value after `in` is evaluated once;
- * a range becomes three hidden ints, anything else one hidden value plus a cursor.
+ * `for x in xs`, `for i, x in xs`, `for ch: string in s`, and the ranges `for i in a..b`,
+ * `a..=b` and `... by step`. The value after `in` is evaluated once. A range becomes three
+ * hidden ints, and anything else one hidden value plus a cursor.
  */
 /*
  * Closes the upvalue of every captured loop variable of the round that just ended, so
@@ -4166,7 +5161,7 @@ static Expr range_(Parser *parser, Expr left) {
             /* The step is not a bound, but the message names what was written. */
             error_range_bound(parser, &step_at, &step.type);
         }
-        /* A written zero is caught here; any other step fails when the loop runs. */
+        /* A written zero is caught here, and any other step fails when the loop runs. */
         if (step_at.type == LZ_TOKEN_INTEGER && step_at.value.integer == 0) {
             error_at(parser, &step_at, "range step cannot be 0"); /* the caret goes on the step */
         }
@@ -4256,9 +5251,9 @@ static void for_in_statement(Parser *parser, uint32_t offset) {
         }
 
         /*
-         * The range is settled before the first round: an empty one (or one that runs
-         * the wrong way) jumps past the loop, and the others get the last value they
-         * visit, which is where stepping stops. The counter never leaves the int range.
+         * The range is settled before the first round. An empty one, or one that runs the wrong
+         * way, jumps past the loop, and the others get the last value they visit, which is where
+         * stepping stops. The counter never leaves the int range.
          */
         slot_get(parser, (uint16_t)(slots + 0), offset);
         slot_get(parser, (uint16_t)(slots + 1), offset);
@@ -4293,7 +5288,7 @@ static void for_in_statement(Parser *parser, uint32_t offset) {
         slot_get(parser, (uint16_t)(slots + 0), offset);
         store_variable(parser, first_name, find_symbol(parser, first_name), &first_token);
         if (two) {
-            /* `for i, x in ...` counts rounds; a range visits one value per round. */
+            /* `for i, x in ...` counts rounds, and a range visits one value per round. */
             error_at(parser, &second_token, "a range binds one loop variable");
             loop_variable(parser, &second_token, second_name, &annotated);
         }
@@ -4304,7 +5299,7 @@ static void for_in_statement(Parser *parser, uint32_t offset) {
         end_scope(parser);
         parser->loop = loop.enclosing;
 
-        /* The last value ends the loop; anything before it steps and goes round again. */
+        /* The last value ends the loop, and anything before it steps and goes round again. */
         slot_get(parser, (uint16_t)(slots + 0), offset);
         slot_get(parser, (uint16_t)(slots + 1), offset);
         emit_op_at(parser, LZ_OP_EQUAL, offset);
@@ -4395,7 +5390,7 @@ static void for_in_statement(Parser *parser, uint32_t offset) {
     slot_get(parser, (uint16_t)(slots + 0), offset);
     slot_get(parser, (uint16_t)(slots + 1), offset);
     if (two) {
-        /* [x][off] -> [x][first][second][next] */
+        /* [x][off] becomes [x][first][second][next] */
         slot_get(parser, (uint16_t)(slots + 2), offset); /* the round, for an array */
         emit_op_at(parser, LZ_OP_ITER_PAIR, offset);
         slot_set(parser, (uint16_t)(slots + 1), offset); /* the next cursor, off the top */
@@ -4412,7 +5407,10 @@ static void for_in_statement(Parser *parser, uint32_t offset) {
             emit_check_if_needed(parser, &item_static, &item, offset);
         }
         store_variable(parser, second_name, find_symbol(parser, second_name), &second_token);
-        /* The item is stored and the cursor is already in its slot: only the iterable copy is left. */
+        /*
+         * The item is stored and the cursor is already in its slot: only the iterable copy is
+         * left.
+         */
         emit_op_at(parser, LZ_OP_POP, offset);
     }
 
@@ -4513,7 +5511,7 @@ static void for_c_statement(Parser *parser, uint32_t offset) {
     memset(&loop, 0, sizeof loop);
     loop.enclosing = parser->loop;
     loop.func = parser->fs;
-    /* `break` drops the loop's own variables; `continue` keeps them for the step. */
+    /* `break` drops the loop's own variables, and `continue` keeps them for the step. */
     loop.scope_depth = parser->scope_depth - 1;
     loop.continue_depth = parser->scope_depth;
     parser->loop = &loop;
@@ -4539,8 +5537,8 @@ static void for_c_statement(Parser *parser, uint32_t offset) {
     skip_newlines(parser);
 
     /*
-     * The step runs after the body but is written before it in the source, so the first
-     * round jumps over it; the end of the body and every `continue` enter it.
+     * The step runs after the body but is written before it in the source, so the first round
+     * jumps over it. The end of the body and every `continue` enter it.
      */
     size_t over_step = emit_jump(parser, LZ_OP_JUMP, offset);
     size_t step_start = parser->chunk->count;
@@ -4580,6 +5578,7 @@ static void for_c_statement(Parser *parser, uint32_t offset) {
 }
 
 static void for_statement(Parser *parser) {
+    (void)scan_assignments(parser, SCAN_LOOP_BODY, NULL, 0); /* what the body assigns is unknown at its top */
     uint32_t offset = parser->previous.offset;
     if (check(parser, LZ_TOKEN_LET) || check(parser, LZ_TOKEN_SEMICOLON)) {
         for_c_statement(parser, offset);
@@ -4619,11 +5618,14 @@ static void if_statement(Parser *parser) {
     size_t end_capacity = 0;
     bool all_return = true; /* every branch ends in a return, and there is an else */
     bool has_else = false;
+    bool arms_leave = true; /* every `if` and `else if` block ends in a return, and an else doesn't matter */
+    size_t chain_mark = parser->journal_count; /* what the failed conditions of the chain narrowed */
 
     for (;;) {
         /* previous is this branch's "if", so each branch's jumps point at their own line. */
         uint32_t offset = parser->previous.offset;
-        (void)expression(parser);
+        Expr condition = expression(parser);
+        const Facts *facts = facts_of(parser, &condition);
         if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
             error_at_current(parser, "expected '{' after condition");
             break;
@@ -4631,8 +5633,13 @@ static void if_statement(Parser *parser) {
 
         size_t then_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
         emit_op_at(parser, LZ_OP_POP, offset);
+        size_t arm_mark = parser->journal_count;
+        apply_facts(parser, facts, true);
         block(parser);
+        narrow_unwind_mark(parser, arm_mark);
         all_return = all_return && parser->terminated;
+        arms_leave = arms_leave && parser->terminated;
+        apply_facts(parser, facts, false); /* the rest of the chain runs when this condition failed */
 
         if (end_count == end_capacity) {
             size_t capacity = end_capacity != 0 ? end_capacity * 2 : 4;
@@ -4669,15 +5676,23 @@ static void if_statement(Parser *parser) {
         patch_jump(parser, end_jumps[i]);
     }
     free(end_jumps);
+    if (!arms_leave) {
+        narrow_unwind_mark(parser, chain_mark); /* a path that did not leave: nothing is certain after */
+    } /* else: `if x == nil { return }` leaves x narrowed for the rest of the block */
     parser->terminated = has_else && all_return;
 }
 
 static void while_statement(Parser *parser) {
     uint32_t offset = parser->previous.offset;
     size_t loop_start = parser->chunk->count;
-    /* `while true { ... }` has no way out but a return or a break, so nothing after it is reachable. */
+    /*
+     * `while true { ... }` has no way out but a return or a break, so nothing after it is
+     * reachable.
+     */
     bool forever = check(parser, LZ_TOKEN_TRUE) && next_token_type(parser) == LZ_TOKEN_LEFT_BRACE;
-    (void)expression(parser);
+    (void)scan_assignments(parser, SCAN_LOOP_BODY, NULL, 0); /* the body runs again: what is assigned in it is not known */
+    Expr condition = expression(parser);
+    const Facts *facts = facts_of(parser, &condition);
     if (!check(parser, LZ_TOKEN_LEFT_BRACE)) {
         error_at_current(parser, "expected '{' after condition");
         return;
@@ -4685,6 +5700,8 @@ static void while_statement(Parser *parser) {
 
     size_t exit_jump = emit_jump(parser, LZ_OP_JUMP_IF_FALSE, offset);
     emit_op_at(parser, LZ_OP_POP, offset);
+    size_t body_mark = parser->journal_count;
+    apply_facts(parser, facts, true);
 
     LoopFrame loop;
     memset(&loop, 0, sizeof loop);
@@ -4696,6 +5713,7 @@ static void while_statement(Parser *parser) {
     parser->loop = &loop;
 
     block(parser);
+    narrow_unwind_mark(parser, body_mark);
 
     parser->loop = loop.enclosing;
     emit_loop(parser, loop_start, offset);
@@ -4762,7 +5780,7 @@ typedef struct {
 typedef struct {
     bool as_expr;
     bool has_subject;
-    uint16_t slot;      /* the hidden local that holds the subject (a statement) */
+    uint16_t slot;      /* the hidden local that holds the subject, for a statement */
     LzType subject;     /* its static type */
     CaseLiteral *seen;  /* the literal items so far */
     size_t seen_count;
@@ -4795,8 +5813,8 @@ static bool switch_add_hit(Parser *parser, SwitchState *state, size_t operand) {
 }
 
 /*
- * If the item just read was one literal (a number, a string, true, false or nil), checks it
- * against the ones before it in this switch: the same one twice can never be reached.
+ * If the item just read was one literal, meaning a number, a string, true, false or nil, checks
+ * it against the ones before it in this switch, because the same one twice can never be reached.
  */
 static void switch_check_duplicate(Parser *parser, SwitchState *state, const LzToken *first) {
     const LzToken *last = &parser->previous;
@@ -4927,10 +5945,10 @@ static void switch_item(Parser *parser, SwitchState *state) {
 }
 
 /*
- * Both forms. The subject is evaluated once. A statement keeps it in a hidden local of its
- * own scope, so `break`, `continue` and the end of the scope drop it like any other local.
- * An expression cannot name a slot (values of the expression it sits in may be below), so it
- * keeps the subject on the stack and copies it with OP_DUP; the value of the arm taken ends up
+ * Both forms. The subject is evaluated once. A statement keeps it in a hidden local of its own
+ * scope, so `break`, `continue` and the end of the scope drop it like any other local. An
+ * expression can't name a slot, because values of the expression it sits in may be below. So it
+ * keeps the subject on the stack and copies it with OP_DUP, the value of the arm taken ends up
  * above it, and a swap and a pop leave the value alone.
  *
  *     case a, b { body }  =>   test a  JUMP_IF_TRUE .hit  POP  test b  JUMP_IF_FALSE .miss
@@ -5105,7 +6123,7 @@ static Expr switch_core(Parser *parser, bool as_expr) {
         patch_jump(parser, end_jumps[i]);
     }
     if (as_expr && state.has_subject) {
-        /* [subject][value] -> [value]. The subject was never a local, so no symbol goes. */
+        /* [subject][value] becomes [value]. The subject was never a local, so no symbol goes. */
         emit_op_at(parser, LZ_OP_SWAP, offset);
         emit_op_at(parser, LZ_OP_POP, offset);
     }
@@ -5140,9 +6158,9 @@ static bool word_is(const Parser *parser, const LzToken *token, const char *word
 }
 
 /*
- * One more copy of the finally body, compiled where a way out of the try runs it: the body is
+ * One more copy of the finally body, compiled where a way out of the try runs it. The body is
  * read again from its place in the source. Names resolve as they did where it was written, so
- * the variables declared inside the try since then are hidden while it is compiled; locals of
+ * the variables declared inside the try since then are hidden while it's compiled, and locals of
  * its own go above whatever is on the stack now.
  */
 static void emit_finally_copy(Parser *parser, TryContext *ctx) {
@@ -5224,7 +6242,7 @@ typedef struct {
     FinallySnapshot finally_at;
 } TryScan;
 
-/* Skips a block whose `{` is *tok; leaves *tok on the token after its `}`. */
+/* Skips a block whose `{` is *tok and leaves *tok on the token after its `}`. */
 static bool scan_block(LzLexer *lexer, LzToken *tok) {
     int depth = 0;
     for (;;) {
@@ -5675,7 +6693,7 @@ static void end_statement(Parser *parser) {
     bool list = parser->comma_list;
     parser->comma_list = false;
     if (list) {
-        /* Inside a `for` header: the list, the ';' or the '{' is the header's business. */
+        /* Inside a `for` header, the list, the ';' or the '{' is the header's business. */
         (void)match(parser, LZ_TOKEN_NEWLINE);
         return;
     }
@@ -5806,8 +6824,10 @@ static void variable_declaration(Parser *parser, bool is_const) {
         }
         iface_add_variable(parser, name, &shown);
     }
-    /* `let d = {...}` stays an `any` (a later `d = 5` is legal), but `d["a"]` reads a key
-     * rather than an array index, which a string would not survive. */
+    /*
+     * `let d = {...}` stays an `any`, because a later `d = 5` is legal, but `d["a"]` reads a key
+     * rather than an array index, which a string would not survive.
+     */
     if (!annotated && has_initializer) {
         uint16_t kinds = lz_type_possible_kinds(&initializer.type);
         bool dict = kinds == LZ_KIND_DICT || initializer.dict_value;
@@ -5823,6 +6843,11 @@ static void variable_declaration(Parser *parser, bool is_const) {
 /* The instruction that stores the top of the stack into a variable. */
 static void store_variable(Parser *parser, LzString *name, const Symbol *symbol,
                            const LzToken *at) {
+    if (symbol != NULL) {
+        Symbol *assigned = (Symbol *)symbol;
+        assigned->has_narrow = false; /* the new value says nothing about the old condition */
+        assigned->assign_count++;
+    }
     if (symbol != NULL && symbol->kind == SYMBOL_LOCAL && symbol->owner != parser->fs) {
         int index = resolve_upvalue(parser, parser->fs, (Symbol *)symbol);
         emit_op_at(parser, LZ_OP_SET_UPVALUE, at->offset);
@@ -5892,7 +6917,7 @@ static void assignment_statement(Parser *parser) {
         if (lz_vm_lookup(parser->vm, name) != NULL) {
             error_with_name(parser, &name_token, "cannot assign to builtin '", "'");
         } else {
-            /* Sequential execution: checked when the assignment runs (SET_GLOBAL). */
+            /* Sequential execution, so this is checked when the assignment runs (SET_GLOBAL). */
             record_name_hint(parser, &name_token, false, true, false);
             emit_named(parser, LZ_OP_SET_GLOBAL, name, name_token.offset);
         }
@@ -5913,7 +6938,7 @@ static bool is_type_keyword(const Parser *parser) {
            memcmp(parser->source->text + parser->current.offset, "type", 4) == 0;
 }
 
-/* type Name = <type>; "type" is only a keyword when a name follows it. */
+/* type Name = <type> makes "type" a keyword only when a name follows it. */
 static void type_declaration(Parser *parser) {
     bool is_pub = parser->pub_open && parser->scope_depth == 0;
     parser->pub_open = false;
@@ -6031,9 +7056,9 @@ static LzOpCode compound_opcode(LzTokenType type) {
 }
 
 /*
- * The type of `target op value`, checked the way the binary expression would check
- * it. Nothing is emitted: both operands are already on the stack. `at` is the `+=`
- * token; it keeps its position and text for the message.
+ * The type of `target op value`, checked the way the binary expression would check it. Nothing
+ * is emitted, because both operands are already on the stack. `at` is the `+=` token, and it
+ * keeps its position and text for the message.
  */
 static Expr compound_value(Parser *parser, const LzToken *at, const Expr *target,
                            const Expr *value) {
@@ -6177,10 +7202,34 @@ typedef struct ParamCheck {
 } ParamCheck;
 
 /*
- * Compiles `( params ) [-> type] { body }` into a new function and emits the code that
- * creates it in the enclosing function. `self` is the symbol of a `fn name` (so the
- * body can call itself and its signature can be attached), or SIZE_MAX.
+ * Compiles `( params ) [-> type] { body }` into a new function and emits the code that creates
+ * it in the enclosing function. `self` is the symbol of a `fn name`, so the body can call itself
+ * and its signature can be attached, or SIZE_MAX.
  */
+/*
+ * A function without `->` remembers what each `return` gives. Once the body is done their union
+ * is its result for the compiler and the interface, and never for a run-time check. An unknown
+ * type (any) anywhere makes the union any, which is the same as saying nothing.
+ */
+static void note_return(Parser *parser, const Expr *value) {
+    FuncState *fs = parser->fs;
+    if (fs->function == NULL || fs->sig == NULL || fs->sig->result_declared) {
+        return;
+    }
+    LzType seen = value->loose ? lz_type_of_kinds(LZ_KINDS_ANY) : lz_type_widen(&value->type);
+    if (!fs->has_inferred) {
+        fs->inferred = seen;
+        fs->has_inferred = true;
+        return;
+    }
+    LzType merged;
+    if (lz_type_union(&merged, &fs->inferred, &seen)) {
+        fs->inferred = merged;
+    } else {
+        fs->inferred = lz_type_of_kinds(LZ_KINDS_ANY);
+    }
+}
+
 static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32_t offset) {
     Expr result = expr_of(lz_type_of_kinds(LZ_KIND_FUNCTION));
     LzHeap *heap = &parser->vm->heap;
@@ -6219,6 +7268,7 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
     fs.first_symbol = parser->symbol_count;
     fs.self_symbol = self;
     fs.sig = sig;
+    fs.has_inferred = false;
     fs.upvalue_count = 0;
     fs.saved_chunk = parser->chunk;
     fs.saved_constants = parser->constants;
@@ -6230,6 +7280,56 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
     parser->fs = &fs;
     parser->nesting++;
     begin_scope(parser);
+
+    /*
+     * Type parameters: fn name<T, U>(...). They are aliases for markers while the signature is
+     * read.
+     */
+    size_t first_tparam_alias = parser->alias_count;
+    if (check(parser, LZ_TOKEN_LESS)) {
+        advance(parser);
+        do {
+            if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+                error_at_current(parser, "expected a type parameter name, like T");
+                break;
+            }
+            advance(parser);
+            LzToken tp_token = parser->previous;
+            LzString *tp = intern_token(parser, &tp_token);
+            char tp_text[48];
+            LzType ignored;
+            token_text(parser, &tp_token, tp_text, sizeof tp_text);
+            if (tp == NULL) {
+                break;
+            }
+            if (builtin_type(tp_text, &ignored)) {
+                error_with_name(parser, &tp_token, "'", "' is a builtin type and cannot be a type parameter");
+                continue;
+            }
+            bool repeated = false;
+            for (size_t k = 0; k < sig->tparam_count; k++) {
+                repeated = repeated || sig->tparams[k] == tp;
+            }
+            if (repeated) {
+                error_with_name(parser, &tp_token, "type parameter '", "' is declared twice");
+                continue;
+            }
+            if (sig->tparam_count >= LZ_MAX_TPARAMS || parser->alias_count >= LZ_MAX_ALIASES) {
+                error_at(parser, &tp_token, "too many type parameters (limit 8)");
+                break;
+            }
+            sig->tparams[sig->tparam_count++] = tp;
+            Alias *alias = &parser->aliases[parser->alias_count++];
+            alias->name = tp;
+            alias->depth = parser->scope_depth;
+            alias->type = lz_type_of_kinds(LZ_KINDS_ANY);
+            alias->type.tparam = tp;
+            alias->is_pub = true; /* never reported as a type a `pub` signature must export */
+            alias->decl_offset = tp_token.offset;
+            alias->told = true;
+        } while (match(parser, LZ_TOKEN_COMMA));
+        consume(parser, LZ_TOKEN_GREATER, "expected '>' after the type parameters");
+    }
 
     /* Parameters */
     LzString *names[LZ_MAX_PARAMS + 1];
@@ -6269,7 +7369,10 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
                 declared = lz_type_of_kinds(LZ_KIND_ERROR); /* self is the error value */
                 declared.class_id = parser->error_self_kind;
             } else if (is_self && !rest && parser->in_extend) {
-                /* An extension of a builtin kind checks `self` against it; of a class, not at all. */
+                /*
+                 * An extension of a builtin kind checks `self` against it; of a class, not at
+                 * all.
+                 */
                 declared = lz_type_of_kinds(parser->extend_kinds != 0 ? parser->extend_kinds : LZ_KINDS_ANY);
             } else if (is_self && !rest) {
                 declared = lz_type_of_kinds(LZ_KIND_INSTANCE); /* Point.sum(x) checks x is a Point */
@@ -6281,6 +7384,10 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
             }
             uint16_t slot = (uint16_t)parser->local_count;
 
+            LzType marked = declared; /* as written: what a call of a generic function works from */
+            if (sig->tparam_count > 0) {
+                declared = subst_tparams(parser, &marked, NULL, 0); /* in the body a T is any */
+            }
             if (rest) {
                 if (check(parser, LZ_TOKEN_EQUAL)) {
                     error_at_current(parser, "a rest parameter cannot have a default");
@@ -6289,7 +7396,7 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
                 (void)add_symbol(parser, &param_token, param, SYMBOL_LOCAL, false, lz_value_nil(), &list);
                 names[param_count] = param;
                 sig->names[param_count] = param;
-                sig->rest_item = declared;
+                sig->rest_item = marked;
                 has_rest = true;
                 checks[check_count++] = (ParamCheck){slot, list};
                 continue;
@@ -6326,7 +7433,7 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
             (void)add_symbol(parser, &param_token, param, SYMBOL_LOCAL, false, lz_value_nil(), &declared);
             names[param_count] = param;
             sig->names[param_count] = param;
-            sig->types[param_count] = declared;
+            sig->types[param_count] = marked;
             if (!is_any_type(&declared)) {
                 checks[check_count++] = (ParamCheck){slot, declared};
             }
@@ -6337,6 +7444,14 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
     if (!parser->panic && match(parser, LZ_TOKEN_ARROW)) {
         sig->result_declared = true;
         (void)parse_sig_type(parser, track_sig, &sig->result);
+    }
+    if (sig->tparam_count > 0) {
+        /* The body sees T as any; the callers see the marker again once the body is done. */
+        sig->generic_result = sig->result;
+        sig->result = subst_tparams(parser, &sig->generic_result, NULL, 0);
+        for (size_t k = 0; k < sig->tparam_count; k++) {
+            parser->aliases[first_tparam_alias + k].type = lz_type_of_kinds(LZ_KINDS_ANY);
+        }
     }
     sig->param_count = (uint16_t)param_count;
     sig->required = (uint16_t)required;
@@ -6361,12 +7476,12 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
     bool returns = false;
     bool block_after_arrow = false;
     if (check(parser, LZ_TOKEN_FAT_ARROW)) {
-        /* fn(x) => expression: the same as fn(x) { return expression } */
+        /* fn(x) => expression is the same as fn(x) { return expression } */
         advance(parser);
         uint32_t arrow = parser->previous.offset;
         skip_newlines(parser);
         if (check(parser, LZ_TOKEN_LEFT_BRACE) && !arrow_starts_dict(parser)) {
-            /* `=>` takes one expression; a block is the plain form. */
+            /* `=>` takes one expression, and a block is the plain form. */
             error_at_current(parser, "a block body is written without '=>': fn(x) { ... }");
             block_after_arrow = true; /* still read as the body, so one mistake is one error */
         } else {
@@ -6376,6 +7491,7 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
                 check_flow(parser, &value.type, &sig->result, &start, arrow, LZ_OP_CHECK_RETURN,
                            "return type mismatch: expected ");
             }
+            note_return(parser, &value);
             emit_op_at(parser, LZ_OP_RETURN, arrow);
             returns = true;
         }
@@ -6429,8 +7545,24 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
     }
     emit_op_at(parser, LZ_OP_NIL, close.offset);
     emit_op_at(parser, LZ_OP_RETURN, close.offset);
+    if (sig->tparam_count > 0 && sig->result_declared) {
+        sig->result = sig->generic_result;
+    }
+    if (!sig->result_declared && !parser->last_bodiless) {
+        /* no `->`: what the returns gave, plus nil when the end of the body can be reached */
+        LzType nothing = lz_type_of_kinds(LZ_KIND_NIL);
+        LzType merged = nothing;
+        if (fs.has_inferred) {
+            merged = fs.inferred;
+            if (!returns && !lz_type_union(&merged, &fs.inferred, &nothing)) {
+                merged = lz_type_of_kinds(LZ_KINDS_ANY);
+            }
+        }
+        sig->result = merged;
+    }
 
     /* Leave the function. */
+    narrow_unwind_depth(parser, parser->scope_depth - 1);
     while (parser->symbol_count > fs.first_symbol) {
         Symbol *symbol = &parser->symbols[--parser->symbol_count];
         if (symbol->kind == SYMBOL_CONSTANT) {
@@ -6477,11 +7609,10 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
     lz_object_release(heap, &function->base);
 
     result.sig = sig;
+    result.type = fn_type_of_sig(parser, sig);
     return result;
 }
 
-
-/* ---- Classes ---- */
 
 static LzToken peek_token(const Parser *parser, int count) {
     LzLexer ahead = parser->lexer;
@@ -6577,7 +7708,10 @@ static bool is_unsupported_word(const Parser *parser, const LzToken *token) {
     return false;
 }
 
-/* Makes the closure the function just compiled became (the one constant it left in the code). */
+/*
+ * Makes the closure the function just compiled became, which is the one constant it left in the
+ * code.
+ */
 static bool take_member_closure(Parser *parser, LzValue *out) {
     LzChunk *chunk = parser->chunk;
     if (parser->panic || parser->fatal != LZ_OK) {
@@ -6606,8 +7740,9 @@ static LzString *qualified_name(Parser *parser, const LzString *cls, const LzStr
 }
 
 /*
- * `[pub] [override] operator + (self, other) ...`. The member is a method named by the symbol
- * ("+", "-", "*", "/", "%", "==", "<"; "-@" for the unary minus), which no identifier can clash with.
+ * `[pub] [override] operator + (self, other) ...`. The member is a method named by the symbol,
+ * which is "+", "-", "*", "/", "%", "==" or "<", and "-@" for the unary minus. No identifier can
+ * clash with it.
  */
 static void operator_member(Parser *parser, LzClass *cls, LzVisibility vis, bool is_override) {
     advance(parser); /* operator */
@@ -6770,9 +7905,10 @@ static void class_member(Parser *parser, LzClass *cls) {
     if (word_is(parser, &link_token, "link")) {
         LzTokenType next = next_token_type(parser);
         /*
-         * A name after `link` makes it the modifier (`link x: T`, `link get x()`); `link fn` and
-         * `link const` are not fields, and the member check below rejects them with one message.
-         * Anything else (`link: int`, `link`) keeps `link` as the field's own name.
+         * A name after `link` makes it the modifier, as in `link x: T` and `link get x()`. `link
+         * fn` and `link const` are not fields, and the member check below rejects them with one
+         * message. Anything else, like `link: int` or `link`, keeps `link` as the field's own
+         * name.
          */
         if (next == LZ_TOKEN_IDENTIFIER || next == LZ_TOKEN_FN || next == LZ_TOKEN_CONST) {
             advance(parser);
@@ -6936,7 +8072,18 @@ static void class_member(Parser *parser, LzClass *cls) {
 
     /* A method, a static function or a property: a function. `self` first makes it a method. */
     bool has_self = false;
-    if (check(parser, LZ_TOKEN_LEFT_PAREN)) {
+    if (check(parser, LZ_TOKEN_LESS)) {
+        /* fn name<T, U>(self, ...): the type parameters come before the parameter list */
+        LzLexer ahead = parser->lexer;
+        LzToken token = parser->current;
+        for (int guard = 0; guard < 64 && token.type != LZ_TOKEN_GREATER && token.type != LZ_TOKEN_EOF; guard++) {
+            token = lz_lexer_next(&ahead);
+        }
+        if (token.type == LZ_TOKEN_GREATER && lz_lexer_next(&ahead).type == LZ_TOKEN_LEFT_PAREN) {
+            LzToken param = lz_lexer_next(&ahead);
+            has_self = word_is(parser, &param, "self");
+        }
+    } else if (check(parser, LZ_TOKEN_LEFT_PAREN)) {
         LzToken param = peek_token(parser, 1);
         has_self = word_is(parser, &param, "self");
     }
@@ -7233,9 +8380,9 @@ static void class_declaration(Parser *parser) {
 }
 
 /*
- * `extend Target { members }`: adds methods and properties to a type that exists. The block is a
- * hidden class (see src/core/extend.c); the statement that registers it runs at its place in the
- * file, so the names it adds exist from there on.
+ * `extend Target { members }` adds methods and properties to a type that exists. The block is a
+ * hidden class, see src/core/extend.c, and the statement that registers it runs at its place in
+ * the file, so the names it adds exist from there on.
  */
 static void extend_declaration(Parser *parser) {
     LzToken extend_token = parser->current;
@@ -7358,8 +8505,8 @@ static void extend_declaration(Parser *parser) {
 }
 
 /*
- * `a.b = v`, `a.b += v` and `a.b.c = v`: the expression just compiled ends in a GET_FIELD (or
- * GET_FIELD_KEEP for a compound assignment), which becomes the SET_FIELD of the assignment.
+ * `a.b = v`, `a.b += v` and `a.b.c = v`. The expression just compiled ends in a GET_FIELD, or
+ * GET_FIELD_KEEP for a compound assignment, which becomes the SET_FIELD of the assignment.
  */
 static bool member_assignment(Parser *parser, const Expr *target, bool finish) {
     bool plain = check(parser, LZ_TOKEN_EQUAL);
@@ -7461,6 +8608,7 @@ static void return_statement(Parser *parser) {
     } else {
         value = expression(parser);
     }
+    note_return(parser, &value);
     if (fs->function != NULL && fs->sig->result_declared) {
         if (empty) {
             char type_name[96];
@@ -7508,9 +8656,9 @@ static void return_statement(Parser *parser) {
 }
 
 /*
- * Top-level `fn` declarations are visible to the whole file, so functions can call
- * each other whatever their order. Only the names are declared here; the function
- * itself exists once its declaration has run.
+ * Top-level `fn` declarations are visible to the whole file, so functions can call each other
+ * whatever their order. Only the names are declared here, and the function itself exists once
+ * its declaration has run.
  */
 /* Error kinds: `error Name : Parent` */
 
@@ -7533,9 +8681,10 @@ static bool top_name_used(const Parser *parser, const TopName *names, size_t cou
 }
 
 /*
- * Declares the kind of one declaration in the VM, and remembers what went wrong in decl->problem.
- * A kind with an unknown parent is still declared (under Error), so the mistake is told once and
- * later uses of the name do not add to it. A kind that is a duplicate or collides is not.
+ * Declares the kind of one declaration in the VM, and remembers what went wrong in
+ * decl->problem. A kind with an unknown parent is still declared, under Error, so the mistake is
+ * told once and later uses of the name don't add to it. A kind that is a duplicate or collides
+ * is not.
  */
 static void declare_error_kind(Parser *parser, ErrorDecl *decl, bool collides) {
     const char *text = parser->source->text;
@@ -7587,10 +8736,10 @@ static ErrorDecl *add_error_decl(Parser *parser, const ErrorDecl *decl) {
 
 /*
  * Hoisting. Every `error` declaration at the top level of the file is found and declared in the
- * VM before the first statement is compiled, in the order they are written: a kind can be used
- * (caught, called) above its declaration, and the kinds are known without running the script.
- * Only declarations at the start of a statement outside every bracket count, which is what the
- * parser accepts (a declaration anywhere else is reported when the parser meets it).
+ * VM before the first statement is compiled, in the order they are written. That way a kind can
+ * be used, caught or called, above its declaration, and the kinds are known without running the
+ * script. Only declarations at the start of a statement outside every bracket count, which is
+ * what the parser accepts. A declaration anywhere else is reported when the parser meets it.
  */
 static void prescan_errors(Parser *parser) {
     LzLexer lexer;
@@ -7702,9 +8851,10 @@ static bool at_error_declaration(const Parser *parser) {
 }
 
 /*
- * The body of `error Name : Parent { ... }`, or the empty class of an error whose parent has one: a
- * class in the sense of `class`, bound to the kind when the statement runs (it is not hoisted: its
- * defaults and `init` are code). The kind itself is declared by the prescan, as without a body.
+ * The body of `error Name : Parent { ... }`, or the empty class of an error whose parent has
+ * one. It's a class in the sense of `class` and is bound to the kind when the statement runs,
+ * and it's not hoisted because its defaults and `init` are code. The kind itself is declared by
+ * the prescan, as without a body.
  */
 static void error_class_body(Parser *parser, const LzToken *name_token, uint8_t kind, bool has_body,
                              bool parent_class, const LzToken *traits, size_t trait_count) {
@@ -7801,9 +8951,9 @@ static ErrorDecl *error_decl_named(Parser *parser, const char *text, size_t leng
 }
 
 /*
- * The constructor of an error with a class: what its parent error's takes, then its own fields. Kept
- * on the declaration for every error (a child inherits them), and, for a `pub` one, written into the
- * `init` of its entry after the message.
+ * The constructor of an error with a class takes what its parent error's takes, then its own
+ * fields. It's kept on the declaration for every error, because a child inherits them, and for a
+ * `pub` one it's written into the `init` of its entry after the message.
  */
 static void iface_finish_error(Parser *parser, ErrorDecl *decl, LzIfaceEntry *entry, const LzToken *parent, bool has_init) {
     LzIfaceSig *own = parser->error_own;
@@ -7844,9 +8994,9 @@ static void iface_finish_error(Parser *parser, ErrorDecl *decl, LzIfaceEntry *en
 }
 
 /*
- * error Name [: Parent]. The kind is already declared by the prescan; here the declaration is
+ * error Name [: Parent]. The kind is already declared by the prescan, so here the declaration is
  * checked for where it stands and its mistakes are told. `error` is a keyword here and nowhere
- * else: anywhere but the start of a statement it is a name like any other.
+ * else, and anywhere but the start of a statement it is a name like any other.
  */
 static void error_declaration(Parser *parser) {
     LzToken keyword = parser->current;
@@ -7901,7 +9051,7 @@ static void error_declaration(Parser *parser) {
     const ErrorDecl *decl = find_error_decl(parser, name_token.offset);
     ErrorDecl late;
     if (decl == NULL) {
-        /* The prescan did not see it (an odd layout): declare it now. */
+        /* The prescan did not see it, because of an odd layout, so declare it now. */
         memset(&late, 0, sizeof late);
         late.name_offset = (uint32_t)name_token.offset;
         late.name_length = (uint32_t)name_token.length;
@@ -8101,16 +9251,14 @@ static void synchronize(Parser *parser) {
     }
 }
 
-/* ---- `pub` in front of a statement ---- */
-
 static bool at_top_level(const Parser *parser) {
     return parser->fs->function == NULL && parser->scope_depth == 0;
 }
 
 /*
- * Is the `pub` at the current token a modifier? It is only a word of its own when something that
- * cannot continue an expression follows it (`pub fn`, `pub x`, `pub 3`); `pub = 1`, `pub(2)`,
- * `pub.x` and a lone `pub` stay what they were: an ordinary name.
+ * Is the `pub` at the current token a modifier? It's only a word of its own when something that
+ * can't continue an expression follows it, like `pub fn`, `pub x` or `pub 3`. `pub = 1`,
+ * `pub(2)`, `pub.x` and a lone `pub` stay what they were, which is an ordinary name.
  */
 static bool pub_is_modifier(const Parser *parser) {
     if (parser->current.type != LZ_TOKEN_IDENTIFIER || !word_is(parser, &parser->current, "pub")) {
@@ -8144,7 +9292,10 @@ static bool pub_is_modifier(const Parser *parser) {
     }
 }
 
-/* Takes the `pub` and the blanks after it out of the source: the fix for a `pub` that is not wanted. */
+/*
+ * Takes the `pub` and the blanks after it out of the source: the fix for a `pub` that is not
+ * wanted.
+ */
 static void pub_removal_fix(Parser *parser, const LzToken *pub, const char *headline) {
     uint32_t length = pub->length;
     while (pub->offset + length < parser->source->length &&
@@ -8154,7 +9305,7 @@ static void pub_removal_fix(Parser *parser, const LzToken *pub, const char *head
     diag_fix(parser, headline, pub->offset, length, "");
 }
 
-/* Is this token the `=` of an assignment (plain or compound)? */
+/* Is this token the `=` of an assignment, plain or compound? */
 static bool token_is_assign(LzTokenType type) {
     switch (type) {
     case LZ_TOKEN_EQUAL:
@@ -8201,7 +9352,10 @@ static bool name_is_assigned_in_file(const Parser *parser, const LzToken *name_t
     return false;
 }
 
-/* Does the `let` (the current token is its name) start with a value: `let x = ...` or `let x: T = ...`? */
+/*
+ * Does the `let` start with a value, like `let x = ...` or `let x: T = ...`? The current token
+ * is its name.
+ */
 static bool let_has_value(const Parser *parser) {
     LzLexer ahead = parser->lexer;
     int depth = 0;
@@ -8234,8 +9388,9 @@ static bool let_has_value(const Parser *parser) {
 }
 
 /*
- * `pub let` at the top level: a variable can change, so it cannot be shared. The `let` is read
- * as a private variable, so the rest of the file still compiles; nothing goes in the interface.
+ * `pub let` at the top level can't be shared, because a variable can change. The `let` is read
+ * as a private variable, so the rest of the file still compiles, and nothing goes in the
+ * interface.
  */
 static void pub_let_error(Parser *parser, const LzToken *let_token) {
     LzToken name = peek_token(parser, 1);
@@ -8251,9 +9406,10 @@ static void pub_let_error(Parser *parser, const LzToken *let_token) {
 }
 
 /*
- * A `pub` was read at the start of a statement (the current token is the word after it). What
- * follows decides: a declaration keeps it for the declaration to take (parser->pub_open); anything
- * else is a mistake that is told here, kindly, and the statement is read as if `pub` was not there.
+ * A `pub` was read at the start of a statement, and the current token is the word after it. What
+ * follows decides. A declaration keeps it for the declaration to take (parser->pub_open), and
+ * anything else is a mistake that is told here, kindly, and the statement is read as if `pub`
+ * was not there.
  */
 static void pub_prefix(Parser *parser) {
     LzToken pub = parser->current;
@@ -8541,6 +9697,12 @@ LzStatus lz_compile(LzVM *vm, const LzSource *source, LzChunk *chunk, LzDiagnost
         free(parser->sigs);
         parser->sigs = next;
     }
+    while (parser->facts_list != NULL) {
+        Facts *next = parser->facts_list->next;
+        free(parser->facts_list);
+        parser->facts_list = next;
+    }
+    free(parser->journal);
     free(parser->constants.slots);
     for (size_t i = 0; i < parser->error_decl_count; i++) {
         lz_iface_sig_free(parser->error_decls[i].ctor);

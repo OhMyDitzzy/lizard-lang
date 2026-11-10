@@ -68,7 +68,10 @@ static LzStatus read_name(LzVM *vm, const LzChunk *chunk, size_t *ip, LzString *
     return LZ_OK;
 }
 
-/* What a failed check was about, for the message: an argument, a returned value, or nothing. */
+/*
+ * What a failed check was about, for the message. It's an argument, a returned value, or
+ * nothing.
+ */
 typedef enum CheckSubject { CHECK_VALUE, CHECK_PARAM, CHECK_RETURN } CheckSubject;
 
 static void describe_subject(const LzVM *vm, CheckSubject subject, size_t slot, char *out, size_t size) {
@@ -99,11 +102,21 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
         lz_type_describe(&shown, &actual_out);
     } else if (type->literal_count > 0) {
         lz_value_describe(value, &actual_out);
+    } else if (type->fn != NULL && lz_value_is_closure(value)) {
+        const LzFunction *function = lz_value_as_closure(value)->function;
+        char shape[64];
+        (void)snprintf(shape, sizeof shape, "function taking %s%u argument%s",
+                       function->has_rest || function->required != function->param_count ? "at least " : "",
+                       (unsigned)function->required, function->required == 1 ? "" : "s");
+        (void)lz_writer_write_cstr(&actual_out, shape);
     } else {
         (void)lz_writer_write_cstr(&actual_out, lz_value_kind_name(value));
         if (lz_value_is_instance(value) && (type->kinds & LZ_KIND_INSTANCE) != 0 && type->class_id != 0 &&
             type->class_name == lz_value_as_instance(value)->cls->name) {
-            /* Same name, different class: it was defined again, and this object is from before. */
+            /*
+             * Same name, different class, so it was defined again and this object is from
+             * before.
+             */
             (void)lz_writer_write_cstr(&actual_out, " (made by an earlier definition of that class)");
         }
     }
@@ -130,7 +143,10 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
                                       actual.data != NULL ? actual.data : "?",
                                       lz_value_is_link(value) ? "; use .target" : "");
     if (!lz_value_is_link(value) && expected.data != NULL && actual.data != NULL) {
-        if (value->type == LZ_VAL_NIL) {
+        if (type->fn != NULL && lz_kind_of(value) == LZ_KIND_FUNCTION) {
+            lz_vm_set_help(vm, "the function must take the number of arguments the type lists: %s",
+                           expected.data);
+        } else if (value->type == LZ_VAL_NIL) {
             lz_vm_set_help(vm, "the value is nil here; give it a value, or change the annotation to %s | nil",
                            expected.data);
         } else if (strcmp(expected.data, "string") == 0 && (value->type == LZ_VAL_INT || value->type == LZ_VAL_FLOAT)) {
@@ -150,8 +166,8 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
 }
 
 /*
- * Does the value fit the type? An array is checked item by item and then restricted to
- * the item type, which costs fuel in proportion to its size.
+ * Does the value fit the type? An array is checked item by item and then restricted to the item
+ * type, which costs fuel in proportion to its size.
  */
 static LzStatus check_value(LzVM *vm, const LzType *type, const LzValue *value, CheckSubject subject,
                             size_t slot) {
@@ -179,7 +195,7 @@ static LzStatus array_new(LzVM *vm) {
     return status;
 }
 
-/* OP_DICT n: the key and value pairs are on top, in source order. */
+/* OP_DICT n has the key and value pairs on top, in source order. */
 static LzStatus dict_new(LzVM *vm, uint16_t count) {
     size_t needed = (size_t)count * 2;
     if (vm->stack_count < needed) {
@@ -250,8 +266,8 @@ static LzStatus no_field_error(LzVM *vm, const LzValue *value, const LzString *n
 }
 
 /*
- * d[key]: the item, or "key \"x\" not found" with a hint drawn from the dict's own
- * string keys. `op` is the instruction, so a compound store can suggest get().
+ * d[key] gives the item, or "key \"x\" not found" with a hint drawn from the dict's own string
+ * keys. `op` is the instruction, so a compound store can suggest get().
  */
 static LzStatus dict_index_op(LzVM *vm, const LzDict *dict, const LzValue *key) {
     LzStatus status = lz_dict_own_key(vm, key);
@@ -263,7 +279,7 @@ static LzStatus dict_index_op(LzVM *vm, const LzDict *dict, const LzValue *key) 
         return lz_vm_dict_key_error(vm, dict, key, NULL);
     }
     LzValue item = *stored;
-    lz_value_retain(&item); /* keep it alive across the pops, which may free the dict */
+    lz_value_retain(&item); /* keep it alive across the pops, because they may free the dict */
     pop(vm);
     pop(vm);
     vm->stack[vm->stack_count++] = item;
@@ -289,7 +305,7 @@ static LzStatus index_op(LzVM *vm) {
         return status;
     }
     LzValue item = array->items[position];
-    lz_value_retain(&item); /* keep it alive across the pops, which may free the array */
+    lz_value_retain(&item); /* keep it alive across the pops, because they may free the array */
     pop(vm);
     pop(vm);
     vm->stack[vm->stack_count++] = item;
@@ -304,7 +320,7 @@ static bool text_at(const LzValue *value, const LzString **out) {
     return true;
 }
 
-/* The length in bytes of the code point at data[at], or 1 for a byte that is not valid UTF-8. */
+/* The length in bytes of the code point at data[at], or 1 for a byte that isn't valid UTF-8. */
 static size_t code_point_length(const char *data, size_t length, size_t at) {
     unsigned char lead = (unsigned char)data[at];
     size_t size = lead < 0x80           ? 1
@@ -390,11 +406,11 @@ static LzStatus iter_next_op(LzVM *vm) {
     }
 
     /*
-     * The container slot stays, so the item is still held by the array; the retain only
-     * covers the pops below, which could free it.
+     * The container slot stays, so the item is still held by the array. The retain only covers
+     * the pops below, which could free it.
      */
     lz_value_retain(&item);
-    pop(vm); /* the offset */
+    pop(vm);
     LzStatus status = push(vm, item);
     if (status == LZ_OK) {
         status = push(vm, lz_value_int(next));
@@ -406,8 +422,10 @@ static LzStatus iter_next_op(LzVM *vm) {
     return status;
 }
 
-/* [x][off][round] -> [x][first][second][next]: an array or a string gives the round and
- * the item, a dict its key and its value. */
+/*
+ * [x][off][round] becomes [x][first][second][next]. An array or a string gives the round and the
+ * item, and a dict gives its key and its value.
+ */
 static LzStatus iter_pair_op(LzVM *vm) {
     if (vm->stack_count < 3) {
         return malformed(vm, "stack underflow");
@@ -457,8 +475,8 @@ static LzStatus iter_pair_op(LzVM *vm) {
 
     lz_value_retain(&first);
     lz_value_retain(&second);
-    pop(vm); /* the round */
-    pop(vm); /* the offset */
+    pop(vm);
+    pop(vm);
     LzStatus status = push(vm, first);
     if (status == LZ_OK) {
         status = push(vm, second);
@@ -474,7 +492,7 @@ static LzStatus iter_pair_op(LzVM *vm) {
     return status;
 }
 
-/* A dict may have its values changed while it is walked, but not its size. */
+/* A dict may have its values changed while it's walked, but not its size. */
 static LzStatus iter_check_op(LzVM *vm) {
     if (vm->stack_count < 2) {
         return malformed(vm, "stack underflow");
@@ -491,7 +509,7 @@ static LzStatus iter_check_op(LzVM *vm) {
     return status;
 }
 
-/* "range bounds must be ints, got <kind>": names the first operand that is not an int. */
+/* "range bounds must be ints, got <kind>" names the first operand that isn't an int. */
 static bool range_bounds_int(LzVM *vm, const LzValue *start, const LzValue *end,
                              const LzValue *step) {
     const LzValue *offending = start;
@@ -534,10 +552,13 @@ static LzStatus range_test_op(LzVM *vm, bool inclusive) {
 }
 
 /*
- * The last value the loop visits. It runs only when the range is not empty, so the
- * distance fits in 64 bits and the last value is one the loop reaches exactly.
+ * The last value the loop visits. It runs only when the range isn't empty, so the distance fits
+ * in 64 bits and the last value is one the loop reaches exactly.
  */
-/* Is `needle` a substring of `hay`? Bytes, like contains(); the empty string is in everything. */
+/*
+ * Is `needle` a substring of `hay`? It works on bytes, like contains(), and the empty string is
+ * in everything.
+ */
 static bool bytes_contain(const LzString *hay, const LzString *needle) {
     if (needle->length == 0) {
         return true;
@@ -560,9 +581,10 @@ static bool bytes_contain(const LzString *hay, const LzString *needle) {
 }
 
 /*
- * `a in b`. An array holds a when one of its items == a (the rule of ==, so 1.0 in [1] is
- * true), a dict when a is one of its keys (a value that cannot be a key is simply absent),
- * a string when a is a substring. The caret of an error is on b, whatever the cause.
+ * `a in b`. An array holds a when one of its items == a, which follows the rule of ==, so 1.0 in
+ * [1] is true. A dict holds a when a is one of its keys, and a value that can't be a key is
+ * simply absent. A string holds a when a is a substring. The caret of an error is on b, whatever
+ * the cause.
  */
 static LzStatus in_op(LzVM *vm) {
     if (vm->stack_count < 2) {
@@ -574,8 +596,10 @@ static LzStatus in_op(LzVM *vm) {
 
     if (lz_value_is_array(right)) {
         const LzArray *array = lz_value_as_array(right);
-        /* One unit of fuel per 8 items looked at, spent before the items are, so a huge array
-         * cannot be walked once the budget is gone. */
+        /*
+         * One unit of fuel per 8 items looked at, spent before the items are, so a huge array
+         * can't be walked once the budget is gone.
+         */
         for (size_t i = 0; i < array->count && !found; i++) {
             if (i % 8 == 0) {
                 LzStatus charged = lz_vm_charge_fuel(vm, 1);
@@ -622,7 +646,10 @@ static LzStatus in_op(LzVM *vm) {
     return push(vm, lz_value_bool(found));
 }
 
-/* `x in a..b` / `x in a..=b`: [x][a][b] -> bool, with the same answers as x >= a and x < b. */
+/*
+ * `x in a..b` and `x in a..=b` take [x][a][b] and give a bool, with the same answers as x >= a
+ * and x < b.
+ */
 static LzStatus in_range_op(LzVM *vm, bool inclusive, bool lenient) {
     if (vm->stack_count < 3) {
         return malformed(vm, "stack underflow");
@@ -634,7 +661,7 @@ static LzStatus in_range_op(LzVM *vm, bool inclusive, bool lenient) {
         return LZ_ERR_TYPE; /* already reported */
     }
     if (value->type != LZ_VAL_INT && value->type != LZ_VAL_FLOAT) {
-        if (lenient) { /* a `case` range: what is not a number is not in it */
+        if (lenient) { /* a `case` range, where what is not a number is not in it */
             pop(vm);
             pop(vm);
             pop(vm);
@@ -661,7 +688,7 @@ static LzStatus in_range_op(LzVM *vm, bool inclusive, bool lenient) {
     return push(vm, lz_value_bool(inside));
 }
 
-/* `??`: [x] -> [x][x is nil]. */
+/* `??` takes [x] and gives [x][x is nil]. */
 static LzStatus nil_test_op(LzVM *vm) {
     if (vm->stack_count == 0) {
         return malformed(vm, "stack underflow");
@@ -669,7 +696,10 @@ static LzStatus nil_test_op(LzVM *vm) {
     return push(vm, lz_value_bool(vm->stack[vm->stack_count - 1].type == LZ_VAL_NIL));
 }
 
-/* The error value a failure is turned into when a catch takes it: the thrown one, or a new one. */
+/*
+ * The error value a failure is turned into when a catch takes it, which is the thrown one or a
+ * new one.
+ */
 static LzStatus error_for_failure(LzVM *vm, LzError **out) {
     if (vm->thrown.type == LZ_VAL_OBJECT) {
         *out = (LzError *)vm->thrown.as.object; /* the VM's reference moves to the caller */
@@ -681,10 +711,11 @@ static LzStatus error_for_failure(LzVM *vm, LzError **out) {
 
 /*
  * A failure at the instruction at byte `failed_ip` of the frame on top. If a catchable failure
- * meets a handler of a frame this loop runs (frame >= floor), cut back to the state the try began
- * in: close the upvalues above its stack height, drop the values and frames above, push the error
- * value and continue at the catch code. Returns false when nothing catches it (sandbox limits
- * never are), with *status as the failure the loop must return.
+ * meets a handler of a frame this loop runs (frame >= floor), cut back to the state the try
+ * began in. That means closing the upvalues above its stack height, dropping the values and
+ * frames above, pushing the error value and continuing at the catch code. Returns false when
+ * nothing catches it, and sandbox limits never are, with *status as the failure the loop must
+ * return.
  */
 static bool unwind_to_handler(LzVM *vm, LzStatus *status, size_t floor, size_t failed_ip,
                               const LzChunk **chunk_io, size_t *ip_io) {
@@ -711,7 +742,7 @@ static bool unwind_to_handler(LzVM *vm, LzStatus *status, size_t floor, size_t f
         }
     }
     if (made != LZ_OK) {
-        *status = made; /* the heap refused the error value: that is a limit, nothing to catch */
+        *status = made; /* the heap refused the error value, which is a limit and there's nothing to catch */
         return false;
     }
 
@@ -920,7 +951,7 @@ static LzStatus super_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     return lz_vm_super_lookup(vm, current_owner(vm), name, mode, vm->stack_count - need);
 }
 
-/* `error Name : Parent { ... }` once the body is compiled: binds the class to the kind. */
+/* `error Name : Parent { ... }` once the body is compiled. It binds the class to the kind. */
 static LzStatus error_class_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     const LzValue *constant = NULL;
     LzStatus status = read_constant(vm, chunk, ip, &constant);
@@ -948,7 +979,7 @@ static LzStatus error_class_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     return lz_error_class_bind(vm, lz_value_as_class(constant), kind, parent);
 }
 
-/* `extend T { ... }` after the block is compiled: registers it (see lz_vm_extend_register). */
+/* `extend T { ... }` after the block is compiled. It registers it, see lz_vm_extend_register. */
 static LzStatus extend_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     const LzValue *constant = NULL;
     LzStatus status = read_constant(vm, chunk, ip, &constant);
@@ -978,7 +1009,7 @@ static LzStatus extend_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     return lz_vm_extend_register(vm, ext, target);
 }
 
-/* The head `class A : B, C` after the name is bound: `B` is on the stack. */
+/* The head `class A : B, C` after the name is bound, with `B` on the stack. */
 static LzStatus class_link_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     const LzValue *constant = NULL;
     LzStatus status = read_constant(vm, chunk, ip, &constant);
@@ -1027,7 +1058,10 @@ static LzStatus class_link_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     return status;
 }
 
-/* `e.message`, `e.kind`, `e.trace`, `e.cause`, `e.data`: the fields of an error, read only. */
+/*
+ * `e.message`, `e.kind`, `e.trace`, `e.cause` and `e.data` are the fields of an error, and
+ * they're read only.
+ */
 static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool write_check) {
     LzString *name = NULL;
     LzStatus status = read_name(vm, chunk, ip, &name);
@@ -1192,9 +1226,8 @@ static LzStatus range_next_op(LzVM *vm) {
     int64_t start = counter->as.integer;
     int64_t by = step->as.integer;
     /*
-     * Safe without a check: the loop steps only while the counter is before the last
-     * value, and the last value is one the sequence reaches, so the sum never leaves
-     * the range.
+     * Safe without a check, because the loop steps only while the counter is before the last
+     * value and the last value is one the sequence reaches, so the sum never leaves the range.
      */
     int64_t next = start + by;
     pop(vm);
@@ -1202,7 +1235,7 @@ static LzStatus range_next_op(LzVM *vm) {
     return push(vm, lz_value_int(next));
 }
 
-/* The slot is validated by the caller: this only closes the upvalue open at it. */
+/* The slot is validated by the caller, so this only closes the upvalue open at it. */
 static LzStatus close_upvalue_keep_op(LzVM *vm, uint16_t slot) {
     if (slot >= vm->stack_count) {
         return malformed(vm, "local slot out of range");
@@ -1212,14 +1245,17 @@ static LzStatus close_upvalue_keep_op(LzVM *vm, uint16_t slot) {
     return LZ_OK;
 }
 
-/* [array][index] -> [array][index][item]: the array and the index stay for OP_SET_INDEX. */
+/*
+ * [array][index] becomes [array][index][item], and the array and the index stay for
+ * OP_SET_INDEX.
+ */
 static LzStatus index_keep_op(LzVM *vm) {
     if (vm->stack_count < 2) {
         return malformed(vm, "stack underflow");
     }
     const LzValue *container = &vm->stack[vm->stack_count - 2];
     if (lz_value_is_dict(container)) {
-        /* `d[k] op= v`: the read keeps the dict and the key for OP_SET_INDEX below. */
+        /* `d[k] op= v` reads while keeping the dict and the key for OP_SET_INDEX below. */
         const LzDict *dict = lz_value_as_dict(container);
         const LzValue *key = &vm->stack[vm->stack_count - 1];
         LzStatus status = lz_dict_own_key(vm, key);
@@ -1407,14 +1443,13 @@ static LzStatus bit_not(LzVM *vm) {
 }
 
 /*
- * Runs the one instruction at byte offset *ip_io and advances it past the
- * instruction. It does no accounting (fuel, vm->instructions): the loop that
- * calls it does that, so a faster engine can spend fuel its own way and still
- * reuse every semantic.
+ * Runs the one instruction at byte offset *ip_io and advances it past the instruction. It does no
+ * accounting of fuel or vm->instructions, because the loop that calls it does that, so a faster
+ * engine can spend fuel its own way and still reuse every semantic.
  *
- * OP_RETURN is reported by setting *ip_io to SIZE_MAX, which the loop already
- * has to treat as "no more instructions": the hot path pays nothing for it.
- * Marked always_inline so the reference loop below keeps its speed.
+ * OP_RETURN is reported by setting *ip_io to SIZE_MAX, which the loop already has to treat as "no
+ * more instructions", so the hot path pays nothing for it. It's marked always_inline so the
+ * reference loop below keeps its speed.
  */
 #if defined(__GNUC__) || defined(__clang__)
 #define LZ_FORCE_INLINE static inline __attribute__((always_inline))
@@ -1733,8 +1768,10 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
             *location = moved;
             lz_value_release(&vm->heap, &old);
             if (moved.type == LZ_VAL_OBJECT) {
-                /* The GE interpreter delegates this instruction to here, and both JIT back-ends
-                 * send every object store here too: they inline only what cannot close a cycle. */
+                /*
+                 * The GE interpreter delegates this instruction to here, and both JIT back-ends
+                 * send every object store here too. They inline only what can't close a cycle.
+                 */
                 lz_skink_note_store(vm, upvalue);
             }
         }
@@ -1861,7 +1898,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
                 status = malformed(vm, "stack underflow");
             } else if (lz_value_is_error(&vm->stack[vm->stack_count - 1]) &&
                        ((LzError *)vm->stack[vm->stack_count - 1].as.object)->payload != NULL) {
-                /* an error with fields: the target stays under the value */
+                /* an error with fields, and the target stays under the value */
                 LzValue target = vm->stack[vm->stack_count - 1];
                 LzValue field = lz_value_nil();
                 bool member = false;
@@ -2018,7 +2055,7 @@ LzStatus lz_vm_eval_with(LzVM *vm, const LzChunk *chunk, LzValue *result, LzExec
     vm->trace_fixed = false;
     vm->heap.limit_hit = false;
 
-    /* Frame 0 is the script itself: no closure, locals from the bottom of the stack. */
+    /* Frame 0 is the script itself, with no closure and locals from the bottom of the stack. */
     vm->frame_count = 1;
     vm->frames[0] = (LzCallFrame){NULL, chunk, 0, 0, LZ_ALL_SUPPLIED, LZ_NO_OFFSET};
 

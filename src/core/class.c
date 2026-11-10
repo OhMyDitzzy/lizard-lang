@@ -13,9 +13,7 @@
 #include "lizard/native.h"
 #include "lizard/suggest.h"
 
-/* ---- building a class ---- */
-
-/* The classes of a VM sorted by id (ids only grow, so adding is appending). */
+/* The classes of a VM sorted by id. Ids only grow, so adding is appending. */
 static bool registry_add(LzVM *vm, LzClass *cls) {
     if (vm->class_registry_count == vm->class_registry_capacity) {
         size_t capacity = vm->class_registry_capacity == 0 ? 16 : vm->class_registry_capacity * 2;
@@ -151,8 +149,9 @@ bool lz_class_add_member(LzClass *cls, LzString *name, LzMemberKind kind, LzVisi
 }
 
 /*
- * Fields by slot and constructor parameters: the parent's, then this class's own. The slots of the
- * own fields start where the parent's end (`base`); a class with no parent has base 0.
+ * Fields by slot and constructor parameters, the parent's and then this class's own. The slots
+ * of the own fields start where the parent's end (`base`), and a class with no parent has base
+ * 0.
  */
 static void layout(LzClass *cls, size_t base) { /* `base` is added to the own slots */
     const LzClass *parent = cls->parent;
@@ -189,7 +188,7 @@ void lz_class_seal(LzClass *cls) {
             cls->init_member = (int)i;
         }
     }
-    layout(cls, 0); /* as a class without a parent; lz_class_link redoes it for one with a parent */
+    layout(cls, 0); /* as a class without a parent, and lz_class_link redoes it for one with a parent */
 }
 
 /* The member of a field slot. */
@@ -199,8 +198,9 @@ static const LzMember *field_at(const LzClass *cls, size_t slot) {
 }
 
 /*
- * A member of a trait, or of a trait it extends. `required` picks the requirements (no body); else
- * the defaults. A trait's own member is found before the ones of the traits it extends.
+ * A member of a trait, or of a trait it extends. `required` picks the requirements, which have
+ * no body, and otherwise the defaults. A trait's own member is found before the ones of the
+ * traits it extends.
  */
 static bool trait_find(const LzClass *trait, const LzString *name, bool required, LzFound *out) {
     for (size_t i = 0; i < trait->member_count; i++) {
@@ -219,7 +219,10 @@ static bool trait_find(const LzClass *trait, const LzString *name, bool required
     return false;
 }
 
-/* The classes of the chain win; the default of a trait answers only when none of them has the name. */
+/*
+ * The classes of the chain win, and the default of a trait answers only when none of them has
+ * the name.
+ */
 bool lz_class_lookup(const LzClass *cls, const LzString *name, LzFound *out) {
     for (const LzClass *c = cls; c != NULL; c = c->parent) {
         for (size_t i = 0; i < c->member_count; i++) {
@@ -230,7 +233,10 @@ bool lz_class_lookup(const LzClass *cls, const LzString *name, LzFound *out) {
             }
         }
     }
-    /* Then what `extend` added to the class or to an ancestor, before the defaults of traits. */
+    /*
+     * Then comes what `extend` added to the class or to an ancestor, before the defaults of
+     * traits.
+     */
     if (cls->vm != NULL && cls->vm->ext_count != 0 && lz_ext_find_class(cls->vm, cls, name, out)) {
         return true;
     }
@@ -271,8 +277,6 @@ const char *lz_class_display_name(const LzClass *cls) {
 void lz_instance_drop_holder(const LzValue *item) {
     lz_value_as_instance(item)->holders--;
 }
-
-/* ---- finalizers ---- */
 
 void lz_class_finalize(LzHeap *heap, LzClass *cls) {
     for (size_t i = 0; i < cls->member_count; i++) {
@@ -365,8 +369,6 @@ void lz_vm_release_class_constants(LzVM *vm) {
     free(classes);
 }
 
-/* ---- errors ---- */
-
 static LzStatus fail(LzVM *vm, LzStatus status, const char *help, const char *format, ...)
     LZ_PRINTF_FORMAT(4, 5);
 
@@ -386,7 +388,7 @@ static LzStatus fail(LzVM *vm, LzStatus status, const char *help, const char *fo
     return status;
 }
 
-/* `declared` is the class that declares the member (not the class of the object). */
+/* `declared` is the class that declares the member, not the class of the object. */
 static bool member_visible(uint64_t owner, const LzClass *declared, const LzMember *member) {
     return member->vis != LZ_VIS_PRIVATE || lz_class_sees(declared->vm, owner, declared);
 }
@@ -483,8 +485,6 @@ static LzStatus unset_error(LzVM *vm, const LzClass *cls, const LzMember *member
                 cls->name->data);
 }
 
-/* ---- inheritance ---- */
-
 static const char *kind_phrase(const LzMember *member) {
     switch ((LzMemberKind)member->kind) {
     case LZ_MEMBER_FIELD:
@@ -511,7 +511,7 @@ static bool is_function_like(const LzMember *member) {
     return member->kind == LZ_MEMBER_METHOD || member->kind == LZ_MEMBER_STATIC || member->kind == LZ_MEMBER_GETTER;
 }
 
-/* Parameters a caller writes: `self` is not one. */
+/* Parameters a caller writes, and `self` is not one. */
 static size_t written_params(const LzMember *member) {
     if (member->value.type != LZ_VAL_OBJECT || member->value.as.object->type != LZ_OBJ_CLOSURE) {
         return 0;
@@ -521,7 +521,10 @@ static size_t written_params(const LzMember *member) {
     return has_self && count > 0 ? count - 1 : count;
 }
 
-/* An error placed on the declaration that is wrong (the run-time error points at its source). */
+/*
+ * An error placed on the declaration that is wrong, because the run-time error points at its
+ * source.
+ */
 static LzStatus link_fail(LzVM *vm, uint32_t offset, const char *help, const char *format, ...)
     LZ_PRINTF_FORMAT(4, 5);
 static LzStatus link_fail(LzVM *vm, uint32_t offset, const char *help, const char *format, ...) {
@@ -536,9 +539,9 @@ static LzStatus link_fail(LzVM *vm, uint32_t offset, const char *help, const cha
 }
 
 /*
- * The member `name` that a class inherits, if any: from the parent chain (and the defaults of its
- * traits), else from a default of a trait of this class, else (with *required set) from a
- * requirement of one.
+ * The member `name` that a class inherits, if any. It comes from the parent chain and the
+ * defaults of its traits, else from a default of a trait of this class, else from a requirement
+ * of one when *required is set.
  */
 static bool find_inherited(const LzClass *cls, const LzString *name, LzFound *out, bool *required) {
     *required = false;
@@ -648,8 +651,6 @@ static LzStatus check_overrides(LzVM *vm, const LzClass *cls) {
     return LZ_OK;
 }
 
-/* ---- traits ---- */
-
 LzStatus lz_class_add_trait(LzVM *vm, LzClass *cls, LzClass *trait) {
     for (size_t i = 0; i < cls->trait_count; i++) {
         if (cls->traits[i] == trait) {
@@ -697,7 +698,7 @@ static const LzMember *own_member(const LzClass *cls, const LzString *name) {
     return NULL;
 }
 
-/* A member of the class chain (not of a trait) with this name. */
+/* A member of the class chain, not of a trait, with this name. */
 static bool chain_has(const LzClass *cls, const LzString *name, LzFound *out) {
     for (const LzClass *c = cls; c != NULL; c = c->parent) {
         const LzMember *member = own_member(c, name);
@@ -768,13 +769,16 @@ static LzStatus check_contracts(LzVM *vm, const LzClass *cls, const TraitSet *al
     return LZ_OK;
 }
 
-/* Two traits that give a class the same name (a default, or a default against a requirement). */
+/*
+ * Two traits that give a class the same name, either as a default or as a default against a
+ * requirement.
+ */
 static LzStatus check_conflicts(LzVM *vm, const LzClass *cls, const TraitSet *all) {
     for (size_t t = 0; t < all->count; t++) {
         const LzClass *trait = all->items[t];
         for (size_t m = 0; m < trait->member_count; m++) {
             const LzString *name = trait->members[m].name;
-            /* look at a name once: at the first trait that has it */
+            /* look at a name once, at the first trait that has it */
             bool seen = false;
             for (size_t earlier = 0; earlier < t && !seen; earlier++) {
                 seen = own_member(all->items[earlier], name) != NULL;
@@ -855,9 +859,10 @@ LzStatus lz_class_link(LzVM *vm, LzClass *cls, LzClass *parent) {
     return LZ_OK;
 }
 
-/* ---- instances ---- */
-
-/* What `self` is for the code of the class: the instance, or the error that carries it as payload. */
+/*
+ * What `self` is for the code of the class, which is the instance or the error that carries it
+ * as payload.
+ */
 static LzValue self_of(const LzInstance *instance) {
     return lz_value_object(instance->owner_error != NULL ? instance->owner_error : (LzObject *)&instance->base);
 }
@@ -880,7 +885,10 @@ static LzInstance *instance_alloc(LzVM *vm, LzClass *cls) {
     return instance;
 }
 
-/* What the value is, for "expected X, got Y": a type for containers and literals, else its kind. */
+/*
+ * What the value is, for "expected X, got Y". It's a type for containers and literals, else its
+ * kind.
+ */
 static void describe_actual(const LzType *type, const LzValue *value, const LzWriter *out) {
     if (lz_value_is_array(value) || lz_value_is_dict(value)) {
         LzType shown = lz_type_of_value(value);
@@ -897,7 +905,7 @@ static LzStatus check_field_type(LzVM *vm, const LzClass *cls, const LzMember *m
     const LzType *type = &member->type;
     bool fits;
     if (member->is_link && value->type == LZ_VAL_NIL) {
-        return LZ_OK; /* a link field may always be nil: it means "points at nothing" */
+        return LZ_OK; /* a link field may always be nil, which means "points at nothing" */
     }
     if (lz_value_is_array(value)) {
         LzStatus charged = lz_vm_charge_fuel(vm, lz_array_cost(lz_value_as_array(value)->count));
@@ -932,7 +940,10 @@ LzStatus lz_instance_store(LzVM *vm, LzInstance *instance, const LzMember *membe
                            const LzValue *value) {
     LzClass *cls = instance->cls;
     if (member->is_link) {
-        /* The type is checked against the target, never the cell; links do not make cycles. */
+        /*
+         * The type is checked against the target and never the cell, because links don't make
+         * cycles.
+         */
         LzValue cell = lz_value_nil();
         LzValue made = lz_value_nil();
         LzStatus status = link_value_for(vm, value, &cell, &made);
@@ -984,11 +995,10 @@ LzStatus lz_instance_store(LzVM *vm, LzInstance *instance, const LzMember *membe
 }
 
 
-/* ---- the error for a store that would close a reference cycle ---- */
-
 /*
- * "pub link relation: Person = nil" for the field `member`, written the way it was declared:
- * the line of its declaration when the source is at hand, else built from what the class knows.
+ * "pub link relation: Person = nil" for the field `member`, written the way it was declared.
+ * That's the line of its declaration when the source is at hand, else built from what the class
+ * knows.
  */
 static void link_declaration(const LzVM *vm, const LzMember *member, char *out, size_t size) {
     const char *prefix = member->vis == LZ_VIS_PUB        ? "pub link "
@@ -1045,8 +1055,9 @@ LzStatus lz_vm_cycle_error(LzVM *vm, const LzInstance *instance, const LzMember 
     link_declaration(vm, member, declaration, sizeof declaration);
     lz_vm_set_help(vm, "make the field a link: it points at an object without owning it\n%s", declaration);
     /*
-     * The visual fix: `link ` goes in front of the field's name. Only when the declaration is
-     * known to be there (the name is at the recorded offset), never by guessing.
+     * The visual fix puts `link ` in front of the field's name. It's only done when the
+     * declaration is known to be there, meaning the name is at the recorded offset, and never by
+     * guessing.
      */
     const LzSource *source = vm->trace_source;
     bool placed = source == NULL || (member->offset < source->length &&
@@ -1058,8 +1069,6 @@ LzStatus lz_vm_cycle_error(LzVM *vm, const LzInstance *instance, const LzMember 
     }
     return LZ_ERR_RUNTIME;
 }
-
-/* ---- running script code from C ---- */
 
 static LzStatus call_closure(LzVM *vm, const LzValue *callee, size_t argc, const LzValue *argv,
                              LzValue *result) {
@@ -1126,7 +1135,10 @@ static LzStatus finish_instance(LzVM *vm, LzInstance *instance) {
     return LZ_OK;
 }
 
-/* "signature: Person(name, relation)": the constructor of `cls`, an error's message first. */
+/*
+ * "signature: Person(name, relation)" is the constructor of `cls`, with an error's message
+ * first.
+ */
 static void signature_help(const LzClass *cls, bool with_message, char *out, size_t size) {
     size_t used = (size_t)snprintf(out, size, "signature: %s(", cls->name->data);
     bool first = true;
@@ -1144,7 +1156,10 @@ static void signature_help(const LzClass *cls, bool with_message, char *out, siz
     }
 }
 
-/* Which parameter of the constructor is `name`: a field, public. Fails with the right message. */
+/*
+ * Which parameter of the constructor is `name`, which must be a public field. Fails with the
+ * right message.
+ */
 static LzStatus param_of(LzVM *vm, const LzClass *cls, const LzString *name, size_t *param,
                          const char *callname) {
     for (size_t i = 0; i < cls->param_count; i++) {
@@ -1191,7 +1206,7 @@ static const LzString *name_at(LzVM *vm, const char *names, size_t length, size_
     return *out;
 }
 
-/* `core`: the error value of an error class, which takes the instance as its payload. */
+/* `core` is the error value of an error class, which takes the instance as its payload. */
 static LzStatus construct_impl(LzVM *vm, LzClass *cls, size_t positional, const LzValue *argv,
                                size_t named_count, const char *names, size_t names_length,
                                const LzValue *named, LzError *core, LzValue *result) {
@@ -1201,7 +1216,10 @@ static LzStatus construct_impl(LzVM *vm, LzClass *cls, size_t positional, const 
     }
     if (positional > cls->param_count) {
         if (core != NULL) {
-            /* An error counts its message as the first argument: E takes at most 2 arguments (message, n), got 3 */
+            /*
+             * An error counts its message as the first argument: E takes at most 2 arguments
+             * (message, n), got 3
+             */
             char list[256] = "message";
             size_t used = strlen(list);
             for (size_t i = 0; i < cls->param_count; i++) {
@@ -1267,7 +1285,10 @@ static LzStatus construct_impl(LzVM *vm, LzClass *cls, size_t positional, const 
             status = lz_instance_store(vm, instance, field_at(cls, cls->params[i]), given[i]);
         }
     }
-    /* The rest from their defaults: the parent's fields first, then the class's own, in declaration order. */
+    /*
+     * The rest come from their defaults, with the parent's fields first and then the class's
+     * own, in declaration order.
+     */
     for (size_t slot = 0; slot < cls->field_count && status == LZ_OK; slot++) {
         const LzMember *member = field_at(cls, slot);
         if (((instance->unset >> slot) & 1u) == 0 || member->thunk.type == LZ_VAL_NIL) {
@@ -1305,8 +1326,8 @@ LzStatus lz_class_construct(LzVM *vm, LzClass *cls, size_t positional, const LzV
 }
 
 /*
- * `Kind(message, field..., cause: e, data: v, field: v)`: the message, then the fields, in the
- * order of the class; `cause` and `data` are only ever given by name.
+ * `Kind(message, field..., cause: e, data: v, field: v)` takes the message and then the fields,
+ * in the order of the class. `cause` and `data` are only ever given by name.
  */
 LzStatus lz_error_class_construct(LzVM *vm, LzClass *cls, uint8_t kind, size_t positional,
                                   const LzValue *argv, size_t named_count, const char *names,
@@ -1315,7 +1336,7 @@ LzStatus lz_error_class_construct(LzVM *vm, LzClass *cls, uint8_t kind, size_t p
         return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): wrong number of arguments (%zu given)",
                                lz_vm_error_kind_name(vm, kind), positional);
     }
-    /* Split the named arguments: cause and data are the error's, the rest are fields. */
+    /* Split the named arguments. cause and data are the error's, and the rest are fields. */
     LzValue cause = lz_value_nil();
     LzValue data = lz_value_nil();
     bool seen_cause = false;
@@ -1380,7 +1401,10 @@ LzStatus lz_instance_copy(LzVM *vm, const LzInstance *source, LzValue *result) {
         lz_value_retain(&copy->fields[i]);
         lz_note_container_store(&vm->heap, &copy->fields[i]);
     }
-    /* A link field gets a fresh cell pointing at the same target, so the two objects do not share one. */
+    /*
+     * A link field gets a fresh cell pointing at the same target, so the two objects don't share
+     * one.
+     */
     for (size_t i = 0; i < source->cls->field_count; i++) {
         const LzMember *member = field_at(source->cls, (uint16_t)i);
         if (member->is_link && lz_value_is_link(&copy->fields[i])) {
@@ -1444,7 +1468,10 @@ LzStatus lz_instance_with(LzVM *vm, const LzInstance *source, size_t named_count
     return LZ_OK;
 }
 
-/* A new error with the message, kind, cause and data of `source` and a copy of its payload: no trace, no init. */
+/*
+ * A new error with the message, kind, cause and data of `source` and a copy of its payload. It
+ * has no trace and init doesn't run.
+ */
 static LzStatus error_clone(LzVM *vm, const LzError *source, LzError **out) {
     LzError *error = NULL;
     LzStatus status = lz_error_new(vm, source->kind, source->message->data, source->message->length, &error);
@@ -1593,11 +1620,9 @@ static LzObject *make_native(LzVM *vm, const char *name, LzNativeFn fn, int max_
     return native == NULL ? NULL : &native->base;
 }
 
-/* ---- member access ---- */
-
 /*
- * A link field stores a cell, not the object; reading it gives the target (or nil once the
- * target is gone). Everywhere else in class.c the cell is the field's value, which is just an
+ * A link field stores a cell, not the object, and reading it gives the target, or nil once the
+ * target is gone. Everywhere else in class.c the cell is the field's value, which is just an
  * object with no edges of its own.
  */
 static LzStatus read_field(LzVM *vm, const LzInstance *instance, const LzMember *member, LzValue *out) {
@@ -1615,9 +1640,9 @@ static LzStatus read_field(LzVM *vm, const LzInstance *instance, const LzMember 
 }
 
 /*
- * The cell a link field should hold for `value`: the value itself when it is already a link,
- * link(nil) for nil, and a fresh cell otherwise. *made receives a reference the caller owns when
- * a cell was made (and must release), else nil. Fails with the TypeError of link().
+ * The cell a link field should hold for `value`. That's the value itself when it's already a
+ * link, link(nil) for nil, and a fresh cell otherwise. *made receives a reference the caller
+ * owns and must release when a cell was made, else nil. Fails with the TypeError of link().
  */
 static LzStatus link_value_for(LzVM *vm, const LzValue *value, LzValue *cell, LzValue *made) {
     *made = lz_value_nil();
@@ -1658,7 +1683,7 @@ static LzStatus link_value_for(LzVM *vm, const LzValue *value, LzValue *cell, Lz
     }
     *made = lz_value_object(&link->base);
     *cell = *made;
-    lz_value_retain(cell); /* the caller releases both: `cell` stays in the field, `made` is dropped */
+    lz_value_retain(cell); /* the caller releases both, and `cell` stays in the field while `made` is dropped */
     return LZ_OK;
 }
 
@@ -1762,8 +1787,8 @@ LzStatus lz_vm_ext_get(LzVM *vm, uint64_t owner, const LzValue *target, const Lz
 }
 
 /*
- * A link stands in for its target when a method or an extension is looked up on it, so `n.parent`
- * (a link field) can call the methods of the object it points at.
+ * A link stands in for its target when a method or an extension is looked up on it, so
+ * `n.parent`, a link field, can call the methods of the object it points at.
  */
 static bool as_link_target(const LzValue *value, LzValue *target) {
     if (!lz_value_is_link(value)) {
@@ -1792,7 +1817,10 @@ LzStatus lz_vm_link_member_get(LzVM *vm, uint64_t owner, const LzValue *value, c
         return dead_link_error(vm, LZ_ERR_TYPE);
     }
     if (!lz_value_is_instance(&target)) {
-        /* Only an instance has fields and methods to read through its link: the rest needs .target. */
+        /*
+         * Only an instance has fields and methods to read through its link, and the rest needs
+         * .target.
+         */
         lz_value_release(&vm->heap, &target);
         return lz_vm_link_error(vm);
     }
@@ -1862,7 +1890,10 @@ LzStatus lz_vm_member_set(LzVM *vm, uint64_t owner, const LzValue *target,
     return LZ_OK;
 }
 
-/* Replaces the fallback on top of the stack by `callee` (a new reference, consumed). */
+/*
+ * Replaces the fallback on top of the stack by `callee`, which is a new reference and is
+ * consumed.
+ */
 static LzStatus set_callee(LzVM *vm, size_t index, LzValue callee) {
     LzValue old = vm->stack[index];
     vm->stack[index] = callee;
@@ -1897,12 +1928,16 @@ static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, 
                                 size_t receiver_index) {
     LzValue receiver = vm->stack[receiver_index];
     /*
-     * A method called through a link runs on the target's class, but `self` stays the link in the
-     * receiver slot, so a method that reads its own fields goes through the link like any caller.
+     * A method called through a link runs on the target's class, but `self` stays the link in
+     * the receiver slot, so a method that reads its own fields goes through the link like any
+     * caller.
      */
     LzValue stand = receiver;
     if (lz_value_is_link(&stand)) {
-        /* No retain: the lookup only borrows the target, and it owns nothing when it returns. */
+        /*
+         * No retain, because the lookup only borrows the target and it owns nothing when it
+         * returns.
+         */
         const LzLink *cell = (const LzLink *)stand.as.object;
         stand = cell->target != NULL ? lz_value_object(cell->target) : lz_value_nil();
     }
@@ -1914,7 +1949,7 @@ static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, 
         return lz_vm_link_error(vm); /* copying a cell would not copy the object: read .target first */
     }
     if (lz_value_is_link(&receiver) && lz_value_is_instance(&stand)) {
-        /* `self` is the object, never the cell: the slot takes the (retained) target. */
+        /* `self` is the object and never the cell, so the slot takes the retained target. */
         LzValue target = stand;
         lz_value_retain(&target);
         lz_value_release(&vm->heap, &vm->stack[receiver_index]);
@@ -1956,7 +1991,10 @@ static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, 
                         cls->name->data, cls->name->data, name->data);
         }
     }
-    /* Not a member: with() and copy() belong to every instance, then the builtin methods. */
+    /*
+     * Not a member, so with() and copy() belong to every instance, and then come the builtin
+     * methods.
+     */
     if (strcmp(name->data, "with") == 0 || strcmp(name->data, "copy") == 0) {
         return install_copy_with(vm, name, fallback);
     }
@@ -1981,7 +2019,10 @@ static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, 
 static LzStatus class_callee(LzVM *vm, uint64_t owner, const LzString *name, size_t receiver_index) {
     LzValue receiver = vm->stack[receiver_index];
     if (lz_value_is_link(&receiver)) {
-        /* The class is the target; `self` for a static is the class itself, so the slot becomes it. */
+        /*
+         * The class is the target. `self` for a static is the class itself, so the slot becomes
+         * it.
+         */
         LzValue target = lz_link_deref(lz_value_as_link(&receiver));
         if (target.type == LZ_VAL_NIL) {
             return dead_link_error(vm, LZ_ERR_TYPE);
@@ -2004,7 +2045,7 @@ static LzStatus class_callee(LzVM *vm, uint64_t owner, const LzString *name, siz
     case LZ_MEMBER_STATIC:
     case LZ_MEMBER_METHOD:
     case LZ_MEMBER_CONST:
-        /* The call passes the class as the first argument; the bound callee drops it again. */
+        /* The call passes the class as the first argument, and the bound callee drops it again. */
         return set_bound_callee(vm, receiver_index + 1, &member->value, NULL, true);
     case LZ_MEMBER_FIELD:
     case LZ_MEMBER_GETTER:
@@ -2013,8 +2054,6 @@ static LzStatus class_callee(LzVM *vm, uint64_t owner, const LzString *name, siz
     }
     return LZ_OK;
 }
-
-/* ---- operators ---- */
 
 static uint64_t calling_owner(const LzVM *vm) {
     if (vm->frame_count == 0) {
@@ -2132,7 +2171,7 @@ LzStatus lz_class_binary_operator(LzVM *vm, LzOpCode op, const LzValue *left, co
     return LZ_OK;
 }
 
-/* `a < b`: the operator of a. */
+/* `a < b` uses the operator of a. */
 static LzStatus less_than(LzVM *vm, const LzValue *a, const LzValue *b, bool *answer) {
     LzValue result = lz_value_nil();
     bool found = false;
@@ -2200,7 +2239,7 @@ LzStatus lz_class_negate_operator(LzVM *vm, const LzValue *operand, LzValue *res
     return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operator '-' is not defined for %s", value_class_name(operand));
 }
 
-/* Equality inside a comparison that has no VM argument: the VM comparing is remembered here. */
+/* Equality inside a comparison that has no VM argument, so the VM comparing is remembered here. */
 static LzVM *equal_vm = NULL;
 static LzStatus equal_pending = LZ_OK;
 
@@ -2222,7 +2261,7 @@ bool lz_class_equal_hook(const LzValue *left, const LzValue *right, bool *same) 
     }
     LzVM *vm = equal_vm;
     if (equal_pending != LZ_OK) {
-        *same = false; /* an operator already failed: stop quickly, the error is reported */
+        *same = false; /* an operator already failed, so stop quickly because the error is reported */
         return true;
     }
     LzValue result = lz_value_nil();
@@ -2291,8 +2330,10 @@ LzStatus lz_vm_method_lookup(LzVM *vm, uint64_t owner, const LzString *name, int
                              size_t receiver_index) {
     const LzValue *receiver = &vm->stack[receiver_index];
     if (lz_value_is_link(receiver)) {
-        /* A method call goes to the target's class; the receiver slot keeps the link, which a
-         * field of one of its methods may still read. A dead link has no methods. */
+        /*
+         * A method call goes to the target's class, and the receiver slot keeps the link, which
+         * a field of one of its methods may still read. A dead link has no methods.
+         */
         LzValue target = lz_link_deref(lz_value_as_link(receiver));
         if (target.type != LZ_VAL_OBJECT) {
             if (mode != 0) {
@@ -2355,8 +2396,6 @@ LzStatus lz_vm_method_lookup(LzVM *vm, uint64_t owner, const LzString *name, int
     return set_callee(vm, receiver_index + 1, callee);
 }
 
-/* ---- text ---- */
-
 #define WRITE_DEPTH_MAX 2000
 static unsigned write_depth = 0;
 
@@ -2372,8 +2411,6 @@ static const LzMember *user_text_method(const LzClass *cls, const char *name) {
     }
     return NULL;
 }
-
-/* ---- errors that carry a payload ---- */
 
 static LzInstance *payload_of(const LzValue *value) {
     if (!lz_value_is_error(value)) {
@@ -2441,7 +2478,7 @@ LzStatus lz_error_class_bind(LzVM *vm, LzClass *cls, uint8_t kind, uint8_t paren
         }
     }
     if (cls->trait_count > 0) {
-        /* traits in the head: their contracts and conflicts are checked as for a class */
+        /* traits in the head, whose contracts and conflicts are checked as for a class */
         LzStatus checked = lz_class_finish(vm, cls);
         if (checked != LZ_OK) {
             return checked;

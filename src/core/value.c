@@ -95,7 +95,7 @@ void lz_value_release(LzHeap *heap, const LzValue *value) {
 static bool write_float(double number, const LzWriter *writer) {
     char text[40];
 
-    /* printf spells these differently per platform (and gives NaN a sign): fix the text. */
+    /* printf spells these differently per platform and gives NaN a sign, so fix the text. */
     if (isnan(number)) {
         return lz_writer_write_cstr(writer, "nan");
     }
@@ -184,8 +184,8 @@ static bool write_entry(const LzValue *value, const LzWriter *writer) {
 }
 
 /*
- * Iterative, so a structure nested a million levels deep cannot overflow the C
- * stack. Strings inside an array or a dict are quoted; at the top level they are not.
+ * Iterative, so a structure nested a million levels deep can't overflow the C stack. Strings
+ * inside an array or a dict are quoted, and at the top level they are not.
  */
 static bool write_container(const LzObject *root, const LzWriter *writer) {
     size_t capacity = 16;
@@ -474,7 +474,7 @@ static bool is_number_value(const LzValue *value) {
     return value->type == LZ_VAL_INT || value->type == LZ_VAL_FLOAT;
 }
 
-/* Equality of everything but the contents of arrays (an array equals itself only). */
+/* Equality of everything but the contents of arrays, and an array equals itself only. */
 static bool equal_leaf(const LzValue *left, const LzValue *right) {
     if (is_number_value(left) && is_number_value(right)) {
         return lz_number_order(left, right) == LZ_ORDER_EQUAL;
@@ -501,7 +501,10 @@ static bool equal_leaf(const LzValue *left, const LzValue *right) {
                    memcmp(first->data, second->data, first->length) == 0;
         }
         if (a->type == LZ_OBJ_LINK || b->type == LZ_OBJ_LINK) {
-            /* Two links are equal when they point at the same object; a link and its target are not. */
+            /*
+             * Two links are equal when they point at the same object, and a link and its target
+             * are not.
+             */
             return a->type == LZ_OBJ_LINK && b->type == LZ_OBJ_LINK &&
                    ((const LzLink *)a)->target == ((const LzLink *)b)->target;
         }

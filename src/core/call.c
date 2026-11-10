@@ -16,9 +16,9 @@
 #include "lizard/vm.h"
 
 /*
- * Calls, frames and upvalues. Everything an engine needs to run a user function
- * that is not "execute the next instruction" lives here, so the reference
- * interpreter and the Gecko Engine cannot disagree about what a call means.
+ * Calls, frames and upvalues. Everything an engine needs to run a user function that is not
+ * "execute the next instruction" lives here, so the reference interpreter and the Gecko Engine
+ * can't disagree about what a call means.
  */
 
 static LzStatus malformed(LzVM *vm, const char *what) {
@@ -48,7 +48,10 @@ static const char *plural(size_t n) {
     return n == 1 ? "" : "s";
 }
 
-/* "signature: f(a, b = ..., *rest)": the parameters of `function`, for a call that did not fit. */
+/*
+ * "signature: f(a, b = ..., *rest)" lists the parameters of `function`, for a call that did not
+ * fit.
+ */
 static void signature_help(LzVM *vm, const LzFunction *function) {
     char text[256];
     size_t used = (size_t)snprintf(text, sizeof text, "signature: %s(", lz_function_display_name(function));
@@ -109,11 +112,11 @@ static LzStatus push_frame(LzVM *vm, LzClosure *closure, size_t base, uint64_t s
 }
 
 /*
- * Turns the argc arguments on top of the stack into the parameter slots of function:
- * missing ones become nil (their defaults run in the callee's prologue), and with a
- * rest parameter the surplus is collected into a new array (an empty one when there
- * is no surplus). With strict, too few arguments are an error as well; named
- * arguments may still fill in the required ones, so that check waits for them.
+ * Turns the argc arguments on top of the stack into the parameter slots of function. Missing
+ * ones become nil, and their defaults run in the callee's prologue. With a rest parameter the
+ * surplus is collected into a new array, which is empty when there's no surplus. With strict,
+ * too few arguments are an error as well, but named arguments may still fill in the required
+ * ones, so that check waits for them.
  */
 static LzStatus arrange(LzVM *vm, const LzFunction *function, size_t argc, bool strict) {
     size_t params = function->param_count;
@@ -178,8 +181,11 @@ static LzStatus call_native(LzVM *vm, const LzNative *native, size_t argc) {
 }
 
 
-/* A bound method becomes its function with the receiver as the first argument (or, when it drops
- * the first argument, the function alone). Repeats while the result is another bound method. */
+/*
+ * A bound method becomes its function with the receiver as the first argument, or just the
+ * function when it drops the first argument. This repeats while the result is another bound
+ * method.
+ */
 static LzStatus unwrap_bound(LzVM *vm, size_t callee_index, size_t *argc) {
     while (lz_value_is_bound(&vm->stack[callee_index])) {
         LzBound *bound = (LzBound *)vm->stack[callee_index].as.object;
@@ -270,17 +276,17 @@ LzStatus lz_vm_call(LzVM *vm, size_t argc, size_t resume_ip, uint32_t call_offse
 }
 
 /*
- * The lowest address the nested callbacks may reach. A callback costs 1 to 3 KiB of C stack (more
- * under AddressSanitizer), so the count limit alone cannot protect a small stack. The real end
- * of this thread's stack is asked of the system and 192 KiB are kept back for the work between
- * two checks. Where it cannot be asked, the callbacks get 768 KiB below the first one.
+ * The lowest address the nested callbacks may reach. A callback costs 1 to 3 KiB of C stack,
+ * more under AddressSanitizer, so the count limit alone can't protect a small stack. The real
+ * end of this thread's stack is asked of the system and 192 KiB are kept back for the work
+ * between two checks. Where it can't be asked, the callbacks get 768 KiB below the first one.
  */
 #define C_STACK_MARGIN (192u * 1024u)
 #define C_STACK_FALLBACK (768u * 1024u)
 
 /*
- * Asking the system for the stack of a thread is slow (on Linux it reads /proc/self/maps), so the
- * answer is kept in the VM and used again while the code runs on the same stack.
+ * Asking the system for the stack of a thread is slow, and on Linux it reads /proc/self/maps. So
+ * the answer is kept in the VM and used again while the code runs on the same stack.
  */
 static uintptr_t c_stack_floor(LzVM *vm, uintptr_t now) {
     if (vm->c_stack_hi != 0 && now >= vm->c_stack_lo && now < vm->c_stack_hi) {
@@ -349,7 +355,10 @@ LzStatus lz_vm_call_value(LzVM *vm, const LzValue *callee, size_t argc, const Lz
         return stack_overflow(vm);
     }
 
-    /* Another callback may run between two calls of this native: put the call site back after. */
+    /*
+     * Another callback may run between two calls of this native, so put the call site back
+     * after.
+     */
     uint32_t call_site = vm->native_call_offset;
     size_t base = vm->stack_count;
     lz_value_retain(callee);
@@ -369,7 +378,10 @@ LzStatus lz_vm_call_value(LzVM *vm, const LzValue *callee, size_t argc, const Lz
         size_t failed_at = 0;
         status = lz_vm_run_until(vm, depth, &failed_at);
         if (status != LZ_OK && vm->error_offset == LZ_NO_OFFSET) {
-            /* The innermost failure wins; the engine would otherwise read this offset from the wrong chunk. */
+            /*
+             * The innermost failure wins, because the engine would otherwise read this offset
+             * from the wrong chunk.
+             */
             const LzChunk *failing = vm->frames[vm->frame_count - 1].chunk;
             if (failed_at < failing->count) {
                 vm->error_offset = failing->offsets[failed_at];
@@ -380,8 +392,10 @@ LzStatus lz_vm_call_value(LzVM *vm, const LzValue *callee, size_t argc, const Lz
     vm->native_call_offset = call_site;
     if (status != LZ_OK) {
         if (!vm->trace_fixed) {
-            /* Record the stack while the callback's frames still exist, then take them away:
-             * the engine that called the native expects the frame it ran in on top. */
+            /*
+             * Record the stack while the callback's frames still exist, then take them away,
+             * because the engine that called the native expects the frame it ran in on top.
+             */
             lz_vm_capture_trace(vm);
             vm->trace_fixed = true;
         }
@@ -408,7 +422,7 @@ static void drop_values(LzVM *vm, LzValue *values, size_t count) {
     }
 }
 
-/* The parameter called name[0..length), or -1. The rest parameter cannot be passed by name. */
+/* The parameter called name[0..length), or -1. The rest parameter can't be passed by name. */
 static int find_param(const LzFunction *function, const char *name, size_t length) {
     for (size_t i = 0; i < function->param_count; i++) {
         const LzString *candidate = function->param_names[i];
@@ -419,7 +433,10 @@ static int find_param(const LzFunction *function, const char *name, size_t lengt
     return -1;
 }
 
-/* A named argument that is no parameter: the closest name, then the names there are. */
+/*
+ * A named argument that is no parameter. The error gives the closest name, then the names there
+ * are.
+ */
 static void unknown_argument_help(LzVM *vm, const LzFunction *function, const char *name, size_t length) {
     char text[300];
     size_t used = 0;
@@ -480,7 +497,7 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
                                ((const LzNative *)callee->as.object)->name->data);
     }
 
-    /* Take the named values off the stack; from here on every exit must release them. */
+    /* Take the named values off the stack. From here on every exit must release them. */
     LzValue named[255];
     for (size_t i = 0; i < named_count; i++) {
         named[i] = vm->stack[array_index + 1 + i];
@@ -563,7 +580,7 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
     }
 
     if (makes_error) {
-        /* `Kind("message", cause: e, data: d)`: the named values are what the error keeps. */
+        /* `Kind("message", cause: e, data: d)`, where the named values are what the error keeps. */
         vm->native_call_offset = call_offset;
         LzValue made = lz_value_nil();
         status = lz_error_construct_named(vm, error_kind, count, &vm->stack[callee_index + 1],
@@ -579,7 +596,6 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
         return LZ_OK;
     }
 
-    /* Named arguments: find each one's parameter. */
     LzClosure *closure = lz_value_as_closure(&vm->stack[callee_index]);
     const LzFunction *function = closure->function;
     size_t positional = count < function->param_count ? count : function->param_count;
@@ -653,7 +669,7 @@ LzStatus lz_vm_return(LzVM *vm) {
         return malformed(vm, "stack underflow");
     }
     LzValue result = vm->stack[--vm->stack_count];
-    /* A try left open in this frame (a `return` that skipped its end) dies with the frame. */
+    /* A try left open in this frame, from a `return` that skipped its end, dies with the frame. */
     while (vm->handler_count > 0 && vm->handlers[vm->handler_count - 1].frame >= vm->frame_count - 1) {
         vm->handler_count--;
     }
@@ -663,11 +679,11 @@ LzStatus lz_vm_return(LzVM *vm) {
     }
     vm->stack[vm->stack_count++] = result;
     vm->frame_count--;
-    lz_skink_run(vm); /* the frame's slots are gone: cycles it left behind are dead now */
+    lz_skink_run(vm); /* the frame's slots are gone, so cycles it left behind are dead now */
     return LZ_OK;
 }
 
-/* The open upvalue for this slot, created (and added to the VM's list) when there is none. */
+/* The open upvalue for this slot, created and added to the VM's list when there is none. */
 static LzUpvalue *capture_upvalue(LzVM *vm, LzValue *slot) {
     LzUpvalue *previous = NULL;
     LzUpvalue *current = vm->open_upvalues;
@@ -699,12 +715,12 @@ void lz_vm_close_upvalues(LzVM *vm, size_t level) {
     const LzValue *last = &vm->stack[level];
     while (vm->open_upvalues != NULL && vm->open_upvalues->location >= last) {
         LzUpvalue *upvalue = vm->open_upvalues;
-        lz_value_retain(upvalue->location); /* the stack slot is about to go; this copy stays */
+        lz_value_retain(upvalue->location); /* the stack slot is about to go, but this copy stays */
         upvalue->closed = *upvalue->location;
         upvalue->location = &upvalue->closed;
         vm->open_upvalues = upvalue->next_open;
         upvalue->next_open = NULL;
-        lz_skink_note_closed(vm, upvalue); /* before the list lets go: that may be the last reference */
+        lz_skink_note_closed(vm, upvalue); /* before the list lets go, because that may be the last reference */
         lz_object_release(&vm->heap, &upvalue->base); /* the list's reference */
     }
 }

@@ -8,8 +8,8 @@ typedef enum LzObjType {
     LZ_OBJ_NATIVE,
     LZ_OBJ_ARRAY,
     LZ_OBJ_DICT,
-    LZ_OBJ_FUNCTION, /* the compiled code of a user function; never a value of its own */
-    LZ_OBJ_CLOSURE,  /* a callable user function: a function plus the variables it captured */
+    LZ_OBJ_FUNCTION, /* the compiled code of a user function, never a value of its own */
+    LZ_OBJ_CLOSURE,  /* a callable user function, which is a function plus the variables it captured */
     LZ_OBJ_UPVALUE,  /* a variable shared between a function and the closures that captured it */
     LZ_OBJ_ERROR,    /* an error value: a kind, a message and a trace, see lizard/error.h */
     LZ_OBJ_CLASS,    /* a class declared with `class`, see lizard/class.h */
@@ -19,8 +19,8 @@ typedef enum LzObjType {
 } LzObjType;
 
 /*
- * Header shared by every heap object. The heap keeps all live objects in a
- * doubly linked list so it can account for them and report leaks at shutdown.
+ * Header shared by every heap object. The heap keeps all live objects in a doubly linked list so
+ * it can account for them and report leaks at shutdown.
  */
 typedef struct LzObject {
     struct LzObject *prev;
@@ -29,16 +29,16 @@ typedef struct LzObject {
     uint32_t refcount;
     LzObjType type;
     /*
-     * Owned by the cycle collector (skink.c): while a trial deletion is running, the index + 1 of
-     * this object in the trial's node set, so that finding a node from a pointer is one load and
-     * not a hash lookup. 0 whenever no trial is running; a trial clears every slot it set before
-     * it ends and before it frees anything.
+     * Owned by the cycle collector (skink.c). While a trial deletion is running it's the index + 1
+     * of this object in the trial's node set, so that finding a node from a pointer is one load and
+     * not a hash lookup. It's 0 whenever no trial is running. A trial clears every slot it set
+     * before it ends and before it frees anything.
      */
     uint32_t trial;
     /*
-     * Set while this object is a live link target, so that its release can tell the VM's link
-     * table to drop the reference before the memory goes away. Lives in the padding after
-     * `trial`, so no JIT offset moves.
+     * Set while this object is a live link target, so that its release can tell the VM's link table
+     * to drop the reference before the memory goes away. It lives in the padding after `trial`, so
+     * no JIT offset moves.
      */
     uint8_t linked;
 } LzObject;
@@ -46,10 +46,9 @@ typedef struct LzObject {
 #define LZ_HEAP_UNLIMITED SIZE_MAX
 
 /*
- * limit_bytes caps live_bytes, which counts heap objects (strings, natives and
- * future containers). Tables and chunks owned by the VM or the program are not
- * counted. limit_hit is set when an allocation was refused because of the
- * limit rather than because malloc failed.
+ * limit_bytes caps live_bytes, which counts heap objects such as strings and natives, and future
+ * containers. Tables and chunks owned by the VM or the program are not counted. limit_hit is set
+ * when an allocation was refused because of the limit rather than because malloc failed.
  */
 typedef struct LzHeap {
     LzObject *head;
@@ -64,28 +63,28 @@ typedef struct LzHeap {
     bool draining;
     uint32_t epoch; /* visit stamp for graph walks over arrays, see lz_heap_next_epoch */
     /*
-     * Optional: asked for room before an allocation is refused because of the limit. It
-     * frees what it can (the VM's cycle collector) and the allocation is tried once more.
-     * It is never re-entered, and an allocation can happen anywhere, so it may free only
-     * what nothing references.
+     * Optional. It's asked for room before an allocation is refused because of the limit. It frees
+     * what it can (the VM's cycle collector) and the allocation is tried once more. It's never
+     * re-entered, and an allocation can happen anywhere, so it may free only what nothing
+     * references.
      */
     size_t (*reclaim)(void *context, size_t needed_bytes);
     void *reclaim_context;
     /*
-     * Optional: called every alloc_period object allocations, before the allocation is made,
-     * so that the VM's cycle collector gets a turn in a program that never closes an upvalue.
-     * Allocations are counted by the program, not by the clock, so every engine ticks at the
-     * same allocations. Same rules as reclaim: it may run anywhere, and frees only what
-     * nothing references.
+     * Optional. Called every alloc_period object allocations, before the allocation is made, so
+     * that the VM's cycle collector gets a turn in a program that never closes an upvalue.
+     * Allocations are counted by the program and not by the clock, so every engine ticks at the
+     * same allocations. The rules are the same as reclaim, so it may run anywhere and frees only
+     * what nothing references.
      */
     void (*on_alloc)(void *context);
     void *on_alloc_context;
     uint32_t alloc_period;
     uint32_t alloc_countdown;
-    bool in_hook; /* a hook is running: neither is re-entered */
+    bool in_hook; /* a hook is running, so neither is re-entered */
     /*
-     * Optional: called with an object whose `linked` bit is set, just before it is finalized,
-     * so the VM can empty the links that point at it while its memory is still valid.
+     * Optional. Called with an object whose `linked` bit is set, just before it's finalized, so the
+     * VM can empty the links that point at it while its memory is still valid.
      */
     void (*on_link_freed)(void *context, LzObject *object);
     void *on_link_freed_context;
@@ -96,30 +95,36 @@ void lz_heap_init(LzHeap *heap);
 /* Frees every object still alive. Callers read live_objects first to detect leaks. */
 void lz_heap_destroy(LzHeap *heap);
 
-/* Returns an object with refcount 1, or NULL when out of memory or over the limit. size includes the header. */
+/*
+ * Returns an object with refcount 1, or NULL when out of memory or over the limit. size includes
+ * the header.
+ */
 void *lz_heap_alloc(LzHeap *heap, LzObjType type, size_t size);
 
 /*
- * Releases whatever references a dying object holds. Implemented in value.c,
- * which knows every object layout; the heap itself stays layout-agnostic.
+ * Releases whatever references a dying object holds. Implemented in value.c, which knows every
+ * object layout, so the heap itself stays layout-agnostic.
  */
 void lz_object_finalize(LzHeap *heap, LzObject *object);
 
 /*
- * Accounts for memory a heap object owns outside its own block (an array's
- * item buffer). Fails, and sets limit_hit, when it would pass the limit.
- * Every successful charge is paired with an uncharge of the same size.
+ * Accounts for memory a heap object owns outside its own block, like an array's item buffer. Fails
+ * and sets limit_hit when it would pass the limit. Every successful charge is paired with an
+ * uncharge of the same size.
  */
 bool lz_heap_charge(LzHeap *heap, size_t bytes);
 void lz_heap_uncharge(LzHeap *heap, size_t bytes);
 
-/* A fresh stamp for a walk over arrays; arrays marked with it have been visited. */
+/* A fresh stamp for a walk over arrays. Arrays marked with it have been visited. */
 uint32_t lz_heap_next_epoch(LzHeap *heap);
 
 void lz_object_retain(LzObject *object);
 void lz_object_release(LzHeap *heap, LzObject *object);
 
-/* free(), except in poison mode (LZ_POISON), where the block is filled with 0xDD and quarantined. */
+/*
+ * free(), except in poison mode (LZ_POISON), where the block is filled with 0xDD and
+ * quarantined.
+ */
 void lz_free_sized(void *block, size_t size);
 
 #endif

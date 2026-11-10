@@ -16,6 +16,9 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->array_types = NULL;
     vm->array_type_count = 0;
     vm->array_type_capacity = 0;
+    vm->fn_types = NULL;
+    vm->fn_type_count = 0;
+    vm->fn_type_capacity = 0;
     vm->stack_count = 0;
     vm->frame_count = 0;
     vm->open_upvalues = NULL;
@@ -90,7 +93,7 @@ LzStatus lz_vm_out_of_memory(LzVM *vm) {
 void lz_vm_reset_stack(LzVM *vm) {
     vm->handler_count = 0;
     if (vm->thrown.type != LZ_VAL_NIL) {
-        /* The run failed with this error: keep it, a report wants its causes. */
+        /* The run failed with this error, so keep it because a report wants its causes. */
         LzValue old = vm->last_thrown;
         vm->last_thrown = vm->thrown;
         vm->thrown = lz_value_nil();
@@ -128,7 +131,7 @@ void lz_vm_release_roots(LzVM *vm) {
         lz_object_release(&vm->heap, vm->native_copy);
         vm->native_copy = NULL;
     }
-    lz_skink_sweep(vm); /* cycles that were only waiting for their last holder; arrays still read their types */
+    lz_skink_sweep(vm); /* cycles that were only waiting for their last holder, and arrays still read their types */
     for (size_t i = 0; i < vm->array_type_count; i++) {
         free(vm->array_types[i]);
     }
@@ -136,6 +139,13 @@ void lz_vm_release_roots(LzVM *vm) {
     vm->array_types = NULL;
     vm->array_type_count = 0;
     vm->array_type_capacity = 0;
+    for (size_t i = 0; i < vm->fn_type_count; i++) {
+        free(vm->fn_types[i]);
+    }
+    free(vm->fn_types);
+    vm->fn_types = NULL;
+    vm->fn_type_count = 0;
+    vm->fn_type_capacity = 0;
 }
 
 void lz_vm_free(LzVM *vm) {

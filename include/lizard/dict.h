@@ -4,12 +4,12 @@
 #include "lizard/type.h"
 #include "lizard/vm.h"
 
-/* Hard cap on the number of entries, so one script cannot ask for gigabytes. */
+/* Hard cap on the number of entries, so one script can't ask for gigabytes. */
 #define LZ_DICT_MAX_LENGTH ((size_t)1 << 22)
 
 /*
- * One entry in insertion order. `hash` is the key's hash, so a resize or a
- * lookup never hashes the same key twice.
+ * One entry in insertion order. `hash` is the key's hash, so a resize or a lookup never hashes
+ * the same key twice.
  */
 typedef struct LzDictEntry {
     LzValue key;
@@ -18,11 +18,11 @@ typedef struct LzDictEntry {
 } LzDictEntry;
 
 /*
- * An ordered map. `entries` is dense in insertion order, which is the order the
- * dict prints, compares and iterates in; `slots` is an open-addressing index into
- * it (0 = empty, otherwise entry index + 1). Overwriting a key keeps its place;
- * removing one shifts the entries after it down, so a key added again lands at
- * the end. Keys are strings, ints or bools only.
+ * An ordered map. `entries` is dense in insertion order, which is the order the dict prints,
+ * compares and iterates in. `slots` is an open-addressing index into it, where 0 is empty and
+ * anything else is entry index + 1. Overwriting a key keeps its place, and removing one shifts the
+ * entries after it down, so a key added again lands at the end. Keys are strings, ints or bools
+ * only.
  */
 typedef struct LzDict {
     LzObject base;
@@ -31,11 +31,11 @@ typedef struct LzDict {
     size_t capacity;
     uint32_t *slots;
     size_t slot_capacity; /* a power of two, at least twice the count */
-    uint64_t seed;        /* per-dict hash seed, so one script cannot flood the table */
+    uint64_t seed;        /* per-dict hash seed, so one script can't flood the table */
     uint32_t mark;        /* graph-walk stamp, see lz_heap_next_epoch */
     size_t holders;       /* how many containers currently hold this dict */
-    const struct LzType *key_type;   /* NULL = any key kind */
-    const struct LzType *value_type; /* NULL = any value */
+    const struct LzType *key_type;   /* NULL means any key kind */
+    const struct LzType *value_type; /* NULL means any value */
 } LzDict;
 
 static inline bool lz_value_is_dict(const LzValue *value) {
@@ -46,7 +46,7 @@ static inline LzDict *lz_value_as_dict(const LzValue *value) {
     return (LzDict *)value->as.object;
 }
 
-/* An array, a dict or an instance: the values reference cycles can run through. */
+/* An array, a dict or an instance, which are the values reference cycles can run through. */
 static inline bool lz_value_is_container(const LzValue *value) {
     return value->type == LZ_VAL_OBJECT &&
            (value->as.object->type == LZ_OBJ_ARRAY || value->as.object->type == LZ_OBJ_DICT ||
@@ -65,19 +65,19 @@ LzValue *lz_dict_get(const LzDict *dict, const LzValue *key);
 /* The entry index of key, or SIZE_MAX when it is absent. */
 size_t lz_dict_index_of(const LzDict *dict, const LzValue *key);
 
-/* d[key] = value: adds, or overwrites in place. Checked (key kind, type, cycle, fuel). */
+/* d[key] = value. Adds, or overwrites in place. Checked for key kind, type, cycle and fuel. */
 LzStatus lz_dict_set(LzVM *vm, LzDict *dict, const LzValue *key, const LzValue *value);
 
-/* Removes key; *out receives the reference the dict held. Fails when it is absent. */
+/* Removes key and *out receives the reference the dict held. Fails when it's absent. */
 LzStatus lz_dict_remove(LzVM *vm, LzDict *dict, const LzValue *key, LzValue *out);
 
 /* Releases every entry. The buffers are kept. */
 void lz_dict_clear(LzHeap *heap, LzDict *dict);
 
 /*
- * Makes `dict` obey (keys, values) (NULL = any): every entry must fit, and so
- * must every later store. False when an entry does not, or the dict is already
- * restricted to unrelated types.
+ * Makes `dict` obey (keys, values), where NULL means any. Every entry must fit, and so must
+ * every later store. False when an entry doesn't, or the dict is already restricted to unrelated
+ * types.
  */
 bool lz_dict_conform(LzDict *dict, const LzType *keys, const LzType *values);
 
@@ -87,10 +87,10 @@ bool lz_dict_value_fits(const LzDict *dict, const LzValue *value);
 /* Shallow copy, keeping the key and value types. *result is a new reference. */
 LzStatus lz_dict_copy(LzVM *vm, const LzDict *dict, LzValue *result);
 
-/* a merged with b: b wins on a shared key, the result is new, a's order then b's. */
+/* a merged with b. b wins on a shared key, the result is new, and the order is a's and then b's. */
 LzStatus lz_dict_merge(LzVM *vm, const LzDict *a, const LzDict *b, LzValue *result);
 
-/* New arrays: the keys in order, the values in order, and a [key, value] pair per entry. */
+/* New arrays of the keys in order, the values in order, and a [key, value] pair per entry. */
 LzStatus lz_dict_keys(LzVM *vm, const LzDict *dict, LzValue *result);
 LzStatus lz_dict_values(LzVM *vm, const LzDict *dict, LzValue *result);
 LzStatus lz_dict_items(LzVM *vm, const LzDict *dict, LzValue *result);
@@ -110,7 +110,7 @@ LzStatus lz_vm_dict_key_error(LzVM *vm, const LzDict *dict, const LzValue *key, 
 /* The key as a message shows it: strings quoted, numbers and bools bare. */
 void lz_dict_write_key(const LzValue *key, const LzWriter *out);
 
-/* Fuel for a pass over n entries: one unit per 8. */
+/* Fuel for a pass over n entries, one unit per 8. */
 static inline uint64_t lz_dict_cost(size_t n) {
     return (uint64_t)n / 8;
 }

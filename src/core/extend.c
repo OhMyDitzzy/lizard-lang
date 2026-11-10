@@ -1,5 +1,5 @@
 /*
- * `extend Target { ... }`: methods and properties added to a type that already exists.
+ * `extend Target { ... }` adds methods and properties to a type that already exists.
  *
  * Each block is a hidden class (LzClass.is_ext) kept in vm->exts once its statement has run. The
  * block is also the "class" its code is written in, so the private members of a block are visible
@@ -40,7 +40,10 @@ bool lz_ext_find_kind(const LzVM *vm, uint16_t kind, const LzString *name, LzFou
     return false;
 }
 
-/* For a value: the extensions of its kind; for an error also those of its kind of error and its ancestors. */
+/*
+ * For a value, the extensions of its kind. For an error also those of its kind of error and its
+ * ancestors.
+ */
 bool lz_ext_find_value(const LzVM *vm, const LzValue *value, const LzString *name, LzFound *out) {
     uint16_t kind = lz_kind_of(value);
     if (kind == LZ_KIND_ERROR) {
@@ -112,7 +115,10 @@ LzStatus lz_vm_extend_register(LzVM *vm, LzClass *ext, const LzValue *target) {
     uint8_t error_kind = 0;
     if (target != NULL && target->type == LZ_VAL_OBJECT && target->as.object->type == LZ_OBJ_NATIVE &&
         lz_native_error_kind((const LzNative *)target->as.object, &error_kind)) {
-        /* An error kind (Error, ValueError, one of the script's): its errors and those of its descendants. */
+        /*
+         * An error kind, like Error, ValueError or one of the script's, covers its errors and
+         * those of its descendants.
+         */
         ext->ext_error_kind = (uint16_t)error_kind + 1;
         for (size_t m = 0; m < ext->member_count; m++) {
             const LzString *name = ext->members[m].name;

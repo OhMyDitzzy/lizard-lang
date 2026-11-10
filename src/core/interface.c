@@ -19,6 +19,8 @@ struct LzIfaceSig {
     char *result;
     bool result_declared;
     bool variadic;
+    char **type_params; /* `T`, `U` of a generic function, in order */
+    size_t type_param_count;
 };
 
 struct LzIfaceMember {
@@ -61,7 +63,7 @@ static char *copy_text(const char *text) {
     return copy;
 }
 
-/* Replaces *slot by a copy of text; false (slot unchanged) when out of memory. */
+/* Replaces *slot by a copy of text. False, with slot unchanged, when out of memory. */
 static bool assign_text(char **slot, const char *text) {
     char *copy = copy_text(text);
     if (copy == NULL) {
@@ -71,8 +73,6 @@ static bool assign_text(char **slot, const char *text) {
     *slot = copy;
     return true;
 }
-
-/* ---- Building ---- */
 
 LzInterface *lz_iface_new(void) {
     return calloc(1, sizeof(LzInterface));
@@ -87,6 +87,10 @@ void lz_iface_sig_free(LzIfaceSig *sig) {
         free(sig->params[i].type);
     }
     free(sig->params);
+    for (size_t i = 0; i < sig->type_param_count; i++) {
+        free(sig->type_params[i]);
+    }
+    free(sig->type_params);
     free(sig->result);
     free(sig);
 }
@@ -243,7 +247,27 @@ LzIfaceSig *lz_iface_sig_clone(const LzIfaceSig *sig) {
         lz_iface_sig_free(copy);
         return NULL;
     }
+    for (size_t i = 0; i < sig->type_param_count; i++) {
+        if (!lz_iface_sig_add_type_param(copy, sig->type_params[i])) {
+            lz_iface_sig_free(copy);
+            return NULL;
+        }
+    }
     return copy;
+}
+
+bool lz_iface_sig_add_type_param(LzIfaceSig *sig, const char *name) {
+    char **grown = realloc(sig->type_params, (sig->type_param_count + 1) * sizeof *grown);
+    if (grown == NULL) {
+        return false;
+    }
+    sig->type_params = grown;
+    char *copy = copy_text(name);
+    if (copy == NULL) {
+        return false;
+    }
+    sig->type_params[sig->type_param_count++] = copy;
+    return true;
 }
 
 bool lz_iface_sig_add_param(LzIfaceSig *sig, const char *name, const char *type, bool has_default, bool is_rest) {
@@ -280,8 +304,6 @@ bool lz_iface_sig_set_result(LzIfaceSig *sig, const char *type, bool declared) {
     sig->result_declared = declared;
     return true;
 }
-
-/* ---- Reading ---- */
 
 const LzInterface *lz_interface_of(const struct LzChunk *chunk) {
     return chunk != NULL ? chunk->iface : NULL;
@@ -427,6 +449,14 @@ bool lz_interface_sig_param_is_rest(const LzIfaceSig *sig, size_t index) {
 
 bool lz_interface_sig_is_variadic(const LzIfaceSig *sig) {
     return sig->variadic;
+}
+
+size_t lz_interface_sig_type_param_count(const LzIfaceSig *sig) {
+    return sig->type_param_count;
+}
+
+const char *lz_interface_sig_type_param_name(const LzIfaceSig *sig, size_t index) {
+    return index < sig->type_param_count ? sig->type_params[index] : "";
 }
 
 const char *lz_interface_sig_result(const LzIfaceSig *sig) {

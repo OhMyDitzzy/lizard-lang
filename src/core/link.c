@@ -6,15 +6,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* The heap hook: the VM is the context, the object is the link target that is about to die. */
+/*
+ * The heap hook, where the VM is the context and the object is the link target that is about to
+ * die.
+ */
 void lz_link_release_hook(void *context, LzObject *object) {
     lz_link_target_freed((LzVM *)context, object);
 }
 
 /*
- * The link table: a hash of target -> the cells that point at it. Only fields declared `link`
- * and calls of link() add rows, so the table is small next to the heap; each operation touches
- * one bucket and one row, whatever the heap holds. Rows are allocated here (not on the heap).
+ * The link table, a hash from target to the cells that point at it. Only fields declared `link`
+ * and calls of link() add rows, so the table is small next to the heap. Each operation touches
+ * one bucket and one row, whatever the heap holds. Rows are allocated here and not on the heap.
  */
 static size_t link_hash(const LzObject *target, size_t buckets) {
     uintptr_t value = (uintptr_t)target;
@@ -62,7 +65,7 @@ static LzLinkRow *row_find(const LzVM *vm, const LzObject *target) {
     return row;
 }
 
-/* Grows the bucket array; a failure leaves the table as it was (rows stay reachable). */
+/* Grows the bucket array. A failure leaves the table as it was and the rows stay reachable. */
 static void table_grow(LzVM *vm) {
     size_t capacity = vm->link_bucket_count == 0 ? 16 : vm->link_bucket_count * 2;
     LzLinkRow **buckets = calloc(capacity, sizeof *buckets);
@@ -84,7 +87,7 @@ static void table_grow(LzVM *vm) {
     vm->link_bucket_count = capacity;
 }
 
-/* Test hook: when N > 0, the Nth next attempt to make a row fails as if malloc had. */
+/* Test hook. When N > 0, the Nth next attempt to make a row fails as if malloc had. */
 int lz_link_fail_next_row = 0;
 
 static bool row_alloc_fails(void) {
@@ -100,7 +103,7 @@ bool lz_link_track(LzVM *vm, LzLink *link) {
         return true;
     }
     if (vm->link_count >= vm->link_bucket_count * 2) {
-        table_grow(vm); /* may fail: the chains just get longer */
+        table_grow(vm); /* may fail, and then the chains just get longer */
     }
     LzLinkRow *row = row_find(vm, target);
     if (row == NULL) {
@@ -110,7 +113,10 @@ bool lz_link_track(LzVM *vm, LzLink *link) {
         row = row_alloc_fails() ? NULL : malloc(sizeof *row);
         if (row == NULL || vm->link_bucket_count == 0) {
             free(row);
-            /* Not registered, so it could never be emptied: it must not point at the target. */
+            /*
+             * Not registered, so it could never be emptied, and so it must not point at the
+             * target.
+             */
             link->target = NULL;
             link->next = NULL;
             return false;
@@ -133,9 +139,9 @@ bool lz_link_track(LzVM *vm, LzLink *link) {
 
 /*
  * Removes a dying cell from the table. Counts change only when the cell is really found in its
- * target's row. A cell whose target is NULL (emptied, or never registered) is not in the table.
- * Invariant: a row exists only for a live target, so while the row is found, `target` is live
- * and may be touched; the target is never read when no row is found.
+ * target's row. A cell whose target is NULL, because it was emptied or never registered, is not in
+ * the table. Invariant: a row exists only for a live target, so while the row is found, `target` is
+ * live and may be touched. The target is never read when no row is found.
  */
 void lz_link_forget(LzVM *vm, LzLink *link) {
     LzObject *target = link->target;
@@ -172,7 +178,7 @@ void lz_link_forget(LzVM *vm, LzLink *link) {
     if (row->count != 0) {
         return;
     }
-    /* The last cell of this target is gone: drop the row and the (live) target's bit. */
+    /* The last cell of this target is gone, so drop the row and the live target's bit. */
     *at = row->next;
     free(row);
     if (vm->link_targets != 0) {
@@ -219,8 +225,8 @@ void lz_link_target_freed(LzVM *vm, LzObject *object) {
 
 /*
  * Called by lz_vm_free after lz_heap_destroy, which freed every remaining object without
- * emptying the cells: cells and targets are dangling by now. This function therefore frees rows
- * and the bucket array only and must never read a row's target or a cell.
+ * emptying the cells, so cells and targets are dangling by now. This function therefore frees
+ * rows and the bucket array only and must never read a row's target or a cell.
  */
 void lz_link_table_free(LzVM *vm) {
     for (size_t i = 0; i < vm->link_bucket_count; i++) {
@@ -254,8 +260,6 @@ LzValue lz_link_deref(const LzLink *link) {
     return value;
 }
 
-/* ---- the invariant checker (tests and fuzzing; O(heap + table)) ---- */
-
 static int pointer_cmp(const void *a, const void *b) {
     const void *x = *(const void *const *)a;
     const void *y = *(const void *const *)b;
@@ -281,7 +285,7 @@ bool lz_link_check(const LzVM *vm) {
     }
     const void **heap_ptrs = malloc((heap_count != 0 ? heap_count : 1) * sizeof *heap_ptrs);
     if (heap_ptrs == NULL) {
-        return true; /* cannot check; not a violation */
+        return true; /* cannot check, and that's not a violation */
     }
     size_t at = 0;
     for (const LzObject *o = vm->heap.head; o != NULL; o = o->next) {

@@ -1,0 +1,37 @@
+# Function types: say what a callback looks like, and the compiler checks it.
+
+type Pred = fn(int) -> bool
+
+fn apply(f: fn(int) -> int, x: int) -> int {
+    return f(x)
+}
+
+fn filter(xs: int[], keep: Pred) -> int[] {
+    let out: int[] = []
+    for x in xs {
+        if keep(x) { out.push(x) }
+    }
+    return out
+}
+
+fn double(n: int) -> int { return n * 2 }
+
+println(apply(double, 4))                              # 8
+println(apply(fn(n) => n + 1, 4))                      # 5
+println(filter([1, 2, 3, 4, 5, 6], fn(n) => n % 2 == 0))   # [2, 4, 6]
+
+# `fn(int)` without `->` does not care what comes back; plain `fn` is any function.
+fn each(xs: int[], f: fn(int)) {
+    for x in xs { f(x) }
+}
+each([1, 2], fn(n) => println($"item {n}"))
+
+# A function or nil: parenthesise a type that has a result.
+let hook: (fn(int) -> int)? = nil
+println(hook == nil)                                   # true
+
+# Uncomment either line to see the compiler stop before anything runs:
+# fn shout(s: string) -> int { return s.len() }
+# println(apply(shout, 4))     # parameter 1 takes string, but it will be given int
+# fn add(a: int, b: int) -> int { return a + b }
+# println(apply(add, 4))       # this takes 2 arguments, but 1 will be passed

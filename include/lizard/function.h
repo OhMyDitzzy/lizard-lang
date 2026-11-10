@@ -6,31 +6,31 @@
 /*
  * User-defined functions.
  *
- * Three heap objects cooperate:
+ * Three heap objects cooperate.
  *
- *   LzFunction  the compiled code of one `fn`: its own chunk, its signature and
- *               which variables of the enclosing functions it captures. It is
- *               immutable after compilation and only ever appears in a chunk's
- *               constant table (OP_CLOSURE builds a callable from it).
- *   LzClosure   what a script can hold and call (kind `function`): a function
- *               plus the upvalues it captured. A function that captures nothing
- *               is created once, at compile time, and used as a plain constant.
- *   LzUpvalue   one captured variable. While the variable's frame is alive the
- *               upvalue points at the stack slot itself (open), so the frame and
- *               every closure see the same variable. When the frame ends the
- *               value moves into the upvalue (closed).
+ * LzFunction is the compiled code of one `fn`, with its own chunk, its signature and which
+ * variables of the enclosing functions it captures. It's immutable after compilation and only ever
+ * appears in a chunk's constant table, and OP_CLOSURE builds a callable from it.
  *
- * Calling convention: the callee sits on the stack, the arguments above it. The
- * new frame's slot 0 is the first argument, so locals are addressed relative to
- * the frame base (OP_GET_LOCAL slot -> stack[base + slot]). Parameters come
- * first, then the rest array if there is one, then the function's own locals.
+ * LzClosure is what a script can hold and call (kind `function`), which is a function plus the
+ * upvalues it captured. A function that captures nothing is created once at compile time and used
+ * as a plain constant.
+ *
+ * LzUpvalue is one captured variable. While the variable's frame is alive the upvalue points at
+ * the stack slot itself (open), so the frame and every closure see the same variable. When the
+ * frame ends the value moves into the upvalue (closed).
+ *
+ * The callee sits on the stack with the arguments above it. The new frame's slot 0 is the first
+ * argument, so locals are addressed relative to the frame base, and OP_GET_LOCAL slot means
+ * stack[base + slot]. Parameters come first, then the rest array if there is one, then the
+ * function's own locals.
  */
 
-#define LZ_MAX_PARAMS 64 /* positional parameters; one more slot holds a rest array */
+#define LZ_MAX_PARAMS 64 /* positional parameters, and one more slot holds a rest array */
 #define LZ_MAX_UPVALUES 256
 
 typedef struct LzUpvalueDesc {
-    uint16_t index; /* is_local: slot in the enclosing frame; else: upvalue of the enclosing closure */
+    uint16_t index; /* slot in the enclosing frame if is_local, else the upvalue of the enclosing closure */
     bool is_local;
 } LzUpvalueDesc;
 
@@ -45,23 +45,23 @@ typedef struct LzFunction {
     LzUpvalueDesc *upvalues;
     LzString **param_names; /* param_count entries, plus the rest parameter's name when has_rest */
     uint32_t offset;        /* source offset of the definition, for diagnostics */
-    LzString *owner;        /* the class whose body this was compiled in (retained), or NULL */
-    uint64_t owner_id;      /* that class's LzClass.id (0 when owner is NULL): what visibility compares */
+    LzString *owner;        /* the class whose body this was compiled in, retained, or NULL */
+    uint64_t owner_id;      /* that class's LzClass.id, or 0 when owner is NULL. This is what visibility compares */
     /*
-     * Opaque per-function data owned by an execution engine (the Gecko Engine keeps
-     * its translated program here). Released through engine_cache_free.
+     * Opaque per-function data owned by an execution engine. The Gecko Engine keeps its translated
+     * program here. Released through engine_cache_free.
      */
     void *engine_cache;
     void (*engine_cache_free)(void *cache);
 } LzFunction;
 
-/* A link of the cycle collector's watch lists (skink.h). next == NULL: on no list. */
+/* A link of the cycle collector's watch lists, see skink.h. next == NULL means it's on no list. */
 typedef struct LzWatchLink {
     struct LzWatchLink *prev;
     struct LzWatchLink *next;
 } LzWatchLink;
 
-/* Needs no list head: the lists are circular, so a neighbour is all there is to patch. */
+/* Needs no list head, because the lists are circular and a neighbour is all there is to patch. */
 static inline void lz_watch_unlink(LzWatchLink *link) {
     link->prev->next = link->next;
     link->next->prev = link->prev;
@@ -71,23 +71,23 @@ static inline void lz_watch_unlink(LzWatchLink *link) {
 
 typedef struct LzUpvalue {
     LzObject base;
-    LzValue *location; /* the stack slot while open, &closed afterwards */
+    LzValue *location; /* the stack slot while open, and &closed afterwards */
     LzValue closed;
     struct LzUpvalue *next_open; /* the VM's list of open upvalues, highest slot first */
-    LzWatchLink watch;           /* last: the engines address the fields above by offset */
+    LzWatchLink watch;           /* last, because the engines address the fields above by offset */
 } LzUpvalue;
 
 typedef struct LzClosure {
     LzObject base;
     LzFunction *function;
     uint16_t upvalue_count;
-    LzUpvalue *upvalues[]; /* upvalue_count entries; NULL only while being built */
+    LzUpvalue *upvalues[]; /* upvalue_count entries, and NULL only while being built */
 } LzClosure;
 
-/* The function holds its own references to name (may be NULL). NULL when out of memory. */
+/* The function holds its own references to name, which may be NULL. NULL when out of memory. */
 LzFunction *lz_function_new(LzHeap *heap, LzString *name);
 
-/* Sets the parameter names (retained). param_count entries plus one when has_rest. */
+/* Sets the parameter names, retained. There are param_count entries, plus one when has_rest. */
 bool lz_function_set_params(LzFunction *function, LzString *const *names, size_t param_count,
                             size_t required, bool has_rest);
 
@@ -96,7 +96,7 @@ bool lz_function_set_upvalues(LzFunction *function, const LzUpvalueDesc *descs, 
 /* Retains function. The upvalue slots start out NULL. NULL when out of memory. */
 LzClosure *lz_closure_new(LzHeap *heap, LzFunction *function);
 
-/* A new open upvalue for the slot, with refcount 1 (the VM's list owns that reference). */
+/* A new open upvalue for the slot, with refcount 1 that the VM's list owns. */
 LzUpvalue *lz_upvalue_new(LzHeap *heap, LzValue *slot);
 
 static inline bool lz_value_is_closure(const LzValue *value) {
@@ -116,9 +116,9 @@ static inline size_t lz_function_slots(const LzFunction *function) {
 }
 
 /*
- * Frees what the function owns outside its own block. With release_refs the
- * references it holds are released as well; the heap passes false when it frees
- * leaked objects wholesale, because the objects they point at are freed too.
+ * Frees what the function owns outside its own block. With release_refs the references it holds
+ * are released as well. The heap passes false when it frees leaked objects wholesale, because the
+ * objects they point at are freed too.
  */
 void lz_function_free_storage(LzHeap *heap, LzFunction *function, bool release_refs);
 

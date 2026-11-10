@@ -1,5 +1,7 @@
 #include <string.h>
 
+#include "lizard/array.h"
+#include "lizard/builtin.h"
 #include "lizard/type.h"
 #include "test_util.h"
 
@@ -303,6 +305,105 @@ static void test_value_helpers(void) {
     check_assign(&of_five, &integer, LZ_ASSIGN_ALWAYS);
 }
 
+static LzType fn_of(LzVM *vm, size_t count, const LzType *params, const LzType *result) {
+    const LzType *pointers[4];
+    for (size_t i = 0; i < count; i++) {
+        pointers[i] = &params[i];
+    }
+    LzType out;
+    LZ_CHECK(lz_vm_fn_of(vm, count, count, false, pointers, result, NULL, &out) == LZ_OK);
+    return out;
+}
+
+static void test_function_types(void) {
+    LzVM vm;
+    LzBuffer out = {0};
+    LzBuffer err = {0};
+    lz_vm_init(&vm, lz_writer_from_buffer(&out), lz_writer_from_buffer(&err));
+    LzType integer = kinds(LZ_KIND_INT);
+    LzType text = kinds(LZ_KIND_STRING);
+    LzType boolean = kinds(LZ_KIND_BOOL);
+    LzType number = kinds(LZ_KINDS_NUMBER);
+    LzType anything = kinds(LZ_KINDS_ANY);
+    LzType plain = kinds(LZ_KIND_FUNCTION);
+
+    /* equality and hash: equal signatures are the same interned pointer */
+    LzType params_is[] = {integer, text};
+    LzType a = fn_of(&vm, 2, params_is, &boolean);
+    LzType b = fn_of(&vm, 2, params_is, &boolean);
+    LZ_CHECK(a.fn == b.fn && a.fn != NULL);
+    LZ_CHECK(lz_type_equal(&a, &b) && lz_type_hash(&a) == lz_type_hash(&b));
+    LzType c = fn_of(&vm, 2, params_is, &integer);
+    LZ_CHECK(!lz_type_equal(&a, &c));
+    LZ_CHECK(!lz_type_equal(&a, &plain));
+    LzType one[] = {integer};
+    LzType d = fn_of(&vm, 1, one, NULL);
+    LzType e = fn_of(&vm, 1, one, &anything); /* a result of `any` is the same as none */
+    LZ_CHECK(d.fn == e.fn && d.fn->result == NULL);
+
+    /* describe */
+    LZ_CHECK(described_as(&a, "fn(int, string) -> bool"));
+    LZ_CHECK(described_as(&d, "fn(int)"));
+    LzType nil = kinds(LZ_KIND_NIL);
+    LzType maybe;
+    LZ_CHECK(lz_type_union(&maybe, &a, &nil));
+    LZ_CHECK(described_as(&maybe, "nil | (fn(int, string) -> bool)"));
+    LzType list;
+    LZ_CHECK(lz_vm_array_of(&vm, &a, &list) == LZ_OK);
+    LZ_CHECK(described_as(&list, "(fn(int, string) -> bool)[]"));
+
+    /* assignable: plain function accepts all, always; unknown shape into a signature is maybe */
+    check_assign(&a, &plain, LZ_ASSIGN_ALWAYS);
+    check_assign(&plain, &a, LZ_ASSIGN_MAYBE);
+    check_assign(&a, &a, LZ_ASSIGN_ALWAYS);
+    check_assign(&a, &integer, LZ_ASSIGN_NEVER);
+    /* a different parameter count never fits */
+    check_assign(&a, &d, LZ_ASSIGN_NEVER);
+    /* contravariant parameters: a function taking number serves where int is passed */
+    LzType takes_number[] = {number};
+    LzType wide = fn_of(&vm, 1, takes_number, &integer);
+    LzType wants_int_to_number_params[] = {integer};
+    LzType narrow_target = fn_of(&vm, 1, wants_int_to_number_params, &number);
+    check_assign(&wide, &narrow_target, LZ_ASSIGN_ALWAYS);
+    /* ...and not the other way round: int-only function where numbers may be passed */
+    LzType wants_number[] = {number};
+    LzType number_target = fn_of(&vm, 1, wants_number, &number);
+    LzType takes_int[] = {integer};
+    LzType int_function = fn_of(&vm, 1, takes_int, &integer);
+    check_assign(&int_function, &number_target, LZ_ASSIGN_MAYBE);
+    /* disjoint parameters never fit */
+    LzType takes_text[] = {text};
+    LzType text_function = fn_of(&vm, 1, takes_text, &integer);
+    check_assign(&text_function, &narrow_target, LZ_ASSIGN_NEVER);
+    /* covariant result: a function returning int serves where number is asked, not the reverse */
+    LzType number_result = fn_of(&vm, 1, takes_int, &number);
+    check_assign(&int_function, &number_result, LZ_ASSIGN_ALWAYS);
+    check_assign(&number_result, &int_function, LZ_ASSIGN_MAYBE);
+    LzType text_result = fn_of(&vm, 1, takes_int, &text);
+    check_assign(&text_result, &int_function, LZ_ASSIGN_NEVER);
+    /* a target that does not describe its result takes any result */
+    check_assign(&text_result, &d, LZ_ASSIGN_ALWAYS);
+
+    /* union of two different signatures widens to any function */
+    LzType merged;
+    LZ_CHECK(lz_type_union(&merged, &a, &c) && merged.fn == NULL);
+
+    /* matching at run time: the value must be a function of a compatible arity */
+    LzNative *two = lz_native_new(&vm.heap, lz_vm_intern(&vm, "two", 3), NULL, 2, 2);
+    LzValue two_value = lz_value_object(&two->base);
+    LZ_CHECK(lz_type_matches(&a, &two_value));
+    LZ_CHECK(!lz_type_matches(&d, &two_value));
+    LZ_CHECK(lz_type_matches(&plain, &two_value));
+    LzValue five = lz_value_int(5);
+    LZ_CHECK(!lz_type_matches(&a, &five));
+    LZ_CHECK(lz_function_value_takes(&two_value, 2) && !lz_function_value_takes(&two_value, 1));
+    lz_object_release(&vm.heap, &two->base);
+
+    lz_vm_free(&vm);
+    lz_buffer_free(&out);
+    lz_buffer_free(&err);
+}
+
 int main(void) {
     lz_heap_init(&heap);
     test_kinds();
@@ -312,6 +413,7 @@ int main(void) {
     test_equality_of_types();
     test_descriptions();
     test_value_helpers();
+    test_function_types();
     lz_heap_destroy(&heap);
     return LZ_TEST_RESULT();
 }

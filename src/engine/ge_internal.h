@@ -22,11 +22,11 @@ enum {
     GE_OP_END = 64, /* sentinel after the last instruction: running off the chunk */
     GE_OP_DELEGATE, /* a plain instruction GE does not specialise: reference interpreter */
     GE_OP_BIN,      /* [load a] [load b] ARITH [store]          */
-    GE_OP_BIN1,     /*          [load b] ARITH [store]   (left operand on the stack) */
+    GE_OP_BIN1,     /* [load b] ARITH [store], with the left operand on the stack */
     GE_OP_CMPJ,     /* [load a] [load b] CMP JUMP_IF_FALSE POP */
-    GE_OP_CMPJ1,    /*          [load b] CMP JUMP_IF_FALSE POP  (left operand on the stack) */
+    GE_OP_CMPJ1,    /* [load b] CMP JUMP_IF_FALSE POP, with the left operand on the stack */
     GE_OP_INDEX,    /* [load a] [load b] INDEX                  */
-    GE_OP_INDEX1    /*          [load b] INDEX                  (array on the stack) */
+    GE_OP_INDEX1    /* [load b] INDEX, with the array on the stack */
 };
 
 #define GE_NO_HINT UINT32_MAX
@@ -36,9 +36,9 @@ typedef struct GeIns {
     uint8_t plain;   /* the original LzOpCode of the instruction at this index */
     uint8_t sub;     /* fused: the arithmetic or comparison opcode */
     uint8_t kinds;   /* fused: operand kinds, 2 bits each: a, b, store */
-    uint16_t a;      /* plain: the u16 operand. fused: first operand (slot or constant index) */
+    uint16_t a;      /* for a plain instruction the u16 operand, for a fused one the first operand, a slot or constant index */
     uint16_t b;      /* fused: second operand */
-    uint16_t c;      /* fused: store target (slot or name constant index) */
+    uint16_t c;      /* fused, the store target, which is a slot or name constant index */
     uint16_t span;   /* bytecode instructions this one stands for */
     uint32_t target; /* jump instructions: index to continue at */
     uint32_t offset; /* byte offset of the first covered instruction in the chunk */
@@ -49,15 +49,15 @@ typedef struct GeIns {
 
 struct GeJit;
 
-/* Where a program stands with the JIT (ge_jit.h). */
+/* Where a program stands with the JIT, see ge_jit.h. */
 enum { GE_JIT_UNTRIED = 0, GE_JIT_COMPILED = 1, GE_JIT_FAILED = 2, GE_JIT_DISABLED = 3 };
 
 typedef struct GeProgram {
-    GeIns *ins;         /* count entries; ins[count - 1] is the GE_OP_END sentinel */
+    GeIns *ins;         /* count entries, and ins[count - 1] is the GE_OP_END sentinel */
     size_t count;
     size_t fused_sites;
     struct GeJit *jit;         /* native code for this program, or NULL */
-    struct GeJit *jit_retired; /* code given up on after too many bail-outs (freed with the program) */
+    struct GeJit *jit_retired; /* code given up on after too many bail-outs, and it's freed with the program */
     uint32_t hot;              /* loop back-edges and calls seen by the interpreter */
     uint32_t jit_enters;       /* times the interpreter entered the native code */
     uint32_t jit_bails;        /* times the native code handed an instruction back */
@@ -79,15 +79,15 @@ typedef struct GeRun {
 } GeRun;
 
 /*
- * Translates a chunk. False when the chunk cannot be translated faithfully
- * (an unknown opcode, an instruction cut off by the end of the chunk, or a jump
- * that does not land on an instruction boundary) or on out of memory; the
- * caller then runs the reference interpreter, which defines what such code does.
+ * Translates a chunk. False when the chunk can't be translated faithfully, because of an unknown
+ * opcode, an instruction cut off by the end of the chunk, or a jump that doesn't land on an
+ * instruction boundary, or on out of memory. The caller then runs the reference interpreter,
+ * which defines what such code does.
  */
 bool ge_translate(const LzChunk *chunk, GeProgram *program);
 void ge_program_free(GeProgram *program);
 
-/* Releases a program cached on a function object (LzFunction.engine_cache_free). */
+/* Releases a program cached on a function object, see LzFunction.engine_cache_free. */
 void ge_cache_free(void *cache);
 
 /* An LzExecuteFn: context is a GeRun. */

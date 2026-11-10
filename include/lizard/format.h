@@ -9,16 +9,16 @@
  *
  *     [[fill]align] [sign] [#] [0] [width] [group] [.precision] [type]
  *
- *   fill       any one character (default space); align is < left, > right, ^ centre
- *   sign       + always, - only for negatives (default), space
+ *   fill       any one character, space by default. align is < left, > right or ^ centre
+ *   sign       + always, - only for negatives (the default), or space
  *   #          0x, 0o or 0b in front of x X o b
- *   0          zeros after the sign (numbers; not with an align)
- *   group      , every 3 digits, or _ every 3 (4 for x o b)
- *   precision  .N digits after the point (f e E %) or characters kept (s)
+ *   0          zeros after the sign, for numbers and not with an align
+ *   group      , every 3 digits, or _ every 3, which is 4 for x o b
+ *   precision  .N digits after the point for f e E %, or characters kept for s
  *   type       s d x X o b c f e E %
  *
- * The compiler parses a spec written in the source, so a mistake is an error before the
- * program runs; one built at run time is parsed when it is used.
+ * The compiler parses a spec written in the source, so a mistake is an error before the program
+ * runs. One built at run time is parsed when it's used.
  */
 
 #define LZ_FORMAT_MAX_WIDTH 100000u
@@ -26,7 +26,7 @@
 
 typedef struct LzFormatSpec {
     uint32_t fill;
-    char align; /* 0 = the default for the value */
+    char align; /* 0 means the default for the value */
     char sign;  /* 0, '+', '-' or ' ' */
     bool alternate;
     bool zero;
@@ -34,7 +34,7 @@ typedef struct LzFormatSpec {
     char group;
     bool has_precision;
     size_t precision;
-    char type; /* 0 = by the value */
+    char type; /* 0 means by the value */
 } LzFormatSpec;
 
 typedef struct LzFormatError {
@@ -48,7 +48,7 @@ bool lz_format_parse(const char *text, size_t length, LzFormatSpec *spec, LzForm
 
 typedef enum LzFormatResult {
     LZ_FORMAT_OK,
-    LZ_FORMAT_BAD,       /* error says why */
+    LZ_FORMAT_BAD,       /* the error says why */
     LZ_FORMAT_NO_MEMORY
 } LzFormatResult;
 

@@ -4,16 +4,16 @@
 #include "ge_internal.h"
 
 /*
- * The Gecko JIT: a baseline compiler from the GE IR to x86-64 machine code.
- * See docs/ENGINE.md ("The JIT") for the design. In short: the native code works on
- * the very same value stack and frame stack as the interpreter, so at any
- * instruction boundary it can hand control back ("bail out") and the interpreter
- * simply continues from that instruction. Every fast path checks exactly what it
- * assumes before changing anything, as in ge_exec.c.
+ * The Gecko JIT is a baseline compiler from the GE IR to x86-64 machine code. See docs/ENGINE.md
+ * ("The JIT") for the design. In short, the native code works on the very same value stack and
+ * frame stack as the interpreter, so at any instruction boundary it can hand control back ("bail
+ * out") and the interpreter simply continues from that instruction. Every fast path checks
+ * exactly what it assumes before changing anything, as in ge_exec.c.
  */
 
 /*
- * Which backends this build has. LZ_NO_JIT (CMake: -DLZ_ENABLE_JIT=OFF) turns them all off.
+ * Which backends this build has. LZ_NO_JIT, which CMake sets with -DLZ_ENABLE_JIT=OFF, turns
+ * them all off.
  */
 #if !defined(LZ_NO_JIT) && defined(__x86_64__) && (defined(__linux__) || defined(__APPLE__))
 #define GE_JIT_X64 1
@@ -36,12 +36,12 @@ typedef struct JitSite {
 
 enum { GE_JX_BAIL = 1, GE_JX_FAIL, GE_JX_HALT, GE_JX_RETURNED, GE_JX_ENTER };
 
-/* How native code leaves: written by the exit stubs, read by the interpreter. */
+/* How native code leaves. Written by the exit stubs and read by the interpreter. */
 typedef struct GeJitExit {
-    uint64_t saved_rsp; /* must stay first: the trampoline addresses it directly */
+    uint64_t saved_rsp; /* must stay first, because the trampoline addresses it directly */
     uint32_t reason;    /* GE_JX_* */
-    uint32_t pc;        /* instruction index to continue at (BAIL) or that failed (FAIL) */
-    uint32_t status;    /* LzStatus (FAIL) */
+    uint32_t pc;        /* instruction index to continue at for BAIL, or the one that failed for FAIL */
+    uint32_t status;    /* LzStatus, for FAIL */
 } GeJitExit;
 
 struct GeJit {
@@ -60,9 +60,9 @@ struct GeJit {
 bool ge_jit_supported(void);
 
 /*
- * Compiles a translated program. entry_depth is the stack height at instruction 0:
- * the parameter slots for a function, 0 for the script. NULL when the program is not
- * of a shape the JIT handles (the interpreter then runs it, as always) or on failure.
+ * Compiles a translated program. entry_depth is the stack height at instruction 0, which is the
+ * parameter slots for a function and 0 for the script. NULL when the program is not of a shape
+ * the JIT handles, and the interpreter then runs it as always, or on failure.
  */
 struct GeJit *ge_jit_compile(const LzChunk *chunk, const GeProgram *program, size_t entry_depth);
 void ge_jit_free(struct GeJit *jit);

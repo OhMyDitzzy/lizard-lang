@@ -7,6 +7,7 @@
 #include "lizard/dict.h"
 
 #define LZ_VM_ARRAY_TYPES_MAX 4096
+#define LZ_VM_FN_TYPES_MAX 4096
 
 void lz_array_clear_mark(LzObject *array) {
     ((LzArray *)array)->mark = 0;
@@ -183,7 +184,10 @@ bool lz_array_admit(const LzArray *container, const LzValue *value) {
     return lz_type_matches(wanted, value);
 }
 
-/* The containers a value leads to, one at a time: an array's items, a dict's values, an instance's fields. */
+/*
+ * The containers a value leads to, one at a time. That's an array's items, a dict's values or an
+ * instance's fields.
+ */
 static bool container_is_array(const LzObject *object) {
     return object->type == LZ_OBJ_ARRAY;
 }
@@ -229,7 +233,10 @@ static size_t container_holders(const LzObject *object) {
                                         : ((const LzDict *)object)->holders;
 }
 
-/* The state of one walk: what it looks for, the stamp of its visits, the containers still to open. */
+/*
+ * The state of one walk: what it looks for, the stamp of its visits, and the containers still to
+ * open.
+ */
 typedef struct CycleWalk {
     const LzObject *target;
     uint32_t epoch;
@@ -254,10 +261,10 @@ static bool walk_push(CycleWalk *walk, const LzObject *container) {
 }
 
 /*
- * Looks at one value met on the way: a container is the target, or is opened later (once per
- * walk); an error leads to its cause, its data and its payload, a chain of errors one after the other.
- * The causes of an error were made before it, so that chain ends; the containers it leads to
- * are stamped, so none is opened twice.
+ * Looks at one value met on the way. A container is the target, or is opened later, once per
+ * walk. An error leads to its cause, its data and its payload, which is a chain of errors one
+ * after the other. The causes of an error were made before it, so that chain ends, and the
+ * containers it leads to are stamped so none is opened twice.
  */
 static void walk_object(CycleWalk *walk, LzObject *inner) {
     if (inner == walk->target) {
@@ -281,7 +288,10 @@ static void walk_value(CycleWalk *walk, const LzValue *value, uint64_t *work) {
             return;
         }
         if (error->payload != NULL) {
-            /* the fields of an error of a class live in its payload, a container like any instance */
+            /*
+             * the fields of an error of a class live in its payload, which is a container like
+             * any instance
+             */
             walk_object(walk, &error->payload->base);
             if (walk->result != 0) {
                 return;
@@ -307,9 +317,9 @@ int lz_containers_would_cycle(LzHeap *heap, const LzValue *value, const LzObject
         }
         (*work)++;
         /*
-         * A container that nothing holds cannot be inside `value` (reaching one would need a
-         * holder), so the common store of a freshly built structure costs nothing. An error
-         * that carries a container as its data counts as a holder of it.
+         * A container that nothing holds can't be inside `value`, because reaching one would
+         * need a holder. So the common store of a freshly built structure costs nothing. An
+         * error that carries a container as its data counts as a holder of it.
          */
         if (!container_may_open(root) || target == NULL) {
             return 0;
@@ -330,7 +340,7 @@ int lz_containers_would_cycle(LzHeap *heap, const LzValue *value, const LzObject
         *container_mark(value->as.object) = walk.epoch;
         (void)walk_push(&walk, value->as.object);
     } else {
-        walk_value(&walk, value, work); /* an error: its causes and data are the roots */
+        walk_value(&walk, value, work); /* an error, so its causes and data are the roots */
     }
 
     while (walk.depth > 0 && walk.result == 0) {
@@ -572,7 +582,7 @@ LzStatus lz_vm_intern_type(LzVM *vm, const LzType *type, LzType **out) {
 
 LzStatus lz_vm_array_of(LzVM *vm, const LzType *element, LzType *out) {
     LzType array = lz_type_of_kinds(LZ_KIND_ARRAY);
-    bool is_any = element == NULL || (element->kinds == LZ_KINDS_ANY && element->element == NULL);
+    bool is_any = element == NULL || lz_type_is_any(element);
     if (!is_any) {
         LzType *found = NULL;
         LzStatus status = lz_vm_intern_type(vm, element, &found);
@@ -582,6 +592,71 @@ LzStatus lz_vm_array_of(LzVM *vm, const LzType *element, LzType *out) {
         array.element = found;
     }
     *out = array;
+    return LZ_OK;
+}
+
+/* The interned copy of a type that goes in a signature. `any` is NULL. */
+static LzStatus intern_part(LzVM *vm, const LzType *type, const LzType **out) {
+    *out = NULL;
+    if (type == NULL || lz_type_is_any(type)) {
+        return LZ_OK;
+    }
+    LzType *found = NULL;
+    LzStatus status = lz_vm_intern_type(vm, type, &found);
+    *out = found;
+    return status;
+}
+
+LzStatus lz_vm_fn_of(LzVM *vm, size_t param_count, size_t required, bool has_rest,
+                     const LzType *const *params, const LzType *result, const LzType *rest,
+                     LzType *out) {
+    LzFnType *made = malloc(sizeof *made + param_count * sizeof made->params[0]);
+    if (made == NULL) {
+        return lz_vm_set_error(vm, LZ_ERR_MEMORY, "out of memory");
+    }
+    made->param_count = (uint16_t)param_count;
+    made->required = (uint16_t)required;
+    made->has_rest = has_rest;
+    LzStatus status = intern_part(vm, result, &made->result);
+    if (status == LZ_OK) {
+        status = intern_part(vm, has_rest ? rest : NULL, &made->rest);
+    }
+    for (size_t i = 0; status == LZ_OK && i < param_count; i++) {
+        status = intern_part(vm, params != NULL ? params[i] : NULL, &made->params[i]);
+    }
+    if (status != LZ_OK) {
+        free(made);
+        return status;
+    }
+    for (size_t i = 0; i < vm->fn_type_count; i++) {
+        const LzFnType *known = vm->fn_types[i];
+        if (known->param_count == made->param_count && known->required == made->required &&
+            known->has_rest == made->has_rest && known->result == made->result &&
+            known->rest == made->rest &&
+            memcmp(known->params, made->params, param_count * sizeof made->params[0]) == 0) {
+            free(made);
+            made = vm->fn_types[i];
+            goto found;
+        }
+    }
+    if (vm->fn_type_count >= LZ_VM_FN_TYPES_MAX) {
+        free(made);
+        return lz_vm_set_error(vm, LZ_ERR_COMPILE, "too many distinct function types");
+    }
+    if (vm->fn_type_count == vm->fn_type_capacity) {
+        size_t capacity = vm->fn_type_capacity != 0 ? vm->fn_type_capacity * 2 : 16;
+        LzFnType **grown = realloc(vm->fn_types, capacity * sizeof *grown);
+        if (grown == NULL) {
+            free(made);
+            return lz_vm_set_error(vm, LZ_ERR_MEMORY, "out of memory");
+        }
+        vm->fn_types = grown;
+        vm->fn_type_capacity = capacity;
+    }
+    vm->fn_types[vm->fn_type_count++] = made;
+found:
+    *out = lz_type_of_kinds(LZ_KIND_FUNCTION);
+    out->fn = made;
     return LZ_OK;
 }
 

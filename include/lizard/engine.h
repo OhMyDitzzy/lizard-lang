@@ -6,19 +6,22 @@
 /*
  * Execution engines.
  *
- * Every engine runs the same bytecode with the same observable behaviour: the
- * same result, output, error message and source position, the same fuel spent
- * and the same vm->instructions. They differ only in speed.
+ * Every engine runs the same bytecode with the same observable behaviour, meaning the same result,
+ * output, error message and source position, the same fuel spent and the same vm->instructions.
+ * They differ only in speed.
  */
 typedef enum LzEngine {
-    LZ_ENGINE_REFERENCE, /* core/run.c: the plain interpreter, the definition of the semantics */
-    LZ_ENGINE_GE         /* Gecko Engine: pre-decoded, fused, inline-cached (docs/ENGINE.md) */
+    LZ_ENGINE_REFERENCE, /* core/run.c, the plain interpreter and the definition of the semantics */
+    LZ_ENGINE_GE         /* Gecko Engine, which is pre-decoded, fused and inline-cached (docs/ENGINE.md) */
 } LzEngine;
 
-/* What an engine did for one run. Filled in on request; every field is valid on every engine. */
+/*
+ * What an engine did for one run. Filled in on request, and every field is valid on every
+ * engine.
+ */
 typedef struct LzEngineStats {
     uint64_t instructions; /* bytecode instructions executed (identical on every engine) */
-    uint64_t dispatches;   /* dispatch-loop iterations; fewer than instructions when GE fuses */
+    uint64_t dispatches;   /* dispatch-loop iterations, which is fewer than instructions when GE fuses */
     uint64_t delegated;    /* instructions GE handed to the reference interpreter */
     size_t program_size;   /* GE instructions after translation, 0 when not translated */
     size_t fused_sites;    /* sites where several instructions became one */
@@ -29,12 +32,12 @@ typedef struct LzEngineStats {
 } LzEngineStats;
 
 /*
- * The Gecko JIT. LZ_JIT_ON compiles hot loops and functions to machine code
- * (x86-64 and AArch64 on Linux, Android and macOS; elsewhere it quietly stays off). LZ_JIT_EAGER compiles
- * every program on first sight, which is what the tests use to run everything native.
- * The default is LZ_JIT_ON, or whatever the LZ_JIT environment variable says
- * ("off", "on", "eager") the first time the engine runs. Programs run with a fuel
- * limit always use the interpreter, so behaviour is identical in every mode.
+ * The Gecko JIT. LZ_JIT_ON compiles hot loops and functions to machine code on x86-64 and AArch64
+ * for Linux, Android and macOS, and elsewhere it quietly stays off. LZ_JIT_EAGER compiles every
+ * program on first sight, which is what the tests use to run everything native. The default is
+ * LZ_JIT_ON, or whatever the LZ_JIT environment variable says ("off", "on", "eager") the first
+ * time the engine runs. Programs run with a fuel limit always use the interpreter, so behaviour is
+ * identical in every mode.
  */
 typedef enum LzJitMode {
     LZ_JIT_OFF = 0,
@@ -49,18 +52,18 @@ bool lz_jit_mode_from_name(const char *name, LzJitMode *out);
 
 const char *lz_engine_name(LzEngine engine);
 
-/* Accepts "ref" (or "reference") and "ge" (or "gecko"). */
+/* Accepts "ref" or "reference", and "ge" or "gecko". */
 bool lz_engine_from_name(const char *name, LzEngine *out);
 
-/* Same contracts as lz_vm_eval / lz_vm_run; stats may be NULL. */
+/* Same contracts as lz_vm_eval and lz_vm_run. stats may be NULL. */
 LzStatus lz_engine_eval(LzEngine engine, LzVM *vm, const LzChunk *chunk, LzValue *result,
                         LzEngineStats *stats);
 LzStatus lz_engine_run(LzEngine engine, LzVM *vm, const LzChunk *chunk, LzEngineStats *stats);
 
 /*
- * Gecko Engine entry points. A chunk that GE cannot translate (truncated
- * instructions, jumps into the middle of an instruction) runs on the
- * reference interpreter, so these never behave differently from lz_vm_eval.
+ * Gecko Engine entry points. A chunk that GE can't translate, like truncated instructions or jumps
+ * into the middle of an instruction, runs on the reference interpreter. So these never behave
+ * differently from lz_vm_eval.
  */
 LzStatus lz_ge_eval(LzVM *vm, const LzChunk *chunk, LzValue *result);
 LzStatus lz_ge_run(LzVM *vm, const LzChunk *chunk);

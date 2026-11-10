@@ -1,0 +1,54 @@
+# Narrowing: a check on a variable tells the compiler more about it, for as long as it holds.
+
+let name: string? = "Ada"
+
+if name != nil {
+    println(name.len())            # 3: here `name` is a string
+}
+
+fn shout(who: string?) {
+    if who == nil { return }       # leaving early narrows what follows
+    println(who.len())
+}
+shout("Grace")                     # 5
+shout(nil)
+
+fn describe(x: int | string | nil) {
+    if x is int {
+        println($"int {x + 1}")
+    } else if x is string {
+        println($"string {x.len()}")
+    } else {
+        println("nothing")
+    }
+}
+describe(1)                        # int 2
+describe("abc")                    # string 3
+describe(nil)                      # nothing
+
+let a: int | string | nil = nil
+if a == nil or a is string {
+    println("nil or string")
+}
+
+# An assignment ends the narrowing.
+let v: string? = "x"
+if v != nil {
+    v = nil
+    println(v)                     # nil
+}
+
+# Where the check proves the value is nil, the compiler says so before running:
+# fn greet(n: string?) {
+#     if n == nil {
+#         n.len()                  # error: nil has no method 'len'
+#     }
+# }
+
+# An unannotated variable is still any; `let x = 0` is not checked at run time.
+# A function without `->` gets the union of its returns for the compiler and tools.
+fn pick(c) {
+    if c { return 1 }
+    return "one"
+}
+println(pick(true), pick(false))   # 1 one

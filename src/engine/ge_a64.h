@@ -2,15 +2,15 @@
 #define LIZARD_GE_A64_H
 
 /*
- * A small AArch64 assembler: just the instructions the Gecko JIT emits. Like ge_x64.h it
- * writes into a hot and a cold section and resolves forward references at link time.
- * Every instruction is one 32-bit word; branch offsets are range checked when linking
- * (conditional branches reach +-1 MiB), and the compiler gives up on a program whose
- * code would not fit, which then runs on the interpreter.
+ * A small AArch64 assembler with just the instructions the Gecko JIT emits. Like ge_x64.h it writes
+ * into a hot and a cold section and resolves forward references at link time. Every instruction is
+ * one 32-bit word. Branch offsets are range checked when linking, and conditional branches reach
+ * +-1 MiB. The compiler gives up on a program whose code would not fit, and that program runs on
+ * the interpreter.
  *
- * Register conventions (see ge_jit_a64.c): x0-x15 scratch, x16 call/immediate scratch,
- * x17 address scratch used by the load/store helpers below (never holds live data),
- * x18 untouched (reserved by the platform).
+ * Register conventions are in ge_jit_a64.c. x0-x15 are scratch and x16 is call and immediate
+ * scratch. x17 is address scratch used by the load/store helpers below and never holds live data.
+ * x18 is untouched because the platform reserves it.
  */
 
 #include <stdbool.h>
@@ -126,8 +126,6 @@ static inline void a_ref(A64 *x, uint32_t word, int label, int kind) {
     a_w(x, word);
 }
 
-/* ---- moves and constants ---- */
-
 static inline void mov_rr(A64 *x, int rd, int rm) {
     if (rd == SP || rm == SP) {
         a_w(x, 0x91000000u | ((uint32_t)rm << 5) | (uint32_t)rd); /* add rd, rm, #0 */
@@ -136,7 +134,7 @@ static inline void mov_rr(A64 *x, int rd, int rm) {
     }
 }
 
-/* rd = a 64-bit constant, in as few movz/movn/movk as it takes. */
+/* rd gets a 64-bit constant, in as few movz, movn and movk as it takes. */
 static inline void mov_imm(A64 *x, int rd, uint64_t v) {
     int zeros = 0;
     int ones = 0;
@@ -166,8 +164,6 @@ static inline void mov_imm(A64 *x, int rd, uint64_t v) {
     }
 }
 
-/* ---- arithmetic ---- */
-
 enum { A_ADD = 0, A_ADDS = 1, A_SUB = 2, A_SUBS = 3 };
 
 static inline uint32_t addsub_imm_base(int op, bool w) {
@@ -189,7 +185,7 @@ static inline void addsub_r(A64 *x, int op, int rd, int rn, int rm) {
     a_w(x, base[op] | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd);
 }
 
-/* rd = rn +/- imm for any imm (x17 is used for the large ones; rn must not be SP then). */
+/* rd = rn +/- imm for any imm. x17 is used for the large ones, and rn must not be SP then. */
 static inline void add_imm(A64 *x, int rd, int rn, int64_t imm) {
     int op = A_ADD;
     uint64_t mag = (uint64_t)imm;
@@ -277,13 +273,11 @@ static inline void asr_i(A64 *x, int rd, int rn, int s) {
     a_w(x, 0x93400000u | ((uint32_t)s << 16) | (63u << 10) | ((uint32_t)rn << 5) | (uint32_t)rd);
 }
 
-/* ---- loads and stores ---- */
-
 enum { SZ_B = 0, SZ_H = 1, SZ_W = 2, SZ_X = 3 };
 
 /*
- * Load or store `size` bytes at [rn + off]. Uses the scaled form when it fits, the unscaled
- * form for small negative or odd offsets, and x17 as an offset register otherwise.
+ * Load or store `size` bytes at [rn + off]. Uses the scaled form when it fits, the unscaled form
+ * for small negative or odd offsets, and x17 as an offset register otherwise.
  */
 static inline void a_ldst(A64 *x, int size, bool load, int rt, int rn, int32_t off) {
     static const uint32_t uimm_load[4] = {0x39400000u, 0x79400000u, 0xB9400000u, 0xF9400000u};
@@ -312,7 +306,7 @@ static inline void str_w(A64 *x, int rt, int rn, int32_t off) { a_ldst(x, SZ_W, 
 static inline void ldr_h(A64 *x, int rt, int rn, int32_t off) { a_ldst(x, SZ_H, true, rt, rn, off); }
 static inline void ldr_b(A64 *x, int rt, int rn, int32_t off) { a_ldst(x, SZ_B, true, rt, rn, off); }
 
-/* ldp/stp of two 64-bit registers at [rn + off] (off a multiple of 8). */
+/* ldp or stp of two 64-bit registers at [rn + off], where off is a multiple of 8. */
 static inline void a_pair(A64 *x, bool load, int rt, int rt2, int rn, int32_t off) {
     if (off % 8 == 0 && off >= -512 && off <= 504) {
         a_w(x, (load ? 0xA9400000u : 0xA9000000u) | (((uint32_t)(off / 8) & 0x7Fu) << 15) |
@@ -326,7 +320,10 @@ static inline void a_pair(A64 *x, bool load, int rt, int rt2, int rn, int32_t of
 static inline void ldp_x(A64 *x, int rt, int rt2, int rn, int32_t off) { a_pair(x, true, rt, rt2, rn, off); }
 static inline void stp_x(A64 *x, int rt, int rt2, int rn, int32_t off) { a_pair(x, false, rt, rt2, rn, off); }
 
-/* stp rt, rt2, [sp, #-size]! and ldp rt, rt2, [sp], #size (size a multiple of 16, at most 504). */
+/*
+ * stp rt, rt2, [sp, #-size]! and ldp rt, rt2, [sp], #size, where size is a multiple of 16 and at
+ * most 504.
+ */
 static inline void push_pair(A64 *x, int rt, int rt2, int size) {
     a_w(x, 0xA9800000u | (((uint32_t)(-size / 8) & 0x7Fu) << 15) | ((uint32_t)rt2 << 10) | (31u << 5) | (uint32_t)rt);
 }
@@ -343,8 +340,6 @@ static inline void pop_x(A64 *x, int rt) { /* ldr rt, [sp], #16 */
     a_w(x, 0xF8400400u | (16u << 12) | (31u << 5) | (uint32_t)rt);
 }
 
-/* ---- control flow ---- */
-
 static inline void b_l(A64 *x, int label) { a_ref(x, 0x14000000u, label, FIX_B26); }
 static inline void bcond_l(A64 *x, int cond, int label) { a_ref(x, 0x54000000u | (uint32_t)cond, label, FIX_B19); }
 static inline void cbz_l(A64 *x, int rt, int label) { a_ref(x, 0xB4000000u | (uint32_t)rt, label, FIX_B19); }
@@ -355,8 +350,6 @@ static inline void adr_l(A64 *x, int rd, int label) { a_ref(x, 0x10000000u | (ui
 static inline void blr_r(A64 *x, int rn) { a_w(x, 0xD63F0000u | ((uint32_t)rn << 5)); }
 static inline void br_r(A64 *x, int rn) { a_w(x, 0xD61F0000u | ((uint32_t)rn << 5)); }
 static inline void ret_(A64 *x) { a_w(x, 0xD65F03C0u); }
-
-/* ---- floating point (doubles in d0-d31) ---- */
 
 enum { F_ADD = 0x2800, F_SUB = 0x3800, F_MUL = 0x0800, F_DIV = 0x1800 };
 
@@ -371,9 +364,7 @@ static inline void fcvtzs_xd(A64 *x, int xd, int dn) { a_w(x, 0x9E780000u | ((ui
 static inline void fcmp_dd(A64 *x, int dn, int dm) { a_w(x, 0x1E602000u | ((uint32_t)dm << 16) | ((uint32_t)dn << 5)); }
 static inline void fcmp_d0(A64 *x, int dn) { a_w(x, 0x1E602008u | ((uint32_t)dn << 5)); }
 
-/* ---- linking ---- */
-
-static inline size_t a64_size(const A64 *x) { /* bytes; the cold section follows the hot one */
+static inline size_t a64_size(const A64 *x) { /* bytes, and the cold section follows the hot one */
     return (x->len[0] + x->len[1]) * 4;
 }
 

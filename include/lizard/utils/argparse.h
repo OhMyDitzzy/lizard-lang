@@ -10,7 +10,6 @@
 extern "C" {
 #endif
 
-/* ANSI color codes for terminal output */
 #define LZ_COLOR_RESET   "\033[0m"
 #define LZ_COLOR_BOLD    "\033[1m"
 #define LZ_COLOR_DIM     "\033[2m"
@@ -23,7 +22,6 @@ extern "C" {
 #define LZ_COLOR_WHITE   "\033[37m"
 #define LZ_COLOR_GRAY    "\033[90m"
 
-/* Argument types */
 typedef enum {
     LZ_ARG_FLAG,        /* Boolean flag: --verbose, -v */
     LZ_ARG_OPTION,      /* Option with value: --output=file, -o file */
@@ -32,21 +30,19 @@ typedef enum {
     LZ_ARG_VERSION      /* Built-in version flag: --version, -V */
 } LzArgType;
 
-/* Argument definition */
 typedef struct LzArg {
-    const char *short_name;    /* Short name (single char, e.g., 'h') */
-    const char *long_name;     /* Long name (e.g., "help") */
-    LzArgType type;            /* Argument type */
-    const char *description;   /* Help description */
-    const char *metavar;       /* Metavar for help (e.g., "FILE", "N") */
-    const char *default_value; /* Default value for options */
-    bool required;             /* Whether this argument is required */
-    void *dest;                /* Destination pointer to store parsed value */
-    const char **choices;      /* Array of valid choices (NULL-terminated) */
-    size_t num_choices;        /* Number of choices */
+    const char *short_name;    /* one char, like 'h' */
+    const char *long_name;     /* like "help" */
+    LzArgType type;
+    const char *description;
+    const char *metavar;       /* like "FILE" or "N" */
+    const char *default_value;
+    bool required;
+    void *dest;                /* where the parsed value is stored */
+    const char **choices;      /* NULL-terminated */
+    size_t num_choices;
 } LzArg;
 
-/* Parse result */
 typedef struct LzArgParseResult {
     bool success;
     const char *error_message;
@@ -55,7 +51,6 @@ typedef struct LzArgParseResult {
     const char **positional_args;
 } LzArgParseResult;
 
-/* Argument parser context */
 typedef struct LzArgParser {
     const char *program_name;
     const char *description;
@@ -68,10 +63,8 @@ typedef struct LzArgParser {
     const char *error_prefix;
 } LzArgParser;
 
-/* Initialize argument parser */
 void lz_argparse_init(LzArgParser *parser, const char *program_name);
 
-/* Set parser properties */
 void lz_argparse_set_description(LzArgParser *parser, const char *description);
 void lz_argparse_set_epilog(LzArgParser *parser, const char *epilog);
 void lz_argparse_set_version(LzArgParser *parser, const char *version);
@@ -79,19 +72,14 @@ void lz_argparse_set_args(LzArgParser *parser, const LzArg *args, size_t num_arg
 void lz_argparse_enable_color(LzArgParser *parser, bool enable);
 void lz_argparse_allow_unknown(LzArgParser *parser, bool allow);
 
-/* Parse command line arguments */
 LzArgParseResult lz_argparse_parse(LzArgParser *parser, int argc, char **argv);
 
-/* Print help message */
 void lz_argparse_print_help(const LzArgParser *parser, FILE *stream);
 
-/* Print version message */
 void lz_argparse_print_version(const LzArgParser *parser, FILE *stream);
 
-/* Free parse result resources */
 void lz_argparse_free_result(LzArgParseResult *result);
 
-/* Helper macros for defining arguments */
 #define LZ_ARG_FLAG(s_, l_, desc_, dest_) \
     { .short_name = s_, .long_name = l_, .type = LZ_ARG_FLAG, .description = desc_, .dest = dest_ }
 
@@ -109,7 +97,7 @@ void lz_argparse_free_result(LzArgParseResult *result);
 
 #define LZ_ARG_END { 0 }
 
-/* Parse a count string with optional K/M/G suffix (powers of 1024) */
+/* Parses a count with an optional K, M or G suffix, in powers of 1024. */
 bool lz_parse_count(const char *text, bool allow_suffix, uint64_t *out);
 
 #ifdef __cplusplus

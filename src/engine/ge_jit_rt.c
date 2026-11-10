@@ -16,10 +16,6 @@
 #define GE_JIT_HAVE_MMAP 0
 #endif
 
-/* ---------------------------------------------------------------------------------
- * Runtime helpers called from machine code
- * ------------------------------------------------------------------------------- */
-
 void jit_drop(LzVM *vm, LzObject *object) {
     if (object->refcount > 1) {
         object->refcount--;
@@ -54,7 +50,7 @@ const LzValue *jit_global_cell(LzVM *vm, const LzString *name, JitSite *site) {
     return found == NULL ? NULL : cell_of(table, found, &site->hint);
 }
 
-/* A global or else a builtin (globals shadow builtins), or NULL when undefined. */
+/* A global or else a builtin, since globals shadow builtins, or NULL when undefined. */
 const LzValue *jit_global_ptr(LzVM *vm, const LzString *name, JitSite *site) {
     const LzValue *found = jit_global_cell(vm, name, site);
     if (found != NULL) {

@@ -145,8 +145,6 @@ bool lz_error_write(const LzError *error, const LzWriter *writer) {
            lz_writer_write(writer, error->message->data, error->message->length);
 }
 
-/* The kinds of one VM */
-
 size_t lz_vm_error_kind_count(const LzVM *vm) {
     return LZ_ERROR_KIND_COUNT + vm->error_type_count;
 }
@@ -248,8 +246,6 @@ LzStatus lz_vm_error_declare(LzVM *vm, LzString *name, uint8_t parent, uint8_t *
     return LZ_OK;
 }
 
-/* Values of an error */
-
 LzStatus lz_error_new(LzVM *vm, unsigned kind, const char *message, size_t length,
                       LzError **out) {
     const char *kind_text = lz_vm_error_kind_name(vm, kind);
@@ -330,13 +326,11 @@ LzStatus lz_error_attach_trace(LzVM *vm, LzError *error) {
     return LZ_OK;
 }
 
-/* Constructors */
-
 static bool is_string(const LzValue *value) {
     return value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_STRING;
 }
 
-/* Checks the arguments and makes the error; the creation reference moves to *result. */
+/* Checks the arguments and makes the error. The creation reference moves to *result. */
 LzStatus lz_error_construct_core(LzVM *vm, uint8_t kind, const LzValue *message, const LzValue *cause,
                                  const LzValue *data, LzValue *result) {
     if (!is_string(message)) {
@@ -417,8 +411,6 @@ LzStatus lz_error_construct_named(LzVM *vm, uint8_t kind, size_t positional, con
     }
     return lz_error_construct_core(vm, kind, &argv[0], &given[0], &given[1], result);
 }
-
-/* Classes of declared kinds */
 
 LzClass *lz_vm_error_class(const LzVM *vm, unsigned kind) {
     if (kind < LZ_ERROR_KIND_COUNT || (size_t)(kind - LZ_ERROR_KIND_COUNT) >= vm->error_type_count) {

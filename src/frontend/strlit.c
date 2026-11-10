@@ -48,7 +48,7 @@ static size_t quote_run(const char *text, size_t length, size_t pos) {
     return run;
 }
 
-/* resume == SIZE_MAX: the caller of lz_string_scan decides. */
+/* resume == SIZE_MAX means the caller of lz_string_scan decides. */
 static bool fail(LzStringError *error, const char *message, size_t offset, size_t length) {
     error->message = message;
     error->offset = offset;
@@ -66,9 +66,9 @@ static bool scan_string(const Scan *s, size_t start, unsigned depth, LzStringHea
                         LzStringError *error);
 
 /*
- * From just after a '{': finds where the expression ends, the optional format spec and the
- * closing '}'. Strings inside are skipped whole, brackets are matched, and the first ':'
- * outside every bracket starts the spec.
+ * From just after a '{', finds where the expression ends, the optional format spec and the
+ * closing '}'. Strings inside are skipped whole, brackets are matched, and the first ':' outside
+ * every bracket starts the spec.
  */
 static bool scan_braces(const Scan *s, size_t open, unsigned depth, bool multiline,
                         LzStringBraces *out, LzStringError *error) {
@@ -288,7 +288,7 @@ static bool scan_string(const Scan *s, size_t start, unsigned depth, LzStringHea
         }
     }
 
-    /* Multi-line: p is the start of the first line of the body. */
+    /* Multi-line, and p is the start of the first line of the body. */
     size_t line = p;
     bool at_line_start = true;
     for (;;) {
@@ -388,8 +388,6 @@ bool lz_string_scan_braces(const LzSource *source, size_t open, bool multiline,
     return scan_braces(&s, open, 0, multiline, out, error);
 }
 
-/* ---- the reader ---- */
-
 void lz_string_reader_start(LzStringReader *reader, const LzSource *source, const LzStringHead *head) {
     reader->source = source;
     reader->head = *head;
@@ -440,9 +438,9 @@ static void part_error(LzStringPart *part, const char *message, size_t offset, s
 }
 
 /*
- * Handles the escape at reader->pos (a backslash). Returns 1 when something was done
- * (text written, or a line continuation), 0 after filling part with an error, -1 on
- * out of memory.
+ * Handles the escape at reader->pos, which is a backslash. Returns 1 when something was done,
+ * either text written or a line continuation, 0 after filling part with an error, and -1 on out
+ * of memory.
  */
 static int read_escape(LzStringReader *reader, const LzWriter *writer, LzStringPart *part) {
     const char *text = reader->source->text;
@@ -690,7 +688,7 @@ bool lz_string_reader_next(LzStringReader *reader, LzBuffer *out, LzStringPart *
             run++;
         }
         if (run == reader->pos) {
-            run++; /* a raw string's backslash or similar: one byte at a time is always safe */
+            run++; /* a raw string's backslash or similar, and one byte at a time is always safe */
         }
         if (!lz_writer_write(&writer, text + reader->pos, run - reader->pos)) {
             return false;

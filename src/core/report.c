@@ -6,7 +6,7 @@
 
 #define TAB_WIDTH 4u
 
-/* Colours: bold red, bright blue, bold green, yellow, cyan, bold. */
+/* Colours are bold red, bright blue, bold green, yellow, cyan and bold. */
 #define C_RESET "\x1b[0m"
 #define C_BOLD "\x1b[1m"
 #define C_RED "\x1b[1;31m"
@@ -71,7 +71,7 @@ static bool is_continuation(char byte) {
     return ((unsigned char)byte & 0xC0) == 0x80;
 }
 
-/* Screen columns of text[from, to): code points, a tab counts TAB_WIDTH. */
+/* Screen columns of text[from, to), counting code points, and a tab counts TAB_WIDTH. */
 static size_t columns(const char *text, size_t from, size_t to) {
     size_t width = 0;
     for (size_t i = from; i < to; i++) {
@@ -109,7 +109,6 @@ static size_t digit_count(size_t value) {
     return digits;
 }
 
-/* "  |" : the empty gutter line. */
 static void gutter(const Out *out, size_t width) {
     spaces(out, width + 1);
     styled_cstr(out, C_BLUE, "|");
@@ -135,7 +134,6 @@ static void header(const Out *out, const char *severity, const char *message) {
 
 static void put_line_number(const Out *out, size_t number, size_t width);
 
-/* The corrected line with the marker line below it. */
 static void write_suggestion(const Out *out, const LzSource *source, const LzLocation *where,
                              size_t offset, size_t span, const char *candidate, size_t width,
                              size_t line_number, bool first) {
@@ -164,7 +162,7 @@ static void write_suggestion(const Out *out, const LzSource *source, const LzLoc
 
     gutter_line(out, width);
 
-    /* The corrected line; the changed letters stand out in green. */
+    /* The corrected line, with the changed letters standing out in green. */
     put_line_number(out, line_number, width);
     raw(out, " ", 1);
     styled_cstr(out, C_BLUE, "|");
@@ -180,7 +178,6 @@ static void write_suggestion(const Out *out, const LzSource *source, const LzLoc
     source_text(out, NULL, source->text, offset + span, where->line_end);
     raw(out, "\n", 1);
 
-    /* The marker line. */
     gutter(out, width);
     raw(out, " ", 1);
     spaces(out, columns(source->text, where->line_start, offset) + columns(candidate, 0, prefix));
@@ -213,7 +210,7 @@ static const LzSource *fix_source(const LzSource *error_source, const LzFix *fix
 
 /*
  * help: <headline>, then the corrected line (or the new line) with markers under what changed.
- * `+` added, `~` replaced, `-` removed; a whole inserted line has `+` in the margin.
+ * `+` is added, `~` replaced and `-` removed, and a whole inserted line has `+` in the margin.
  */
 static void write_fix(const Out *out, const LzSource *error_source, const LzLocation *error_where,
                       const LzFix *fix, size_t width) {
@@ -300,8 +297,8 @@ static void write_fix(const Out *out, const LzSource *error_source, const LzLoca
 }
 
 /*
- * Text that may span lines: the first line follows the caller's prefix, each later line
- * (a piece of code to copy, usually) is indented by `indent` columns.
+ * Text that may span lines. The first line follows the caller's prefix, and each later line,
+ * usually a piece of code to copy, is indented by `indent` columns.
  */
 static void write_text_block(const Out *out, const char *text, size_t indent) {
     const char *line = text;
@@ -340,7 +337,6 @@ void lz_report_write(const LzSource *source, const LzReport *report, bool color,
 
     header(&out, severity, report->message);
 
-    /*  --> file:line:col */
     spaces(&out, width);
     styled_cstr(&out, C_BLUE, "--> ");
     raw(&out, source->name, strlen(source->name));
@@ -352,7 +348,6 @@ void lz_report_write(const LzSource *source, const LzReport *report, bool color,
 
     gutter_line(&out, width);
 
-    /* The source line. */
     put_line_number(&out, where.line, width);
     raw(&out, " ", 1);
     styled_cstr(&out, C_BLUE, "|");

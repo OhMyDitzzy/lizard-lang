@@ -29,10 +29,9 @@ static const Keyword keywords[] = {
 };
 
 /*
- * An integer literal is a magnitude; the sign is a unary minus. The largest valid
- * magnitude is 2^63 so that -9223372036854775808 can be written. A literal of
- * exactly 2^63 is returned as INT64_MIN and the compiler accepts it only right
- * after a unary minus.
+ * An integer literal is a magnitude and the sign is a unary minus. The largest valid magnitude
+ * is 2^63 so that -9223372036854775808 can be written. A literal of exactly 2^63 is returned as
+ * INT64_MIN, and the compiler accepts it only right after a unary minus.
  */
 #define INTEGER_LIMIT ((uint64_t)INT64_MAX + 1u)
 
@@ -135,7 +134,7 @@ static LzToken lex_identifier(LzLexer *lexer, size_t start) {
     return make_token(lexer, LZ_TOKEN_IDENTIFIER, start);
 }
 
-/* A run of digits and underscores: no leading, trailing or doubled underscore. */
+/* A run of digits and underscores, with no leading, trailing or doubled underscore. */
 static bool digit_run_ok(const char *text, size_t length) {
     if (length == 0 || text[0] == '_' || text[length - 1] == '_') {
         return false;
@@ -154,7 +153,7 @@ typedef enum FloatResult {
     FLOAT_NO_MEMORY
 } FloatResult;
 
-/* The lexeme may contain digit separators; the shared parser wants plain digits. */
+/* The lexeme may contain digit separators, but the shared parser wants plain digits. */
 static FloatResult parse_float(const char *text, size_t length, double *out) {
     char *buffer = malloc(length + 1);
     if (buffer == NULL) {
@@ -311,9 +310,9 @@ static LzToken lex_number(LzLexer *lexer, size_t start) {
 }
 
 /*
- * A string literal of any kind (see strlit.h). The scan finds its end; a second walk with
- * the reader reports escapes, braces and indentation that are wrong, so the compiler can
- * decode a STRING token without failing.
+ * A string literal of any kind, see strlit.h. The scan finds its end, and a second walk with the
+ * reader reports escapes, braces and indentation that are wrong, so the compiler can decode a
+ * STRING token without failing.
  */
 static LzToken lex_string(LzLexer *lexer, size_t start) {
     LzStringHead head;
@@ -437,8 +436,10 @@ LzToken lz_lexer_next(LzLexer *lexer) {
     case ',':
         return make_token(lexer, LZ_TOKEN_COMMA, start);
     case '.':
-        /* `..` and `..=` are ranges. `1.5` and `3.to_string()` never reach here: the number
-         * lexer takes the dot of a float, and a single dot stays a plain DOT. */
+        /*
+         * `..` and `..=` are ranges. `1.5` and `3.to_string()` never reach here, because the
+         * number lexer takes the dot of a float and a single dot stays a plain DOT.
+         */
         if (match(lexer, '.')) {
             return make_token(lexer,
                               match(lexer, '=') ? LZ_TOKEN_DOT_DOT_EQUAL : LZ_TOKEN_DOT_DOT, start);

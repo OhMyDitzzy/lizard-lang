@@ -82,3 +82,39 @@ Closures run on the reference interpreter and may nest 128 deep per callback.
 Parameter and result type annotations are in [Types](TYPES.md). Calling a function
 as a method — `receiver.name(args)` — is in [Methods](METHODS.md). Methods are
 functions whose first parameter is `self`, covered in [Classes](CLASSES.md).
+
+
+## Functions as values: types, generics, results
+
+A function you pass around can say what it expects from a callback with a function type,
+`fn(int) -> int`; `apply(f: fn(int) -> int, x: int)` then rejects a callback taking a
+string, or two arguments, before running:
+
+```lizard fail
+fn apply(f: fn(int) -> int, x: int) -> int {
+    return f(x)
+}
+
+fn shout(s: string) -> int { return s.len() }
+println(apply(shout, 4))
+```
+
+```
+error: type mismatch: argument 'f' of apply() expects fn(int) -> int, got fn(string) -> int
+ --> /home/claude/t/main.lz:6:15
+  |
+6 | println(apply(shout, 4))
+  |               ^^^^^ parameter 1 takes string, but it will be given int
+  |
+  = help: change the parameter to int, or the function type to take string
+
+error: aborting due to 1 previous error
+```
+
+A function that works for any element type takes type parameters, `fn first<T>(xs: T[]) -> T`,
+and the compiler fills them in at each call (`first([1, 2])` is an `int`). Inside the body
+`T` is `any`. Function types, generics, narrowing of `string?` and inferred results are
+explained with more examples in [Types](TYPES.md#function-types).
+
+A function without `->` is not left unknown: the union of its `return` types (and `nil`
+when it can fall off the end) is its result for checking, not at run time.

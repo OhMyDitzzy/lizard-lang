@@ -1,0 +1,36 @@
+# Generic functions: name the type, the compiler fills it in at each call.
+
+fn first<T>(xs: T[]) -> T {
+    return xs[0]
+}
+
+fn map<T, U>(xs: T[], f: fn(T) -> U) -> U[] {
+    let out: U[] = []
+    for x in xs { out.push(f(x)) }
+    return out
+}
+
+fn or_else<T>(x: T?, fallback: T) -> T {
+    if x == nil { return fallback }
+    return x
+}
+
+let n = first([10, 20])            # an int, as far as the compiler is concerned
+println(n + 1)                     # 11
+println(first(["a", "b"]))         # a
+println(map([1, 2, 3], fn(x: int) -> string { return $"<{x}>" }))   # ["<1>", "<2>", "<3>"]
+println(or_else(nil, 5))           # 5
+
+# A generic function is also a method: the receiver is the first argument.
+println([7, 8, 9].first())         # 7
+
+extend array {
+    pub fn final_item<T>(self: T[]) -> T { return self[len(self) - 1] }
+}
+println([7, 8, 9].final_item())          # 9
+
+# Inside the body T is just `any`; nothing new is checked while the program runs.
+
+# Uncomment to see a conflict:
+# fn same<T>(a: T, b: T) -> T { return a }
+# println(same(1, "a"))            # T was already int ... write the parameters as int | string

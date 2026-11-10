@@ -6,8 +6,8 @@
 #include "lizard/common.h"
 
 /*
- * Output sink used by the VM. Builtins never touch stdout directly, so tests
- * can capture output and a host can redirect it later.
+ * Output sink used by the VM. Builtins never touch stdout directly, so tests can capture output
+ * and a host can redirect it later.
  */
 typedef struct LzWriter {
     bool (*write)(void *ctx, const char *data, size_t length);

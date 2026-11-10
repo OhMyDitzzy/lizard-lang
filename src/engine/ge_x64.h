@@ -2,11 +2,11 @@
 #define LIZARD_GE_X64_H
 
 /*
- * A small x86-64 assembler: just the instructions the Gecko JIT emits. Code goes
- * into two sections (hot and cold) so rarely taken paths (type fallbacks, bail-out
- * stubs, slow calls) stay out of the straight-line code. Labels may be used before
- * they are bound; x64_link resolves every rel32 reference once the sections have
- * been laid out one after the other.
+ * A small x86-64 assembler with just the instructions the Gecko JIT emits. Code goes into two
+ * sections, hot and cold, so rarely taken paths like type fallbacks, bail-out stubs and slow
+ * calls stay out of the straight-line code. Labels may be used before they are bound, and
+ * x64_link resolves every rel32 reference once the sections have been laid out one after the
+ * other.
  */
 
 #include <stdbool.h>
@@ -94,8 +94,6 @@ static inline void x_section(X64 *x, int sec) {
     x->sec = sec;
 }
 
-/* ---- labels ---- */
-
 static inline int x_label(X64 *x) {
     if (x->label_count == x->label_cap) {
         size_t cap = x->label_cap == 0 ? 256 : x->label_cap * 2;
@@ -135,8 +133,6 @@ static inline void x_fixup(X64 *x, int label) {
     x_d(x, 0);
 }
 
-/* ---- encoding helpers ---- */
-
 static inline void x_rex(X64 *x, int w, int reg, int rm) {
     unsigned r = 0x40u | ((unsigned)w << 3) | (((unsigned)reg >> 3) & 1u) << 2 | (((unsigned)rm >> 3) & 1u);
     if (r != 0x40u) {
@@ -161,8 +157,6 @@ static inline void x_mrm(X64 *x, int reg, int base, int32_t disp) {
         x_d(x, (uint32_t)disp);
     }
 }
-
-/* ---- moves ---- */
 
 static inline void mov_rr(X64 *x, int d, int s) {
     x_rex(x, 1, s, d);
@@ -238,8 +232,6 @@ static inline void lea(X64 *x, int d, int b, int32_t o) {
     x_b(x, 0x8D);
     x_mrm(x, d, b, o);
 }
-
-/* ---- arithmetic and logic ---- */
 
 static inline void alu_rr(X64 *x, int op, int d, int s) { /* d = d op s */
     x_rex(x, 1, s, d);
@@ -346,7 +338,7 @@ static inline void not_r(X64 *x, int r) {
     x_mrr(x, 2, r);
 }
 
-static inline void shift_cl(X64 *x, int ext, int r) { /* shift r by cl; ext: 4 shl, 5 shr, 7 sar */
+static inline void shift_cl(X64 *x, int ext, int r) { /* shift r by cl, where ext is 4 for shl, 5 for shr and 7 for sar */
     x_rex(x, 1, 0, r);
     x_b(x, 0xD3);
     x_mrr(x, ext, r);
@@ -363,7 +355,7 @@ static inline void cqo(X64 *x) {
     x_b(x, 0x99);
 }
 
-static inline void shift_ri(X64 *x, int ext, int r, int amount) { /* ext: 4 shl, 5 shr, 7 sar */
+static inline void shift_ri(X64 *x, int ext, int r, int amount) { /* ext is 4 for shl, 5 for shr and 7 for sar */
     x_rex(x, 1, 0, r);
     x_b(x, 0xC1);
     x_mrr(x, ext, r);
@@ -405,8 +397,6 @@ static inline void setcc_al(X64 *x, int cc) {
     x_b(x, 0x90u + (unsigned)cc);
     x_b(x, 0xC0); /* al */
 }
-
-/* ---- control flow ---- */
 
 static inline void jmp_l(X64 *x, int label) {
     x_b(x, 0xE9);
@@ -458,8 +448,6 @@ static inline void lea_label(X64 *x, int d, int label) { /* lea d, [rip + label]
     x_fixup(x, label);
 }
 
-/* ---- SSE2 ---- */
-
 static inline void sse_rr(X64 *x, int prefix, int w, int op, int reg, int rm) {
     if (prefix != 0) {
         x_b(x, (unsigned)prefix);
@@ -493,12 +481,10 @@ static inline void sse_arith(X64 *x, int op, int d, int s) { sse_rr(x, 0xF2, 0, 
 static inline void ucomisd_xx(X64 *x, int a, int b) { sse_rr(x, 0x66, 0, 0x2E, a, b); }
 static inline void xorpd_xx(X64 *x, int a, int b) { sse_rr(x, 0x66, 0, 0x57, a, b); }
 
-/* ---- linking ---- */
-
 /*
- * Lays the hot section then the cold one (16-byte aligned) into out[0..total) and
- * resolves every fixup. Returns total size, or 0 on failure (out of memory or an
- * unbound label). out may be NULL to only measure.
+ * Lays the hot section and then the cold one, 16-byte aligned, into out[0..total) and resolves
+ * every fixup. Returns the total size, or 0 on failure from out of memory or an unbound label.
+ * out may be NULL to only measure.
  */
 static inline size_t x64_size(const X64 *x) {
     size_t cold_at = (x->len[0] + 15u) & ~(size_t)15u;

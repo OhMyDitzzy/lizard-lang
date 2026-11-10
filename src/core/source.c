@@ -8,7 +8,7 @@
 
 static void put(const LzWriter *out, const char *format, ...) LZ_PRINTF_FORMAT(2, 3);
 
-/* For short formats only: the output is cut at 255 bytes. Long text is written directly. */
+/* For short formats only, and the output is cut at 255 bytes. Long text is written directly. */
 static void put(const LzWriter *out, const char *format, ...) {
     char text[256];
     va_list args;
@@ -49,7 +49,10 @@ bool lz_source_read_file(LzSource *source, const char *path, char *error, size_t
     while (text != NULL) {
         if (length == capacity) {
             if (capacity >= LZ_SOURCE_MAX_BYTES) {
-                /* The buffer holds exactly the limit: only more data makes the file too large. */
+                /*
+                 * The buffer holds exactly the limit, so only more data makes the file too
+                 * large.
+                 */
                 if (fgetc(file) == EOF) {
                     break;
                 }
@@ -87,7 +90,7 @@ bool lz_source_read_file(LzSource *source, const char *path, char *error, size_t
         return false;
     }
 
-    /* A UTF-8 byte order mark is not program text; editors on Windows add one. */
+    /* A UTF-8 byte order mark is not program text, and editors on Windows add one. */
     if (length >= 3 && (unsigned char)text[0] == 0xEF && (unsigned char)text[1] == 0xBB &&
         (unsigned char)text[2] == 0xBF) {
         memmove(text, text + 3, length - 3);
@@ -147,7 +150,7 @@ void lz_source_write_diagnostic(const LzSource *source, size_t offset, size_t le
     }
     LzLocation location = lz_source_locate(source, offset);
 
-    /* Piece by piece: a long file name or message must never cut the header short. */
+    /* Piece by piece, because a long file name or message must never cut the header short. */
     (void)lz_writer_write_cstr(out, source->name);
     put(out, ":%u:%u: ", (unsigned)location.line, (unsigned)location.column);
     (void)lz_writer_write_cstr(out, severity);

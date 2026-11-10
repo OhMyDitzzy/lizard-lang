@@ -4,7 +4,9 @@
 #include "lizard/array.h"
 #include "lizard/class.h"
 #include "lizard/dict.h"
+#include "lizard/function.h"
 #include "lizard/link.h"
+#include "lizard/native.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -41,7 +43,7 @@ uint16_t lz_kind_of(const LzValue *value) {
         case LZ_OBJ_LINK:
         case LZ_OBJ_FUNCTION:
         case LZ_OBJ_UPVALUE:
-            return 0; /* no kind of its own: a link is tested by its target, the rest are internal */
+            return 0; /* no kind of its own, because a link is tested by its target and the rest are internal */
         }
         return 0;
     }
@@ -160,7 +162,7 @@ static bool literal_from_value(const LzValue *value, LzLiteral *out) {
 
 LzType lz_type_of_value(const LzValue *value) {
     if (value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_LINK) {
-        /* A link is described as what it points at (or as nil when its target is gone). */
+        /* A link is described as what it points at, or as nil when its target is gone. */
         LzValue target = lz_link_deref((const LzLink *)value->as.object);
         return lz_type_of_value(&target);
     }
@@ -198,6 +200,9 @@ LzType lz_type_widen(const LzType *type) {
     widened.value_element = type->value_element;
     widened.class_name = type->class_name;
     widened.class_id = type->class_id;
+    widened.fn = type->fn;
+    widened.tparam = type->tparam;
+    widened.tparam_nullable = type->tparam_nullable;
     return widened;
 }
 
@@ -224,7 +229,20 @@ bool lz_type_add_literal(LzType *type, const LzLiteral *literal) {
     return true;
 }
 
+/* A type parameter and nil, like `T?`. Any other union with one is `any` anyway. */
+static bool type_param_or_nil(LzType *out, const LzType *a, const LzType *b) {
+    if (a->tparam != NULL && a->kinds == LZ_KINDS_ANY && b->kinds == LZ_KIND_NIL && b->literal_count == 0) {
+        *out = *a;
+        out->tparam_nullable = 1;
+        return true;
+    }
+    return false;
+}
+
 bool lz_type_union(LzType *out, const LzType *a, const LzType *b) {
+    if (type_param_or_nil(out, a, b) || type_param_or_nil(out, b, a)) {
+        return true;
+    }
     LzType result = lz_type_of_kinds((uint16_t)(a->kinds | b->kinds));
     if ((a->kinds & LZ_KIND_ARRAY) != 0 && (b->kinds & LZ_KIND_ARRAY) != 0) {
         result.element = a->element == b->element ? a->element : NULL;
@@ -257,8 +275,19 @@ bool lz_type_union(LzType *out, const LzType *a, const LzType *b) {
         result.class_name = b->class_name;
         result.class_id = b->class_id;
     }
+    /* Two different function signatures in a union merge into any function, like arrays do. */
+    if ((a->kinds & LZ_KIND_FUNCTION) != 0 && (b->kinds & LZ_KIND_FUNCTION) != 0) {
+        result.fn = a->fn == b->fn ? a->fn : NULL;
+    } else if ((a->kinds & LZ_KIND_FUNCTION) != 0) {
+        result.fn = a->fn;
+    } else if ((b->kinds & LZ_KIND_FUNCTION) != 0) {
+        result.fn = b->fn;
+    }
     if ((result.kinds & LZ_KIND_INSTANCE) == 0 && (result.kinds & LZ_KIND_ERROR) != 0) {
-        /* an error kind (class_id is kind + 1; 0 any error): two different ones make any error */
+        /*
+         * an error kind (class_id is kind + 1, and 0 means any error), and two different ones
+         * make any error
+         */
         if ((a->kinds & LZ_KIND_ERROR) != 0 && (b->kinds & LZ_KIND_ERROR) != 0) {
             result.class_id = a->class_id == b->class_id ? a->class_id : 0;
         } else {
@@ -279,8 +308,17 @@ bool lz_type_union(LzType *out, const LzType *a, const LzType *b) {
     return true;
 }
 
+bool lz_type_is_any(const LzType *type) {
+    return type->kinds == LZ_KINDS_ANY && type->literal_count == 0 && type->element == NULL &&
+           type->tparam == NULL;
+}
+
 bool lz_type_equal(const LzType *a, const LzType *b) {
-    if (a->kinds != b->kinds || a->literal_count != b->literal_count) {
+    if (a->kinds != b->kinds || a->literal_count != b->literal_count || a->tparam != b->tparam ||
+        a->tparam_nullable != b->tparam_nullable) {
+        return false;
+    }
+    if ((a->kinds & LZ_KIND_FUNCTION) != 0 && a->fn != b->fn) {
         return false;
     }
     if ((a->kinds & LZ_KIND_ARRAY) != 0 && a->element != b->element) {
@@ -315,6 +353,12 @@ static uint32_t mix(uint64_t value) {
 
 uint32_t lz_type_hash(const LzType *type) {
     uint32_t hash = mix(type->kinds + 1u);
+    if ((type->kinds & LZ_KIND_FUNCTION) != 0 && type->fn != NULL) {
+        hash ^= mix((uint64_t)(uintptr_t)type->fn ^ 0xAAAAu);
+    }
+    if (type->tparam != NULL) {
+        hash ^= mix((uint64_t)(uintptr_t)type->tparam ^ 0xBBBBu ^ type->tparam_nullable);
+    }
     if ((type->kinds & LZ_KIND_ARRAY) != 0) {
         hash ^= mix((uint64_t)(uintptr_t)type->element);
     }
@@ -350,7 +394,49 @@ uint32_t lz_type_hash(const LzType *type) {
 #define INSTANCE_KIND_UNLIKELY(kind) ((kind) == LZ_KIND_INSTANCE)
 #endif
 
-/* The `is` operator: a link is tested by its target (no target, no match). Anything else as usual. */
+static bool takes_arguments(const LzValue *value, size_t argc, int depth) {
+    if (value->type != LZ_VAL_OBJECT) {
+        return true;
+    }
+    switch (value->as.object->type) {
+    case LZ_OBJ_CLOSURE: {
+        const LzFunction *function = ((const LzClosure *)value->as.object)->function;
+        return argc >= function->required && (function->has_rest || argc <= function->param_count);
+    }
+    case LZ_OBJ_NATIVE: {
+        const LzNative *native = (const LzNative *)value->as.object;
+        return argc >= (size_t)native->min_args &&
+               (native->max_args == LZ_VARIADIC || argc <= (size_t)native->max_args);
+    }
+    case LZ_OBJ_BOUND: {
+        const LzBound *bound = (const LzBound *)value->as.object;
+        if (bound->skip_first || depth > 4) {
+            return true; /* a call of a function held in a field, so the shape is the callee's own */
+        }
+        return takes_arguments(&bound->callee, argc + 1, depth + 1); /* the receiver comes first */
+    }
+    default:
+        return true; /* a class, and its constructor checks the call itself */
+    }
+}
+
+bool lz_function_value_takes(const LzValue *value, size_t argc) {
+    return takes_arguments(value, argc, 0);
+}
+
+/* A function value against the signature a type asks for. Only the argument count is known. */
+static bool function_fits(const LzFnType *fn, const LzValue *value) {
+    /* A caller of this type passes any number from `required` to the most it names. */
+    if (!lz_function_value_takes(value, fn->required)) {
+        return false;
+    }
+    return fn->has_rest || lz_function_value_takes(value, fn->param_count);
+}
+
+/*
+ * The `is` operator tests a link by its target, so no target means no match. Anything else works
+ * as usual.
+ */
 bool lz_type_matches_through_link(const LzType *type, const LzValue *value) {
     if (lz_value_is_link(value)) {
         const LzLink *link = lz_value_as_link(value);
@@ -401,16 +487,16 @@ bool lz_type_matches(const LzType *type, const LzValue *value) {
         return bit < 256 && ((error->is_kind[bit / 64] >> (bit % 64)) & 1u) != 0;
     }
     if (value_kind == LZ_KIND_ERROR && (type->kinds & LZ_KIND_INSTANCE) != 0 && type->class_id != 0) {
-        /* an error of a class that has this trait (or this class as a parent) */
+        /* an error of a class that has this trait, or this class as a parent */
         return lz_error_is_class((const LzError *)value->as.object, type->class_id);
     }
     if (value_kind == 0 && value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_LINK) {
         /*
-         * A link cell is not the object it points at: it fits no class, array, dict, function or
-         * scalar type (a typed parameter, variable, array item or plain field would otherwise be
-         * handed a cell where code expects an instance). Only `any` takes it, because `any` makes
-         * no promise about the value. A link FIELD checks its target instead (class.c), and
-         * `link(x) is Node` asks lz_type_matches_through_link.
+         * A link cell is not the object it points at. It fits no class, array, dict, function or
+         * scalar type, because a typed parameter, variable, array item or plain field would
+         * otherwise be handed a cell where code expects an instance. Only `any` takes it,
+         * because `any` makes no promise about the value. A link FIELD checks its target instead
+         * (class.c), and `link(x) is Node` asks lz_type_matches_through_link.
          */
         return (type->kinds & LZ_KINDS_ANY) == LZ_KINDS_ANY && type->class_id == 0;
     }
@@ -419,6 +505,9 @@ bool lz_type_matches(const LzType *type, const LzValue *value) {
                (type->class_id == 0 || lz_class_is_a(lz_value_as_instance(value)->cls, type->class_id));
     }
     if ((value_kind & type->kinds) != 0) {
+        if (value_kind == LZ_KIND_FUNCTION && type->fn != NULL) {
+            return function_fits(type->fn, value); /* the count of arguments, and types are not tested */
+        }
         return true;
     }
     for (size_t i = 0; i < type->literal_count; i++) {
@@ -429,7 +518,7 @@ bool lz_type_matches(const LzType *type, const LzValue *value) {
     return false;
 }
 
-/* How an array of items `from` can be stored as an array of items `to` (NULL = any). */
+/* How an array of items `from` can be stored as an array of items `to`, where NULL means any. */
 static LzAssign element_assignable(const LzType *from, const LzType *to) {
     if (to == NULL) {
         return LZ_ASSIGN_ALWAYS;
@@ -441,8 +530,76 @@ static LzAssign element_assignable(const LzType *from, const LzType *to) {
     return lz_type_assignable(from, to);
 }
 
+/*
+ * The type of parameter `index` of a signature, or `any` when it names none. False when there's
+ * no such parameter.
+ */
+static bool fn_param_type(const LzFnType *fn, size_t index, LzType *out) {
+    const LzType *found;
+    if (index < fn->param_count) {
+        found = fn->params[index];
+    } else if (fn->has_rest) {
+        found = fn->rest;
+    } else {
+        return false;
+    }
+    *out = found != NULL ? *found : lz_type_of_kinds(LZ_KINDS_ANY);
+    return true;
+}
+
+static LzAssign worst(LzAssign a, LzAssign b) {
+    return a == LZ_ASSIGN_NEVER || b == LZ_ASSIGN_NEVER ? LZ_ASSIGN_NEVER
+           : a == LZ_ASSIGN_MAYBE || b == LZ_ASSIGN_MAYBE ? LZ_ASSIGN_MAYBE
+                                                           : LZ_ASSIGN_ALWAYS;
+}
+
+/*
+ * Can a function of signature `from` stand where signature `to` is asked for? The callers of
+ * `to` pass between `to->required` and `to->param_count` arguments, or any number with a rest
+ * parameter, so `from` must take all of those. Parameters are contravariant, meaning what the
+ * callers pass must fit what the function takes, and the result is covariant. A NULL `from` is a
+ * function of unknown shape, which might fit.
+ */
+static LzAssign fn_assignable(const LzFnType *from, const LzFnType *to) {
+    if (to == NULL) {
+        return LZ_ASSIGN_ALWAYS;
+    }
+    if (from == NULL) {
+        return LZ_ASSIGN_MAYBE;
+    }
+    size_t from_max = from->has_rest ? SIZE_MAX : from->param_count;
+    size_t to_max = to->has_rest ? SIZE_MAX : to->param_count;
+    size_t low = from->required > to->required ? from->required : to->required;
+    size_t high = from_max < to_max ? from_max : to_max;
+    if (low > high) {
+        return LZ_ASSIGN_NEVER; /* no call of the one is a call the other takes */
+    }
+    LzAssign verdict = from->required <= to->required && to_max <= from_max ? LZ_ASSIGN_ALWAYS
+                                                                           : LZ_ASSIGN_MAYBE;
+    size_t shown = from->param_count > to->param_count ? from->param_count : to->param_count;
+    if ((from->has_rest || to->has_rest) && shown < SIZE_MAX) {
+        shown += 1;
+    }
+    for (size_t i = 0; i < shown; i++) {
+        LzType given;
+        LzType taken;
+        if (!fn_param_type(to, i, &given) || !fn_param_type(from, i, &taken)) {
+            continue;
+        }
+        verdict = worst(verdict, lz_type_assignable(&given, &taken));
+        if (verdict == LZ_ASSIGN_NEVER) {
+            return verdict;
+        }
+    }
+    if (to->result != NULL) {
+        LzType produced = from->result != NULL ? *from->result : lz_type_of_kinds(LZ_KINDS_ANY);
+        verdict = worst(verdict, lz_type_assignable(&produced, to->result));
+    }
+    return verdict;
+}
+
 LzAssign lz_type_assignable(const LzType *from, const LzType *to) {
-    uint16_t scalar = (uint16_t)~(LZ_KIND_ARRAY | LZ_KIND_DICT | LZ_KIND_INSTANCE);
+    uint16_t scalar = (uint16_t)~(LZ_KIND_ARRAY | LZ_KIND_DICT | LZ_KIND_INSTANCE | LZ_KIND_FUNCTION);
     bool always = (from->kinds & ~to->kinds & LZ_KINDS_ANY & scalar) == 0;
     bool overlap = (from->kinds & to->kinds & scalar) != 0;
 
@@ -455,7 +612,7 @@ LzAssign lz_type_assignable(const LzType *from, const LzType *to) {
             always = false; /* some object, maybe of that class */
             overlap = true;
         } else {
-            always = false; /* stage 2: a subclass of to->class_name would overlap here */
+            always = false; /* stage 2 would need a subclass of to->class_name to overlap here */
         }
     }
 
@@ -463,6 +620,20 @@ LzAssign lz_type_assignable(const LzType *from, const LzType *to) {
         (to->kinds & LZ_KIND_INSTANCE) == 0 && to->class_id != 0 && from->class_id != to->class_id) {
         always = false; /* some error, maybe of that kind: checked when it runs */
         overlap = true;
+    }
+
+    if ((from->kinds & LZ_KIND_FUNCTION) != 0) {
+        if ((to->kinds & LZ_KIND_FUNCTION) == 0) {
+            always = false;
+        } else {
+            LzAssign shape = fn_assignable(from->fn, to->fn);
+            if (shape != LZ_ASSIGN_ALWAYS) {
+                always = false;
+            }
+            if (shape != LZ_ASSIGN_NEVER) {
+                overlap = true;
+            }
+        }
     }
 
     if ((from->kinds & LZ_KIND_ARRAY) != 0) {
@@ -575,7 +746,63 @@ static void write_literal(const LzWriter *out, const LzLiteral *literal) {
     }
 }
 
-/* A nested type in brackets: parenthesised when it is a union, like (int | string)[]. */
+/*
+ * Does the text of a type end in a `-> result` that would swallow a `[]`, `?` or `|` written
+ * after it?
+ */
+static bool has_top_arrow(const char *text) {
+    int depth = 0;
+    for (size_t i = 0; text[i] != '\0'; i++) {
+        if (text[i] == '(' || text[i] == '[') {
+            depth++;
+        } else if (text[i] == ')' || text[i] == ']') {
+            depth--;
+        } else if (depth == 0 && text[i] == '-' && text[i + 1] == '>') {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * The text of a type that is about to get `[]` or `?`. A union or a `fn(..) -> r` needs
+ * parentheses.
+ */
+static bool needs_parens(const char *text) {
+    return strstr(text, " | ") != NULL || has_top_arrow(text);
+}
+
+static void write_fn(const LzFnType *fn, const LzWriter *out) {
+    write_text(out, "fn(");
+    for (size_t i = 0; i < fn->param_count; i++) {
+        if (i > 0) {
+            write_text(out, ", ");
+        }
+        if (fn->params[i] != NULL) {
+            lz_type_describe(fn->params[i], out);
+        } else {
+            write_text(out, "any");
+        }
+        if (i >= fn->required) {
+            write_text(out, " = ..."); /* a parameter with a default, which is not something a type can say */
+        }
+    }
+    if (fn->has_rest) {
+        write_text(out, fn->param_count > 0 ? ", ..." : "...");
+        if (fn->rest != NULL) {
+            lz_type_describe(fn->rest, out);
+        } else {
+            write_text(out, "any");
+        }
+    }
+    write_text(out, ")");
+    if (fn->result != NULL) {
+        write_text(out, " -> ");
+        lz_type_describe(fn->result, out);
+    }
+}
+
+/* A nested type in brackets, parenthesised when it's a union, like (int | string)[]. */
 static void write_nested(const LzType *type, const LzWriter *out) {
     if (type == NULL) {
         write_text(out, "any");
@@ -584,7 +811,7 @@ static void write_nested(const LzType *type, const LzWriter *out) {
     LzBuffer item = {0};
     LzWriter item_out = lz_writer_from_buffer(&item);
     lz_type_describe(type, &item_out);
-    bool compound = item.data != NULL && strstr(item.data, " | ") != NULL;
+    bool compound = item.data != NULL && needs_parens(item.data);
     write_text(out, compound ? "(" : "");
     write_text(out, item.data != NULL ? item.data : "?");
     write_text(out, compound ? ")" : "");
@@ -592,6 +819,11 @@ static void write_nested(const LzType *type, const LzWriter *out) {
 }
 
 void lz_type_describe(const LzType *type, const LzWriter *out) {
+    if (type->tparam != NULL && type->kinds == LZ_KINDS_ANY) {
+        write_text(out, type->tparam->data);
+        write_text(out, type->tparam_nullable ? "?" : "");
+        return;
+    }
     if (type->kinds == LZ_KINDS_ANY && type->element == NULL) {
         write_text(out, "any");
         return;
@@ -632,7 +864,24 @@ void lz_type_describe(const LzType *type, const LzWriter *out) {
         PART("nil");
     }
     if ((kinds & LZ_KIND_FUNCTION) != 0) {
-        PART("function");
+        if (type->fn == NULL) {
+            PART("function");
+        } else {
+            /* In a union the signature is parenthesised when its result would swallow the rest. */
+            bool union_member = kinds != LZ_KIND_FUNCTION || type->literal_count != 0;
+            LzBuffer signature = {0};
+            LzWriter signature_out = lz_writer_from_buffer(&signature);
+            write_fn(type->fn, &signature_out);
+            bool wrap = union_member && signature.data != NULL && has_top_arrow(signature.data);
+            if (!first) {
+                write_text(out, " | ");
+            }
+            first = false;
+            write_text(out, wrap ? "(" : "");
+            write_text(out, signature.data != NULL ? signature.data : "fn");
+            write_text(out, wrap ? ")" : "");
+            lz_buffer_free(&signature);
+        }
     }
     if ((kinds & LZ_KIND_ARRAY) != 0) {
         if (!first) {
@@ -646,7 +895,7 @@ void lz_type_describe(const LzType *type, const LzWriter *out) {
             LzBuffer item = {0};
             LzWriter item_out = lz_writer_from_buffer(&item);
             lz_type_describe(type->element, &item_out);
-            bool compound = item.data != NULL && strstr(item.data, " | ") != NULL;
+            bool compound = item.data != NULL && needs_parens(item.data);
             write_text(out, compound ? "(" : "");
             write_text(out, item.data != NULL ? item.data : "?");
             write_text(out, compound ? ")[]" : "[]");

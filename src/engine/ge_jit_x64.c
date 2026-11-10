@@ -1,31 +1,27 @@
 /*
- * The Gecko JIT, x86-64 backend (System V ABI). See docs/ENGINE.md.
+ * The Gecko JIT, x86-64 backend for the System V ABI. See docs/ENGINE.md.
  *
- * Model
- * -----
- * Native code runs on the VM's own value stack and frame stack. Values stay in
- * memory (vm->stack); the JIT knows statically how many values each instruction
- * has above the frame base ("depth"), so locals and temporaries are plain
- * [r14 + 16 * slot] operands. Registers:
+ * Native code runs on the VM's own value stack and frame stack. Values stay in memory (vm->stack),
+ * and the JIT knows statically how many values each instruction has above the frame base ("depth"),
+ * so locals and temporaries are plain [r14 + 16 * slot] operands. The registers are:
  *
  *   rbx  the LzVM            r12  the GeJitExit of this entry
  *   r13  base index of the frame     r14  &vm->stack[base]
- *   r15  instructions executed since entry (flushed to vm->instructions on exit)
+ *   r15  instructions executed since entry, flushed to vm->instructions on exit
  *
- * Instructions are compiled the way GE fuses them (see ge_translate.c): `i = i + 1`
- * is one block of machine code that reads its operands in place, checks their
- * types, computes and stores. Whenever a check fails (a string, an overflow, an
- * out of range index, ...) the code "bails out": it leaves the state exactly as it
- * was before the instruction and returns to the interpreter, which runs that
- * instruction itself (and produces every error message). Nothing is changed before
- * every check of an instruction has passed, so a bail-out is always exact.
+ * Instructions are compiled the way GE fuses them, see ge_translate.c, so `i = i + 1` is one block
+ * of machine code that reads its operands in place, checks their types, computes and stores.
+ * Whenever a check fails, like a string, an overflow or an out of range index, the code "bails
+ * out". It leaves the state exactly as it was before the instruction and returns to the
+ * interpreter, which runs that instruction itself and produces every error message. Nothing is
+ * changed before every check of an instruction has passed, so a bail-out is always exact.
  *
- * Instructions the JIT does not inline are executed by calling the reference
- * semantics (lz_vm_exec_one); calls to user functions push the frame inline and
- * use a native `call`, so recursion stays in machine code.
+ * Instructions the JIT doesn't inline are executed by calling the reference semantics
+ * (lz_vm_exec_one). Calls to user functions push the frame inline and use a native `call`, so
+ * recursion stays in machine code.
  *
- * Fuel: native code is only ever entered while fuel is unlimited (the interpreter
- * checks), so there is nothing to meter; vm->instructions is kept exact.
+ * Native code is only ever entered while fuel is unlimited, because the interpreter checks, so
+ * there's nothing to meter. vm->instructions is kept exact.
  */
 
 #define _DEFAULT_SOURCE
@@ -43,10 +39,6 @@
 #include "ge_x64.h"
 
 
-/* ---------------------------------------------------------------------------------
- * The entry trampoline
- * ------------------------------------------------------------------------------- */
-
 typedef uint32_t (*TrampolineFn)(LzVM *vm, size_t base_index, LzValue *base_ptr, void *target,
                                  GeJitExit *exit);
 
@@ -55,10 +47,10 @@ static void *g_exit_thunk;
 static bool g_tramp_failed;
 
 /*
- * enter(vm, base_index, base_ptr, target, exit): saves the callee-saved registers,
- * sets up rbx/r12-r15, and jumps to `target` laid out as the body of a native
- * function (a pad word and a return address on the stack). Native code leaves by
- * `ret` (a function returned) or by the exit thunk (everything else).
+ * enter(vm, base_index, base_ptr, target, exit) saves the callee-saved registers, sets up rbx
+ * and r12 to r15, and jumps to `target`, which is laid out as the body of a native function with
+ * a pad word and a return address on the stack. Native code leaves by `ret` when a function
+ * returned, or by the exit thunk for everything else.
  */
 static bool tramp_init(void) {
     if (g_tramp != NULL) {
@@ -145,14 +137,10 @@ bool ge_jit_enter(LzVM *vm, const struct GeJit *jit, size_t pc, size_t base, siz
     return true;
 }
 
-/* ---------------------------------------------------------------------------------
- * Compilation
- * ------------------------------------------------------------------------------- */
-
 typedef struct Cx {
     X64 x;
     JitIR ir;
-    int *lab;            /* instruction -> label */
+    int *lab;            /* maps each instruction to its label */
     /* emission state */
     size_t i;
     int d;
@@ -162,8 +150,6 @@ typedef struct Cx {
 } Cx;
 
 #define X (&c->x)
-
-/* ---- emission helpers ---- */
 
 static void emit_flush(Cx *c) {
     if (c->pend != 0) {
@@ -185,7 +171,10 @@ static void emit_leave(Cx *c, uint32_t reason, uint32_t pc) {
     jmp_r(X, RAX);
 }
 
-/* A cold stub that returns to the interpreter at instruction pc, with `depth` values on the stack. */
+/*
+ * A cold stub that returns to the interpreter at instruction pc, with `depth` values on the
+ * stack.
+ */
 static void emit_bail_stub(Cx *c, uint32_t pc, int depth, int pend) {
     if (pend != 0) {
         lea(X, R15, R15, pend);
@@ -230,7 +219,10 @@ static void emit_sync_sc(Cx *c, int depth) {
     mov_mr(X, RBX, O_SC, RAX);
 }
 
-/* Release the object in rcx (refcount already known to be <= 1): the real release. */
+/*
+ * Release the object in rcx, whose refcount is already known to be <= 1, so this is the real
+ * release.
+ */
 static void emit_drop_slow(Cx *c, int skip, int slow, bool keep_pair) {
     int saved = X->sec;
     x_section(X, SEC_COLD);
@@ -282,7 +274,10 @@ static void emit_drop_obj(Cx *c, int reg) {
     x_section(X, saved);
 }
 
-/* Stores rdx (tag) and rax (payload) at [base+off]; an object that was there is released. */
+/*
+ * Stores rdx, the tag, and rax, the payload, at [base+off]. An object that was there is
+ * released.
+ */
 static void emit_store_drop(Cx *c, int base, int32_t off) {
     int done = x_label(X);
     int slow = x_label(X);
@@ -303,7 +298,10 @@ static void emit_store_drop(Cx *c, int base, int32_t off) {
     x_section(X, saved);
 }
 
-/* Copies a value (rax = tag word, rdx = payload) and takes a reference when it is an object. */
+/*
+ * Copies a value, with rax as the tag word and rdx as the payload, and takes a reference when
+ * it's an object.
+ */
 static void emit_grab_pair(Cx *c) {
     int skip = x_label(X);
     alu_ri(X, 0, ALU_CMP, RAX, LZ_VAL_OBJECT);
@@ -319,8 +317,6 @@ static void emit_copy_grab(Cx *c, int sb, int32_t so, int db, int32_t dof) {
     mov_mr(X, db, dof + 8, RDX);
     emit_grab_pair(c);
 }
-
-/* ---- operands ---- */
 
 enum { OPD_MEM, OPD_INT, OPD_FLT };
 
@@ -372,7 +368,7 @@ static void emit_global(Cx *c, int reg, uint16_t name_index, JitSite *site, bool
     x_section(X, saved);
 }
 
-/* Where an assignment to an existing global goes (ge_exec.c: global_store). */
+/* Where an assignment to an existing global goes, see global_store in ge_exec.c. */
 static void emit_global_store_cell(Cx *c, int reg, uint16_t name_index, JitSite *site, int bail) {
     mov_rm(X, RAX, RBX, O_GCAP);
     imul_rri(X, RAX, RAX, 3);
@@ -422,7 +418,7 @@ static uint64_t double_bits(double v) {
     return b;
 }
 
-/* xmm = the operand as a double; jumps to bail when it is not a number. */
+/* xmm gets the operand as a double, and it jumps to bail when the operand isn't a number. */
 static void load_double(Cx *c, const Opd *o, int xmm, int bail, bool exact) {
     if (o->kind == OPD_INT) {
         mov_ri(X, RAX, (uint64_t)o->iv);
@@ -478,7 +474,7 @@ static int log2_exact(int64_t v) {
     return k;
 }
 
-/* rax = x op y on ints (y in rcx unless a constant); the result tag goes to rdx. */
+/* rax = x op y on ints, with y in rcx unless it's a constant. The result tag goes to rdx. */
 static void emit_int_op(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int bail) {
     bool bconst = b->kind == OPD_INT;
     load_int(c, a, RAX);
@@ -587,7 +583,10 @@ static void emit_float_op(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int ba
         break;
     }
     case LZ_OP_MODULO: {
-        /* Whole-number operands only (ge_exec.c: arith): y in (0, 2^53], x in [-2^53, 2^53]. */
+        /*
+         * Whole-number operands only, see arith in ge_exec.c. y is in (0, 2^53] and x in [-2^53,
+         * 2^53].
+         */
         int ok = x_label(X);
         mov_ri(X, RAX, double_bits((double)GE_TWO_53_I));
         movq_xr(X, 3, RAX);
@@ -630,7 +629,7 @@ static void emit_float_op(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int ba
     mov_ri(X, RDX, LZ_VAL_FLOAT);
 }
 
-/* The arithmetic of a binary operation; leaves rax = payload, rdx = tag. */
+/* The arithmetic of a binary operation. Leaves rax = payload and rdx = tag. */
 static void emit_arith(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int bail) {
     bool a_int = a->kind == OPD_INT;
     bool b_int = b->kind == OPD_INT;
@@ -675,7 +674,7 @@ static int not_cc_int(uint8_t sub) {
     }
 }
 
-/* The float comparison, ending in a jump to lfalse; falls through when true. */
+/* The float comparison, ending in a jump to lfalse. It falls through when true. */
 static void emit_float_compare(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int lfalse, int commit,
                                int bail) {
     bool a_exact = a->kind != OPD_INT || (a->iv >= -GE_TWO_53_I && a->iv <= GE_TWO_53_I);
@@ -715,9 +714,9 @@ static void emit_float_compare(Cx *c, uint8_t sub, const Opd *a, const Opd *b, i
 }
 
 /*
- * Compares two numbers. Falls through when the comparison is true, jumps to lfalse
- * when it is false, bails when an operand is not a number. `commit` instructions are
- * added to the counter on both paths (before the flags are set).
+ * Compares two numbers. Falls through when the comparison is true, jumps to lfalse when it's
+ * false, and bails when an operand isn't a number. `commit` instructions are added to the
+ * counter on both paths, before the flags are set.
  */
 static void emit_compare(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int lfalse, int commit, int bail) {
     bool a_int = a->kind == OPD_INT;
@@ -761,7 +760,7 @@ static void emit_compare(Cx *c, uint8_t sub, const Opd *a, const Opd *b, int lfa
     }
 }
 
-/* Continue at instruction `next` after the code just emitted (a jump unless it follows). */
+/* Continue at instruction `next` after the code just emitted, which is a jump unless it follows. */
 static void finish_group(Cx *c, uint32_t next) {
     if (c->ir.nexte[c->i] != next) {
         emit_flush(c);
@@ -773,8 +772,6 @@ static void end_plain(Cx *c, int span) {
     c->pend += span;
     finish_group(c, (uint32_t)(c->i + (size_t)span));
 }
-
-/* ---- the instructions ---- */
 
 static void emit_unconditional_bail(Cx *c) {
     jmp_l(X, bail_label(c));
@@ -900,9 +897,9 @@ static void emit_plain_arith(Cx *c, uint8_t sub) {
 }
 
 /*
- * A plain bitwise instruction on the two ints on top of the stack. Anything else (a value
- * that is not an int, a shift count outside 0..63) goes back to the interpreter, which
- * reports the error with the source position. Nothing is written before the last check.
+ * A plain bitwise instruction on the two ints on top of the stack. Anything else, like a value
+ * that isn't an int or a shift count outside 0..63, goes back to the interpreter, which reports
+ * the error with the source position. Nothing is written before the last check.
  */
 static void emit_plain_bitwise(Cx *c, uint8_t sub) {
     int bail = bail_label(c);
@@ -1020,7 +1017,10 @@ static void emit_cmpj(Cx *c, const GeIns *in, bool left_on_stack) {
     finish_group(c, (uint32_t)(c->i + in->span));
 }
 
-/* array[index] with the array operand a and the index operand b; leaves rax = array, rsi:rdi = item. */
+/*
+ * array[index] with the array operand a and the index operand b. Leaves rax = array and rsi:rdi
+ * = item.
+ */
 static void emit_array_load(Cx *c, const Opd *a, const Opd *b, int bail) {
     alu_mi(X, 0, ALU_CMP, a->base, a->disp, LZ_VAL_OBJECT);
     jcc_l(X, CC_NE, bail);
@@ -1056,7 +1056,7 @@ static void emit_grab_item(Cx *c) { /* the item in rsi:rdi gets a reference when
     x_bind(X, skip);
 }
 
-/* [load a] [load b] INDEX and [load b] INDEX (array on the stack). */
+/* [load a] [load b] INDEX, and [load b] INDEX with the array on the stack. */
 static void emit_index_fused(Cx *c, const GeIns *in, bool array_on_stack) {
     int bail = bail_label(c);
     unsigned ka = (unsigned)(in->kinds & 3u);
@@ -1162,9 +1162,9 @@ static void emit_delegate(Cx *c) {
 }
 
 /*
- * The cold path of an instruction with an inline fast path: the reference semantics through
- * lz_vm_exec_one, then back to `back`. The hot path counts this instruction lazily (in
- * c->pend), so the cold path adds it for the call and takes it off again afterwards.
+ * The cold path of an instruction with an inline fast path. It runs the reference semantics
+ * through lz_vm_exec_one and then goes back to `back`. The hot path counts this instruction
+ * lazily in c->pend, so the cold path adds it for the call and takes it off again afterwards.
  */
 static void emit_delegate_cold(Cx *c, int slow, int back) {
     const GeIns *in = &c->ir.prog->ins[c->i];
@@ -1185,7 +1185,10 @@ static void emit_delegate_cold(Cx *c, int slow, int back) {
     x_section(X, saved);
 }
 
-/* CHECK_TYPE / CHECK_RETURN / CHECK_PARAM: a nil, bool, int or float the type accepts passes inline. */
+/*
+ * CHECK_TYPE, CHECK_RETURN and CHECK_PARAM let a nil, bool, int or float that the type accepts
+ * pass inline.
+ */
 static void emit_check(Cx *c, int32_t disp, uint16_t type_index) {
     if (type_index >= c->ir.chunk->type_count || (c->ir.chunk->types[type_index].kinds & 0xFu) == 0) {
         emit_delegate(c);
@@ -1198,7 +1201,7 @@ static void emit_check(Cx *c, int32_t disp, uint16_t type_index) {
     jcc_l(X, CC_A, slow); /* an object: arrays are checked element by element */
     mov_ri(X, RCX, c->ir.chunk->types[type_index].kinds & 0xFu);
     bt_rr32(X, RCX, RAX);
-    jcc_l(X, CC_AE, slow); /* the kind is not in the type (a literal type, or a mismatch) */
+    jcc_l(X, CC_AE, slow); /* the kind is not in the type, because of a literal type or a mismatch */
     x_bind(X, done);
     emit_delegate_cold(c, slow, done);
     end_plain(c, 1);
@@ -1214,7 +1217,10 @@ static void emit_frame_closure(Cx *c, int slow) {
     jcc_l(X, CC_E, slow);
 }
 
-/* rax = the closure's upvalue `index`'s location in r8 (slow path when out of range). */
+/*
+ * rax = the location of the closure's upvalue `index` in r8, and the slow path when it's out of
+ * range.
+ */
 static void emit_upvalue_location(Cx *c, uint16_t index, int slow) {
     emit_frame_closure(c, slow);
     cmp_mi16(X, RAX, O_CL_UPVC, (int32_t)index);
@@ -1242,10 +1248,10 @@ static void emit_set_upvalue(Cx *c, uint16_t index) {
     mov_rm(X, RDX, R14, 16 * (c->d - 1));
     /*
      * An object stored into a closed upvalue may close a reference cycle, and the reference
-     * implementation tells the cycle collector (lz_skink_note_store). Everything that cannot
-     * need that is stored inline: a number, bool or nil, a string, any store into an upvalue
-     * that is already watched, and any store into one that is still open (its frame's close
-     * reports it).
+     * implementation tells the cycle collector (lz_skink_note_store). Everything that can't need
+     * that is stored inline. That's a number, bool or nil, a string, any store into an upvalue
+     * that is already watched, and any store into one that is still open, because its frame's
+     * close reports it.
      */
     alu_ri(X, 0, ALU_CMP, RDX, LZ_VAL_OBJECT);
     jcc_l(X, CC_NE, inl);
@@ -1334,7 +1340,10 @@ static void emit_call(Cx *c, uint16_t argc) {
     pop_r(X, R13);
     x_bind(X, after);
 
-    /* Everything else: natives, defaults, a rest parameter, errors, functions without native code. */
+    /*
+     * Everything else: natives, defaults, a rest parameter, errors, functions without native
+     * code.
+     */
     int fail = fail_label(c); /* made before switching sections: it emits its own cold code */
     int saved = X->sec;
     x_section(X, SEC_COLD);

@@ -4,18 +4,17 @@
 #include "lizard/common.h"
 
 /*
- * "Did you mean ...?": finds the names closest to one the program used but that
- * does not exist.
+ * "Did you mean ...?" finds the names closest to one the program used but that doesn't exist.
  *
- * The caller feeds the suggester every name that could have been meant (locals,
- * functions of the script, builtins, and later the names an `import` brings in)
- * and reads the best few back. Where the names come from is the caller's business,
- * so a new source of names costs one more loop of lz_suggester_offer calls.
+ * The caller feeds the suggester every name that could have been meant, like locals, functions of
+ * the script, builtins, and later the names an `import` brings in, and reads the best few back.
+ * Where the names come from is the caller's business, so a new source of names costs one more loop
+ * of lz_suggester_offer calls.
  *
- * Distance is the optimal-string-alignment edit distance (insert, delete,
- * substitute, swap two neighbours) ignoring ASCII case. A name is a candidate when
- * it is within a third of the typed name's length, so `printj` finds both `print`
- * and `println`, while very short names only match when the case differs.
+ * Distance is the optimal-string-alignment edit distance, which counts insert, delete, substitute
+ * and swapping two neighbours, and ignores ASCII case. A name is a candidate when it's within a
+ * third of the typed name's length, so `printj` finds both `print` and `println`, while very short
+ * names only match when the case differs.
  */
 
 #define LZ_SUGGEST_MAX 3        /* candidates kept */
@@ -35,13 +34,13 @@ typedef struct LzSuggester {
     LzSuggestions found;
 } LzSuggester;
 
-/* target is the name that was typed (length bytes, need not be terminated). */
+/* target is the name that was typed, length bytes, and it needn't be terminated. */
 void lz_suggester_init(LzSuggester *suggester, const char *target, size_t length);
 
-/* Offers one candidate name (terminated). Duplicates and the typed name itself are ignored. */
+/* Offers one candidate name, terminated. Duplicates and the typed name itself are ignored. */
 void lz_suggester_offer(LzSuggester *suggester, const char *candidate);
 
-/* The edit distance used above; exposed for tests. */
+/* The edit distance used above, exposed for tests. */
 unsigned lz_edit_distance(const char *a, size_t a_length, const char *b, size_t b_length);
 
 #endif

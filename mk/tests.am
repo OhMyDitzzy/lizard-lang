@@ -69,7 +69,8 @@ check_PROGRAMS = \
 	fuzz_links_ge \
 	test_compiler_ge \
 	fuzz_run_ge \
-	fuzz_compile_ge
+	fuzz_compile_ge \
+	test_typesys
 
 check_SCRIPTS = \
 	test_engine_jit \
@@ -193,7 +194,8 @@ TESTS = \
 	skink_cli \
 	error_types_cli \
 	version_cli \
-	sources_sync
+	sources_sync \
+	test_typesys
 
 test_memory_SOURCES = tests/test_memory.c
 test_memory_LDADD = $(LZ_LDADD_PLAIN)
@@ -355,6 +357,8 @@ fuzz_run_ge_LDADD = $(LZ_LDADD_ENGINE)
 fuzz_compile_ge_SOURCES = tests/fuzz_compile.c
 fuzz_compile_ge_CFLAGS = $(AM_CFLAGS) -include $(top_srcdir)/tests/engine_redirect.h
 fuzz_compile_ge_LDADD = $(LZ_LDADD_ENGINE)
+test_typesys_SOURCES = tests/test_typesys.c
+test_typesys_LDADD = $(LZ_LDADD_PLAIN)
 
 # Tests that are not programs of their own (variants, scripts) are stubs: the file only has
 # to exist; tests/run-test.sh looks the test up in tests/tests.list by its name.

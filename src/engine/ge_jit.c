@@ -1,7 +1,7 @@
 /*
- * The Gecko JIT on platforms without a backend (or with LZ_NO_JIT): nothing is compiled
- * and every program runs on the GE interpreter. The backends are ge_jit_x64.c and
- * ge_jit_a64.c; ge_jit_rt.c holds what they share.
+ * The Gecko JIT on platforms without a backend, or with LZ_NO_JIT. Nothing is compiled and every
+ * program runs on the GE interpreter. The backends are ge_jit_x64.c and ge_jit_a64.c, and
+ * ge_jit_rt.c holds what they share.
  */
 
 #include "ge_jit.h"

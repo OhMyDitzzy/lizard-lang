@@ -4,19 +4,19 @@
 #include "ge_internal.h"
 
 /*
- * Bytecode -> GE IR. Two things happen here:
+ * Bytecode to GE IR. Two things happen here.
  *
- *  1. Every instruction is decoded once (operands, jump targets), so the
- *     executor never re-reads bytes or re-checks operand ranges.
- *  2. Runs of instructions that almost every program contains are marked as one
- *     fused instruction ("superinstruction"). The IR stays 1:1 with the bytecode:
- *     the fused instruction replaces only the first slot of the run, and the
- *     slots it covers keep their plain form, so the executor can always fall
- *     back to plain execution at the same index. Fusion never changes behaviour,
- *     it only removes dispatches and stack traffic.
+ * First, every instruction is decoded once, with its operands and jump targets, so the executor
+ * never re-reads bytes or re-checks operand ranges.
  *
- * A jump into the middle of a fused run is harmless for the same reason: it
- * lands on the plain instruction in that slot and runs the rest of the run plain.
+ * Second, runs of instructions that almost every program contains are marked as one fused
+ * instruction, a "superinstruction". The IR stays 1:1 with the bytecode. The fused instruction
+ * replaces only the first slot of the run, and the slots it covers keep their plain form, so the
+ * executor can always fall back to plain execution at the same index. Fusion never changes
+ * behaviour, it only removes dispatches and stack traffic.
+ *
+ * A jump into the middle of a fused run is harmless for the same reason. It lands on the plain
+ * instruction in that slot and runs the rest of the run plain.
  */
 
 static bool is_load_op(uint8_t op) {
@@ -45,7 +45,7 @@ static bool is_name_constant(const LzChunk *chunk, uint16_t index) {
     return constant->type == LZ_VAL_OBJECT && constant->as.object->type == LZ_OBJ_STRING;
 }
 
-/* "Still plain": not replaced by GE_OP_DELEGATE (bad operands) or by a fused instruction. */
+/* "Still plain" means not replaced by GE_OP_DELEGATE for bad operands or by a fused instruction. */
 static bool plain_is(const GeIns *in, uint8_t op) {
     return in->op == op && in->plain == op;
 }
@@ -199,8 +199,10 @@ bool ge_translate(const LzChunk *chunk, GeProgram *program) {
         if (length == 0 || offset + length > bytes) {
             return false;
         }
-        /* A try needs the handlers of the reference interpreter, which cuts the stack and
-         * the frames back; GE and the JIT leave code that has one to it. */
+        /*
+         * A try needs the handlers of the reference interpreter, which cuts the stack and the
+         * frames back, so GE and the JIT leave code that has one to it.
+         */
         if (chunk->code[offset] == LZ_OP_TRY_BEGIN || chunk->code[offset] == LZ_OP_TRY_END) {
             return false;
         }
@@ -243,7 +245,7 @@ bool ge_translate(const LzChunk *chunk, GeProgram *program) {
             in->a = read_u16(chunk->code, offset + 1); /* two u16 operands */
             in->b = read_u16(chunk->code, offset + 3);
         }
-        in->target = GE_NO_HINT; /* GET_GLOBAL: no builtin cached yet (jumps overwrite this) */
+        in->target = GE_NO_HINT; /* GET_GLOBAL with no builtin cached yet, and jumps overwrite this */
         index_of[offset] = (uint32_t)k;
         offset += length;
     }

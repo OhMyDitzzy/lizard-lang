@@ -17,16 +17,15 @@
 #include <string.h>
 
 /*
- * Work units. A trial may spend LZ_SKINK_BUDGET of them: a visited object costs
- * NODE_COST, a reference followed costs EDGE_COST, and looking at the items of an
- * array or the slots of a closure costs one unit per SCAN_BATCH of them. That keeps
- * a trial over a big array of numbers cheap, and a trial over anything bigger than
- * the budget bounded.
+ * Work units. A trial may spend LZ_SKINK_BUDGET of them. A visited object costs NODE_COST, a
+ * reference followed costs EDGE_COST, and looking at the items of an array or the slots of a
+ * closure costs one unit per SCAN_BATCH of them. That keeps a trial over a big array of numbers
+ * cheap, and a trial over anything bigger than the budget bounded.
  */
 /*
- * Test hook: when non-zero, the Nth allocation of working memory for a full pass fails, once. Every
- * failure point can then be tried in turn (tests/test_skink.c) to see that a pass that cannot get
- * its memory gives up cleanly, leaks nothing, and that the next one works.
+ * Test hook. When non-zero, the Nth allocation of working memory for a full pass fails, once.
+ * Every failure point can then be tried in turn (tests/test_skink.c) to see that a pass that
+ * can't get its memory gives up cleanly and leaks nothing, and that the next one works.
  */
 size_t lz_skink_fault_countdown;
 
@@ -46,7 +45,7 @@ static void *work_realloc(void *old, size_t bytes) {
 #define EDGE_COST 2
 #define SCAN_BATCH 8
 
-/* The ordinary size, on the stack: one trial per frame exit must not allocate. */
+/* The ordinary size, on the stack, because one trial per frame exit must not allocate. */
 typedef struct TrialBuffers {
     LzObject *node[LZ_SKINK_MAX_NODES];
     int64_t rc[LZ_SKINK_MAX_NODES];
@@ -54,18 +53,21 @@ typedef struct TrialBuffers {
     uint32_t work[LZ_SKINK_MAX_NODES];
 } TrialBuffers;
 
-/* A node's slot in LzObject.trial is a uint32_t (index + 1), so a trial can hold this many nodes at most. */
+/*
+ * A node's slot in LzObject.trial is a uint32_t holding index + 1, so a trial can hold this many
+ * nodes at most.
+ */
 #define FULL_MAX_NODES ((size_t)1 << 30)
 
 typedef struct Trial {
     const LzSkink *skink;
-    size_t capacity; /* nodes the arrays have room for: a power of two */
+    size_t capacity; /* nodes the arrays have room for, always a power of two */
     size_t budget;
     size_t count;
     size_t units;
     size_t work_top;
-    bool growable; /* malloc'd arrays that double when the set fills up: a full pass has no size limit */
-    bool tagged;   /* some node has its LzObject.trial set: trial_untag must run before they can be freed */
+    bool growable; /* malloc'd arrays that double when the set fills up, so a full pass has no size limit */
+    bool tagged;   /* some node has its LzObject.trial set, so trial_untag must run before they can be freed */
     LzObject **node;
     int64_t *rc; /* refcount minus the references that come from inside the set */
     bool *live;
@@ -78,17 +80,17 @@ typedef enum TrialResult {
     TRIAL_LIVE,         /* something outside still holds the subgraph, or nothing is dead */
     TRIAL_FREED,        /* a dead cycle was found and freed */
     TRIAL_OVER_BUDGET,  /* the subgraph does not fit */
-    TRIAL_INCONSISTENT  /* the counts did not add up; nothing was touched */
+    TRIAL_INCONSISTENT  /* the counts did not add up, and nothing was touched */
 } TrialResult;
 
 /*
- * An array that is typed with items that can never be an array or a closure
- * (int[], string[], ...) or is empty has no reference that could close a cycle. It is
- * not part of the graph: references to it are simply not followed.
+ * An array typed with items that can never be an array or a closure, like int[] or string[], or
+ * an empty one, has no reference that could close a cycle. It isn't part of the graph, so
+ * references to it are simply not followed.
  */
 /*
- * True when no value of the type can be, or contain, a closure. `any` (NULL) can, and so can
- * a function. An array type does when its own items can: `int[][]` is closed under that,
+ * True when no value of the type can be, or contain, a closure. `any` (NULL) can, and so can a
+ * function. An array type does when its own items can, so `int[][]` is closed under that and
  * `any[][]` is not. Types are interned trees, so the depth is only a guard.
  */
 static bool type_is_closure_free(const LzType *type, unsigned depth) {
@@ -103,17 +105,17 @@ static bool type_is_closure_free(const LzType *type, unsigned depth) {
         return depth > 0 && type_is_closure_free(type->element, depth - 1);
     }
     if ((kinds & LZ_KIND_DICT) != 0) {
-        /* Keys are strings, ints or bools: only the values can reach a closure. */
+        /* Keys are strings, ints or bools, so only the values can reach a closure. */
         return depth > 0 && type_is_closure_free(type->value_element, depth - 1);
     }
     return true;
 }
 
 /*
- * An array restricted to such a type never reaches a closure, however deep it nests, so it
- * cannot be on a cycle (every cycle runs through a closure). It is a leaf: not part of the
- * graph, and never a suspect. Getting this wrong can only make Skink miss a cycle, never free
- * a live object: a reference it does not follow counts as an outside reference.
+ * An array restricted to such a type never reaches a closure however deep it nests, so it can't
+ * be on a cycle, because every cycle runs through a closure. It's a leaf, not part of the graph
+ * and never a suspect. Getting this wrong can only make Skink miss a cycle and never free a live
+ * object, because a reference it doesn't follow counts as an outside reference.
  */
 static bool array_is_typed_leaf(const LzArray *array) {
     return type_is_closure_free(array->element, 16);
@@ -132,9 +134,10 @@ static bool dict_may_hold_cycles(const LzDict *dict) {
 }
 
 /*
- * An error leads to its cause and its data. Not told apart any further (the check is not
- * recursive, a chain of errors can be long): an error with either is a node, one with neither
- * a leaf. Calling a leaf a node costs a visit, calling a node a leaf could miss a cycle.
+ * An error leads to its cause and its data. It isn't told apart any further, because the check
+ * isn't recursive and a chain of errors can be long. An error with either is a node and one with
+ * neither is a leaf. Calling a leaf a node costs a visit, but calling a node a leaf could miss a
+ * cycle.
  */
 static bool error_may_hold_cycles(const LzError *error) {
     bool data = error->data.type == LZ_VAL_OBJECT && error->data.as.object->type != LZ_OBJ_STRING &&
@@ -161,7 +164,7 @@ static bool is_node(const LzObject *object) {
     case LZ_OBJ_NATIVE:
     case LZ_OBJ_FUNCTION:
     case LZ_OBJ_CLASS:
-    case LZ_OBJ_LINK: /* a link owns nothing: its target dies on its own, the cell is emptied then */
+    case LZ_OBJ_LINK: /* a link owns nothing, so its target dies on its own and the cell is emptied then */
         break;
     }
     return false;
@@ -174,8 +177,8 @@ static bool is_graph_value(const LzValue *value) {
 }
 
 /*
- * A value an upvalue is worth watching for: a closure, or an array that could hold
- * one, even while it is empty (the closure may be pushed into it later).
+ * A value an upvalue is worth watching for, which is a closure or an array that could hold one,
+ * even while it's empty because the closure may be pushed into it later.
  */
 static bool may_join_cycle(const LzValue *value) {
     if (value->type != LZ_VAL_OBJECT) {
@@ -232,10 +235,10 @@ static size_t slot_count(const LzObject *node) {
 }
 
 /*
- * Calls visit for every reference the node owns to another node. These are exactly
- * the references lz_object_finalize releases, minus the ones to leaves: an array's
- * items, a closure's upvalues, and the value of a closed upvalue. An open upvalue
- * does not own the stack slot it points at.
+ * Calls visit for every reference the node owns to another node. These are exactly the
+ * references lz_object_finalize releases, minus the ones to leaves, which are an array's items,
+ * a closure's upvalues, and the value of a closed upvalue. An open upvalue doesn't own the stack
+ * slot it points at.
  */
 static bool each_edge(Trial *trial, LzObject *node, EdgeFn visit) {
     switch (node->type) {
@@ -318,7 +321,7 @@ static bool each_edge(Trial *trial, LzObject *node, EdgeFn visit) {
     return true;
 }
 
-/* The references the pending list itself holds: they come from Skink, not from the program. */
+/* The references the pending list itself holds, which come from Skink and not from the program. */
 static int64_t pending_holds(const LzSkink *skink, const LzObject *object) {
     int64_t holds = 0;
     if (object->type != LZ_OBJ_UPVALUE) {
@@ -333,9 +336,10 @@ static int64_t pending_holds(const LzSkink *skink, const LzObject *object) {
 }
 
 /*
- * The node set is indexed through the objects themselves: LzObject.trial holds a node's index + 1
- * for as long as the trial runs (0 = not in the set), so every lookup is one load. The slots are
- * cleared by trial_untag, which has to run before the trial ends and before anything is freed.
+ * The node set is indexed through the objects themselves. LzObject.trial holds a node's index +
+ * 1 for as long as the trial runs, with 0 meaning not in the set, so every lookup is one load.
+ * The slots are cleared by trial_untag, which has to run before the trial ends and before
+ * anything is freed.
  */
 static bool find_node(const Trial *trial, const LzObject *object, size_t *index) {
     if (object->trial == 0) {
@@ -347,7 +351,10 @@ static bool find_node(const Trial *trial, const LzObject *object, size_t *index)
     return true;
 }
 
-/* Clears every slot the trial set. Idempotent: collect frees nodes, so nothing may touch them afterwards. */
+/*
+ * Clears every slot the trial set. It's idempotent, because collect frees nodes and nothing may
+ * touch them afterwards.
+ */
 static void trial_untag(Trial *trial) {
     if (!trial->tagged) {
         return;
@@ -358,7 +365,10 @@ static void trial_untag(Trial *trial) {
     trial->tagged = false;
 }
 
-/* A trial whose arrays belong to it, with room for `capacity` nodes to begin with and no limit on the work. */
+/*
+ * A trial whose arrays belong to it, with room for `capacity` nodes to begin with and no limit
+ * on the work.
+ */
 static bool trial_init_growable(Trial *trial, const LzSkink *skink, size_t capacity) {
     memset(trial, 0, sizeof *trial);
     trial->skink = skink;
@@ -389,8 +399,9 @@ static void trial_free(Trial *trial) {
 }
 
 /*
- * Doubles the room of a growable trial (no rehash: the slots live in the objects). False when there is no memory: the trial
- * is then given up, with every array still the right size for the capacity it has.
+ * Doubles the room of a growable trial, with no rehash because the slots live in the objects.
+ * False when there's no memory, and the trial is then given up with every array still the right
+ * size for the capacity it has.
  */
 static bool trial_grow(Trial *trial) {
     size_t capacity = trial->capacity * 2;
@@ -440,7 +451,7 @@ static bool intern_node(Trial *trial, LzObject *object, size_t *index) {
     return true;
 }
 
-/* A reference from inside the set: it is not an outside reference, so take it off the count. */
+/* A reference from inside the set isn't an outside reference, so take it off the count. */
 static bool visit_discover(Trial *trial, LzObject *target) {
     size_t index;
     if (!intern_node(trial, target, &index)) {
@@ -451,7 +462,10 @@ static bool visit_discover(Trial *trial, LzObject *target) {
     return trial->units <= trial->budget;
 }
 
-/* Phase 1: everything reachable from the nodes already in the set, with the internal references subtracted. */
+/*
+ * Phase 1: everything reachable from the nodes already in the set, with the internal references
+ * subtracted.
+ */
 static bool expand_all(Trial *trial) {
     for (size_t i = 0; i < trial->count; i++) {
         trial->units += slot_count(trial->node[i]) / SCAN_BATCH;
@@ -574,8 +588,8 @@ static void clear_edges(LzVM *vm, LzObject *node) {
 }
 
 /*
- * Phase 3: frees the dead nodes. Each is retained first, so that dropping the
- * references between them cannot free one while another still points at it.
+ * Phase 3 frees the dead nodes. Each is retained first, so that dropping the references between
+ * them can't free one while another still points at it.
  */
 static size_t collect(LzVM *vm, const Trial *trial) {
     size_t dead = 0;
@@ -601,7 +615,10 @@ static size_t collect(LzVM *vm, const Trial *trial) {
     return dead;
 }
 
-/* Phases 2 and 3 on a set that discover filled: what is held from outside, and what is dead. */
+/*
+ * Phases 2 and 3 on a set that discover filled, which finds what is held from outside and what
+ * is dead.
+ */
 static TrialResult finish_trial(LzVM *vm, Trial *trial, size_t *freed) {
     for (size_t i = 0; i < trial->count; i++) {
         if (trial->rc[i] < 0) {
@@ -618,7 +635,7 @@ static TrialResult finish_trial(LzVM *vm, Trial *trial, size_t *freed) {
     return *freed > 0 ? TRIAL_FREED : TRIAL_LIVE;
 }
 
-/* An ordinary trial: on the stack, with the fixed size and the budget of a tick. */
+/* An ordinary trial, on the stack, with the fixed size and the budget of a tick. */
 static TrialResult trial_from(LzVM *vm, LzUpvalue *suspect, size_t *freed) {
     TrialBuffers buffers;
     Trial trial;
@@ -693,7 +710,7 @@ static void examine(LzVM *vm, LzUpvalue *suspect) {
     run_trial(vm, suspect);
 }
 
-/* A watched upvalue: nothing of Skink's own holds it, and its value may have changed since. */
+/* A watched upvalue, which nothing of Skink's own holds, and its value may have changed since. */
 static void examine_watched(LzVM *vm, LzUpvalue *upvalue) {
     if (upvalue->location != &upvalue->closed || !may_join_cycle(&upvalue->closed)) {
         return;
@@ -701,8 +718,6 @@ static void examine_watched(LzVM *vm, LzUpvalue *upvalue) {
     vm->skink.stats.polls++;
     run_trial(vm, upvalue);
 }
-
-/* ---- watch lists: circular, the head lives in LzSkink, links live in the upvalues ---- */
 
 #define WATCHED_UPVALUE(link) ((LzUpvalue *)((char *)(link) - offsetof(LzUpvalue, watch)))
 
@@ -732,9 +747,8 @@ static void watch_push_back(LzWatchLink *head, LzWatchLink *link) {
 }
 
 /*
- * Level n is due every 4^n ticks. An entry that is polled moves one level down the
- * schedule first, because the trial may free it, and so a live structure is looked
- * at ever more rarely.
+ * Level n is due every 4^n ticks. An entry that is polled moves one level down the schedule
+ * first, because the trial may free it, and so a live structure is looked at ever more rarely.
  */
 static void poll(LzVM *vm) {
     LzSkink *skink = &vm->skink;
@@ -761,7 +775,7 @@ static void poll(LzVM *vm) {
             uint64_t before = skink->stats.objects;
             examine_watched(vm, WATCHED_UPVALUE(front));
             if (skink->stats.objects != before && refunds > 0) {
-                refunds--; /* garbage tends to die together: keep going while it is there */
+                refunds--; /* garbage tends to die together, so keep going while it's there */
                 polls++;
             }
         }
@@ -769,15 +783,16 @@ static void poll(LzVM *vm) {
 }
 
 /*
- * The fallback when a full pass cannot get its memory: every watched upvalue gets an ordinary trial
- * of its own, and the round is repeated while it still frees something (freeing one cycle can drop
- * the last outside reference of another that was looked at earlier). Entries stay watched, on level 0.
+ * The fallback when a full pass can't get its memory. Every watched upvalue gets an ordinary
+ * trial of its own, and the round is repeated while it still frees something, because freeing
+ * one cycle can drop the last outside reference of another that was looked at earlier. Entries
+ * stay watched, on level 0.
  */
 static void bounded_passes(LzVM *vm) {
     LzSkink *skink = &vm->skink;
     for (int pass = 0; pass < 8; pass++) {
         uint64_t before = skink->stats.objects;
-        LzWatchLink done; /* entries already examined this pass; an entry that dies unlinks itself */
+        LzWatchLink done; /* entries already examined this pass, and an entry that dies unlinks itself */
         watch_init(&done);
         for (size_t level = 0; level < LZ_SKINK_LEVELS; level++) {
             while (!watch_empty(&skink->watch[level])) {
@@ -799,15 +814,15 @@ static void bounded_passes(LzVM *vm) {
 }
 
 /*
- * One trial over everything the watch lists lead to, with no limit on its size: every object is
- * visited once, so the cost is the size of what is reachable, however many upvalues share it. The
- * working memory is malloc'd (outside the heap and its limit) and doubles as needed. False when
- * there was no memory for it, or the counts did not add up: nothing was freed then.
+ * One trial over everything the watch lists lead to, with no limit on its size. Every object is
+ * visited once, so the cost is the size of what is reachable, however many upvalues share it.
+ * The working memory is malloc'd, outside the heap and its limit, and doubles as needed. False
+ * when there was no memory for it or the counts did not add up, and nothing was freed then.
  */
 static bool full_pass_once(LzVM *vm, bool during_run) {
     LzSkink *skink = &vm->skink;
     if (!watching(skink)) {
-        return true; /* nothing to look at: no pass, no memory, no statistics */
+        return true; /* nothing to look at, so no pass, no memory and no statistics */
     }
     uint64_t started = trial_now(skink);
     Trial trial;
@@ -853,7 +868,7 @@ static bool full_pass_once(LzVM *vm, bool during_run) {
             skink->stats.worst_full_ns = took;
         }
     }
-    /* What is left was just looked at thoroughly: let it back off to the slowest schedule. */
+    /* What is left was just looked at thoroughly, so let it back off to the slowest schedule. */
     for (size_t level = 0; level + 1 < LZ_SKINK_LEVELS; level++) {
         while (!watch_empty(&skink->watch[level])) {
             LzWatchLink *front = skink->watch[level].next;
@@ -864,7 +879,10 @@ static bool full_pass_once(LzVM *vm, bool during_run) {
     return true;
 }
 
-/* Full passes until one frees nothing (freeing a cycle can release another that held it). False if the first could not run. */
+/*
+ * Full passes until one frees nothing, because freeing a cycle can release another that held it.
+ * False if the first could not run.
+ */
 static bool full_collect(LzVM *vm, bool during_run) {
     LzSkink *skink = &vm->skink;
     for (int pass = 0; pass < 8; pass++) {
@@ -879,13 +897,19 @@ static bool full_collect(LzVM *vm, bool during_run) {
     return true;
 }
 
-/* The next growth pass is due when the heap has grown to `factor` times what is left after this one. */
+/*
+ * The next growth pass is due when the heap has grown to `factor` times what is left after this
+ * one.
+ */
 static void schedule_full(LzVM *vm, size_t basis_bytes, size_t factor) {
     size_t next = basis_bytes * factor;
     vm->skink.next_full_bytes = next > LZ_SKINK_FULL_MIN_BYTES ? next : LZ_SKINK_FULL_MIN_BYTES;
 }
 
-/* The heap has doubled since the last full pass: whatever is dead and cyclic goes now, however big. */
+/*
+ * The heap has doubled since the last full pass, so whatever is dead and cyclic goes now,
+ * however big.
+ */
 static void grow_pass(LzVM *vm) {
     LzSkink *skink = &vm->skink;
     size_t before = vm->heap.live_bytes;
@@ -894,7 +918,10 @@ static void grow_pass(LzVM *vm) {
     if (after < before) {
         skink->stats.reclaimed += before - after;
     }
-    /* Productive (it freed an eighth of the heap or more): stay tight. Idle, or out of memory: back off. */
+    /*
+     * Productive means it freed an eighth of the heap or more, and then we stay tight. When idle
+     * or out of memory, back off.
+     */
     bool productive = ran && after < before && (before - after) * 8 >= before;
     schedule_full(vm, ran ? after : before, productive ? LZ_SKINK_FULL_GROWTH : LZ_SKINK_FULL_GROWTH_IDLE);
 }
@@ -916,13 +943,18 @@ void lz_skink_init(LzSkink *skink) {
 void lz_skink_note_closed(LzVM *vm, LzUpvalue *upvalue) {
     LzSkink *skink = &vm->skink;
     skink->closed_any = true;
-    /* A count of 1 is the VM's open list alone: no closure holds the upvalue, so it dies when
-     * the list lets go and no cycle can run through it. */
+    /*
+     * A count of 1 is the VM's open list alone. No closure holds the upvalue, so it dies when
+     * the list lets go and no cycle can run through it.
+     */
     if (!skink->enabled || upvalue->base.refcount < 2 || !may_join_cycle(&upvalue->closed)) {
         return;
     }
     if (skink->pending_count == LZ_SKINK_PENDING_MAX) {
-        /* No room to hold it for a trial, but the watch list holds nothing: it gets its look later. */
+        /*
+         * No room to hold it for a trial, but the watch list holds nothing, so it gets its look
+         * later.
+         */
         if (upvalue->watch.next == NULL) {
             watch_push_back(&skink->watch[0], &upvalue->watch);
             skink->stats.watched++;
@@ -949,7 +981,10 @@ void lz_skink_note_store(LzVM *vm, LzUpvalue *upvalue) {
 void lz_skink_alloc_tick(void *context) {
     LzVM *vm = context;
     LzSkink *skink = &vm->skink;
-    /* pending is non-empty only between a close and its run, where nothing allocates; be safe */
+    /*
+     * pending is non-empty only between a close and its run, where nothing allocates, but be
+     * safe
+     */
     if (!skink->enabled || skink->pending_count > 0) {
         return;
     }
@@ -965,19 +1000,26 @@ void lz_skink_alloc_tick(void *context) {
 
 void lz_skink_run(LzVM *vm) {
     LzSkink *skink = &vm->skink;
-    /* Every engine closes the same upvalues at the same instructions, but they do not all come
-     * through here equally often: only a return that closed something is a tick. */
+    /*
+     * Every engine closes the same upvalues at the same instructions, but they don't all come
+     * through here equally often. Only a return that closed something is a tick.
+     */
     if (!skink->closed_any) {
         return;
     }
     skink->closed_any = false;
-    /* Poll first: an entry added below was just examined, so its next look is the next tick, when
-     * its holder may well have let go. Pending suspects are subtracted by the trials as usual. */
+    /*
+     * Poll first, because an entry added below was just examined, so its next look is the next
+     * tick, when its holder may well have let go. Pending suspects are subtracted by the trials
+     * as usual.
+     */
     if (skink->enabled) {
         poll(vm);
     }
-    /* A suspect stays in the list while it is examined, so that the references the list
-     * holds are not mistaken for references from the program. */
+    /*
+     * A suspect stays in the list while it's examined, so that the references the list holds
+     * aren't mistaken for references from the program.
+     */
     while (skink->pending_count > 0) {
         LzUpvalue *suspect = skink->pending[skink->pending_count - 1];
         examine(vm, suspect);
@@ -996,7 +1038,7 @@ void lz_skink_flush(LzVM *vm) {
     skink->closed_any = false;
     while (skink->pending_count > 0) {
         LzUpvalue *suspect = skink->pending[--skink->pending_count];
-        /* The stack is being torn down, so there is no time to look: keep an eye on it instead. */
+        /* The stack is being torn down, so there's no time to look. Keep an eye on it instead. */
         if (suspect->base.refcount > 1 && suspect->watch.next == NULL && skink->enabled) {
             watch_push_back(&skink->watch[0], &suspect->watch);
             skink->stats.watched++;

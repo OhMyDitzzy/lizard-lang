@@ -10,22 +10,21 @@
 /*
  * The Gecko Engine executor.
  *
- * Contract: indistinguishable from the reference interpreter. Same results,
- * same output, same error message and source position, same fuel, same
- * vm->instructions. That is kept by three rules:
+ * The contract is that it's indistinguishable from the reference interpreter, with the same
+ * results, output, error message and source position, fuel and vm->instructions. Three rules keep
+ * that.
  *
- *  - Every fast path is guarded by exact type checks and touches nothing until
- *    all of them pass. On any doubt (a string, an overflow, a typed array, a
- *    full stack, an out of range index, ...) it hands the instruction to the
- *    reference interpreter (lz_vm_exec_one), which also produces every error.
- *    GE never builds an error message of its own.
- *  - Fuel and the instruction counter are charged exactly as the reference
- *    does. A fused instruction charges for all the instructions it stands for,
- *    and only when the fuel covers all of them; otherwise it runs plain, so
- *    metering still stops at exactly the same instruction.
- *  - Reference counting is mirrored, not shortcut: a value borrowed instead of
- *    copied is only borrowed when the copy would have been released again
- *    before anything could observe it.
+ * Every fast path is guarded by exact type checks and touches nothing until all of them pass. On
+ * any doubt, like a string, an overflow, a typed array, a full stack or an out of range index, it
+ * hands the instruction to the reference interpreter (lz_vm_exec_one), which also produces every
+ * error. GE never builds an error message of its own.
+ *
+ * Fuel and the instruction counter are charged exactly as the reference does. A fused instruction
+ * charges for all the instructions it stands for, and only when the fuel covers all of them.
+ * Otherwise it runs plain, so metering still stops at exactly the same instruction.
+ *
+ * Reference counting is mirrored and not shortcut. A value borrowed instead of copied is only
+ * borrowed when the copy would have been released again before anything could observe it.
  */
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -37,8 +36,6 @@
 #define GE_UNLIKELY(x) (x)
 #define GE_INLINE static inline
 #endif
-
-/* ---- integer arithmetic that reports overflow (mirrors core/arith.c) ---- */
 
 #if defined(__GNUC__) && !defined(LZ_PORTABLE_OVERFLOW)
 
@@ -95,8 +92,6 @@ GE_INLINE bool multiply_overflows(int64_t a, int64_t b, int64_t *out) {
 
 #endif
 
-/* ---- values ---- */
-
 #define GE_TWO_53 INT64_C(9007199254740992)
 #define GE_NIL_INIT {LZ_VAL_NIL, {.integer = 0}}
 
@@ -139,7 +134,7 @@ GE_INLINE void drop_object(LzVM *vm, LzObject *object) {
     if (GE_LIKELY(object->refcount > 1)) {
         object->refcount--;
     } else {
-        lz_object_release(&vm->heap, object); /* the last reference: free it the real way */
+        lz_object_release(&vm->heap, object); /* the last reference, so free it the real way */
     }
 }
 
@@ -150,9 +145,9 @@ GE_INLINE void drop(LzVM *vm, const LzValue *value) {
 }
 
 /*
- * The result of `a op b` when both are numbers and nothing can go wrong (no
- * overflow, no zero divisor), false otherwise. Mirrors lz_arith_binary for the
- * cases it covers; everything else is left to it.
+ * The result of `a op b` when both are numbers and nothing can go wrong, meaning no overflow and
+ * no zero divisor, and false otherwise. Mirrors lz_arith_binary for the cases it covers and
+ * leaves everything else to it.
  */
 GE_INLINE bool arith(uint8_t op, const LzValue *a, const LzValue *b, LzValue *out) {
     if (a->type == LZ_VAL_INT && b->type == LZ_VAL_INT) {
@@ -231,8 +226,10 @@ GE_INLINE bool arith(uint8_t op, const LzValue *a, const LzValue *b, LzValue *ou
         r = x / y;
         break;
     case LZ_OP_MODULO: {
-        /* Whole-number floats (what `n / 2` leaves behind): the remainder is exact in
-         * integers and equals what fmod plus the sign fix-up gives, minus the libm call. */
+        /*
+         * Whole-number floats, which is what `n / 2` leaves behind. The remainder is exact in
+         * integers and equals what fmod plus the sign fix-up gives, minus the libm call.
+         */
         if (y > 0.0 && y <= (double)GE_TWO_53 && x >= -(double)GE_TWO_53 && x <= (double)GE_TWO_53) {
             int64_t xi = (int64_t)x;
             int64_t yi = (int64_t)y;
@@ -248,7 +245,7 @@ GE_INLINE bool arith(uint8_t op, const LzValue *a, const LzValue *b, LzValue *ou
         return false;
     }
     default:
-        return false; /* float '//' and the like: the reference's */
+        return false; /* float '//' and the like are the reference's */
     }
     out->type = LZ_VAL_FLOAT;
     out->as.number = r;
@@ -256,8 +253,8 @@ GE_INLINE bool arith(uint8_t op, const LzValue *a, const LzValue *b, LzValue *ou
 }
 
 /*
- * `a op b` for the bitwise operators when both are ints and nothing can go wrong (a shift
- * count outside 0..63 is the reference's error), false otherwise. Mirrors lz_arith_binary.
+ * `a op b` for the bitwise operators when both are ints and nothing can go wrong, and false
+ * otherwise. A shift count outside 0..63 is the reference's error. Mirrors lz_arith_binary.
  */
 GE_INLINE bool bitwise(uint8_t op, const LzValue *a, const LzValue *b, LzValue *out) {
     if (a->type != LZ_VAL_INT || b->type != LZ_VAL_INT) {
@@ -297,9 +294,9 @@ GE_INLINE bool bitwise(uint8_t op, const LzValue *a, const LzValue *b, LzValue *
 }
 
 /*
- * `a op b` for the five comparisons when both are numbers; false otherwise
- * (strings, arrays, ... and an int too big to compare as a double exactly).
- * NaN makes every comparison false except '==', as in the reference.
+ * `a op b` for the five comparisons when both are numbers, and false otherwise, as for strings,
+ * arrays and an int too big to compare as a double exactly. NaN makes every comparison false
+ * except '==', as in the reference.
  */
 GE_INLINE bool compare(uint8_t op, const LzValue *a, const LzValue *b, bool *result) {
     if (a->type == LZ_VAL_INT && b->type == LZ_VAL_INT) {
@@ -351,13 +348,10 @@ GE_INLINE bool compare(uint8_t op, const LzValue *a, const LzValue *b, bool *res
     return false;
 }
 
-/* ---- globals, through an inline cache ---- */
-
 /*
- * The value of a global, or NULL when the name is not a global (it may be a
- * builtin or undefined: the reference decides). *hint remembers the table slot
- * the name was last found in; the key comparison makes a stale hint harmless
- * after the table grows.
+ * The value of a global, or NULL when the name is not a global. It may be a builtin or
+ * undefined, and the reference decides. *hint remembers the table slot the name was last found
+ * in, and the key comparison makes a stale hint harmless after the table grows.
  */
 GE_INLINE LzValue *global_ref(LzVM *vm, const LzValue *constants, uint16_t name_index,
                               uint32_t *hint) {
@@ -379,11 +373,10 @@ GE_INLINE LzValue *global_ref(LzVM *vm, const LzValue *constants, uint16_t name_
 
 
 /*
- * Builtins, through a per-site cache. Globals shadow builtins, so a cached builtin
- * is only valid while no global has been added since it was cached: in->target holds
- * the size of the globals table at that moment. This relies on tables never removing
- * a key (true today, see core/table.h); a table that learns to delete needs an epoch
- * counter here instead.
+ * Builtins go through a per-site cache. Globals shadow builtins, so a cached builtin is only
+ * valid while no global has been added since it was cached, and in->target holds the size of the
+ * globals table at that moment. This relies on tables never removing a key, which is true today,
+ * see core/table.h. A table that learns to delete needs an epoch counter here instead.
  */
 GE_INLINE const LzValue *builtin_cached(LzVM *vm, const LzValue *constants, const GeIns *in) {
     const LzTable *builtins = &vm->builtins;
@@ -400,7 +393,7 @@ GE_INLINE const LzValue *builtin_fill(LzVM *vm, const LzValue *constants, GeIns 
     const LzString *name = (const LzString *)constants[in->a].as.object;
     const LzValue *found = lz_table_get(&vm->builtins, name);
     if (found == NULL) {
-        return NULL; /* undefined: the reference reports it */
+        return NULL; /* undefined, so the reference reports it */
     }
     const LzTableEntry *entry =
         (const LzTableEntry *)((const char *)found - offsetof(LzTableEntry, value));
@@ -410,9 +403,9 @@ GE_INLINE const LzValue *builtin_fill(LzVM *vm, const LzValue *constants, GeIns 
 }
 
 /*
- * Where an assignment to an existing global goes. NULL when the reference has to
- * do it: the global does not exist, or the table is about to grow (lz_table_set
- * grows before it looks for the key, even when the key exists).
+ * Where an assignment to an existing global goes. NULL when the reference has to do it, because
+ * the global doesn't exist or the table is about to grow. lz_table_set grows before it looks for
+ * the key, even when the key exists.
  */
 GE_INLINE LzValue *global_store(LzVM *vm, const LzValue *constants, uint16_t name_index,
                                 uint32_t *hint) {
@@ -423,7 +416,7 @@ GE_INLINE LzValue *global_store(LzVM *vm, const LzValue *constants, uint16_t nam
     return global_ref(vm, constants, name_index, hint);
 }
 
-/* A fused operand: a local, a constant or a global. NULL means "run it plain". */
+/* A fused operand, which is a local, a constant or a global. NULL means "run it plain". */
 GE_INLINE const LzValue *load_operand(LzVM *vm, const LzValue *constants, const LzValue *stack,
                                       size_t base, size_t sp, unsigned kind, uint16_t index,
                                       uint32_t *hint) {
@@ -436,7 +429,7 @@ GE_INLINE const LzValue *load_operand(LzVM *vm, const LzValue *constants, const 
     return global_ref(vm, constants, index, hint);
 }
 
-/* array[index] for an int index in range (negative counts from the end). */
+/* array[index] for an int index in range, where a negative one counts from the end. */
 GE_INLINE bool array_position(const LzValue *container, const LzValue *index, LzArray **array,
                               size_t *position) {
     if (!lz_value_is_array(container) || index->type != LZ_VAL_INT) {
@@ -454,9 +447,9 @@ GE_INLINE bool array_position(const LzValue *container, const LzValue *index, Lz
 }
 
 /*
- * The translated program of a function, made on its first call and kept on the function
- * object (so it lives exactly as long as the function does). NULL when the function's
- * code cannot be translated; the caller then hands that call to the reference interpreter.
+ * The translated program of a function, made on its first call and kept on the function object,
+ * so it lives exactly as long as the function does. NULL when the function's code can't be
+ * translated, and the caller then hands that call to the reference interpreter.
  */
 static GeProgram *function_program(LzFunction *function, GeRun *run) {
     if (GE_LIKELY(function->engine_cache != NULL)) {
@@ -483,7 +476,10 @@ static GeProgram *function_program(LzFunction *function, GeRun *run) {
 
 LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void *context) {
     GeRun *run = context;
-    /* The code being run changes with every call and return; these always describe the top frame. */
+    /*
+     * The code being run changes with every call and return, and these always describe the top
+     * frame.
+     */
     const LzChunk *chunk = main_chunk;
     GeIns *code = run->program->ins;
     const LzValue *constants = chunk->constants;
@@ -523,10 +519,9 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
     } while (0)
 
 /*
- * A fused instruction may only run when the fuel covers every instruction it stands
- * for and the stack has room for the deepest point the plain sequence reaches. It
- * charges (FUSED_COMMIT) only after every check has passed, so falling back leaves
- * no trace.
+ * A fused instruction may only run when the fuel covers every instruction it stands for and the
+ * stack has room for the deepest point the plain sequence reaches. It charges (FUSED_COMMIT)
+ * only after every check has passed, so falling back leaves no trace.
  */
 #define FUSED_GUARD(peak)                                                                          \
     do {                                                                                           \
@@ -626,7 +621,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 }
             }
             if (GE_UNLIKELY(found == NULL || sp >= LZ_STACK_MAX)) {
-                goto run_plain; /* undefined: the reference reports it */
+                goto run_plain; /* undefined, so the reference reports it */
             }
             LzValue value = *found;
             grab(&value);
@@ -640,7 +635,10 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             if (GE_UNLIKELY(slot == NULL)) {
                 goto run_plain;
             }
-            /* The table takes over the stack's reference: the reference's retain + pop. */
+            /*
+             * The table takes over the stack's reference, which is the reference's retain and
+             * pop.
+             */
             LzValue old = *slot;
             *slot = stack[--sp];
             drop(vm, &old);
@@ -688,7 +686,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
         case LZ_OP_BIT_NOT:
             TICK(1);
             if (GE_UNLIKELY(sp < 1 || stack[sp - 1].type != LZ_VAL_INT)) {
-                goto run_plain; /* not an int: the reference's error */
+                goto run_plain; /* not an int, so the reference's error */
             }
             stack[sp - 1].as.integer = ~stack[sp - 1].as.integer;
             pc++;
@@ -750,7 +748,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             grab(&item); /* keep it alive across the release, which may free the array */
             LzObject *holder = stack[sp - 2].as.object;
             stack[sp - 2] = item;
-            sp--; /* the index is an int: nothing to release */
+            sp--; /* the index is an int, so there's nothing to release */
             drop_object(vm, holder);
             pc++;
             break;
@@ -763,8 +761,11 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 goto run_plain;
             }
             const LzValue *value = &stack[sp - 1];
-            /* Only the common case: scalar over scalar. Arrays inside arrays need holder
-             * bookkeeping and a cycle check, strings need refcounts: the reference's. */
+            /*
+             * Only the common case of scalar over scalar. Arrays inside arrays need holder
+             * bookkeeping and a cycle check, and strings need refcounts, so those are the
+             * reference's.
+             */
             if (GE_UNLIKELY(value->type == LZ_VAL_OBJECT || array->items[position].type == LZ_VAL_OBJECT ||
                             (array->element != NULL && !lz_type_matches(array->element, value)))) {
                 goto run_plain;
@@ -788,7 +789,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             } else if (top->type == LZ_VAL_FLOAT) {
                 top->as.number = -top->as.number;
             } else {
-                goto run_plain; /* overflow, or not a number: the reference's error */
+                goto run_plain; /* overflow, or not a number, so the reference's error */
             }
             pc++;
             break;
@@ -807,7 +808,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 GeProgram *callee_program = function->engine_cache;
                 if (GE_LIKELY(argc == function->param_count && !function->has_rest &&
                               callee_program != NULL && vm->frame_count < LZ_FRAMES_MAX)) {
-                    /* Exactly the arguments the function wants: the frame starts right here. */
+                    /* Exactly the arguments the function wants, so the frame starts right here. */
                     vm->frames[vm->frame_count - 1].ip = pc + 1;
                     LzCallFrame *frame = &vm->frames[vm->frame_count++];
                     frame->closure = closure;
@@ -836,7 +837,10 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 goto enter_callee;
             }
             if (callee_object->type == LZ_OBJ_BOUND || callee_object->type == LZ_OBJ_CLASS) {
-                /* A method tied to its receiver enters a frame (like a closure); a class builds its object. */
+                /*
+                 * A method tied to its receiver enters a frame like a closure, and a class
+                 * builds its object.
+                 */
                 bool entered = false;
                 SYNC_OUT();
                 status = lz_vm_call(vm, argc, pc + 1, ins->offset, &entered);
@@ -853,8 +857,10 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             if (GE_UNLIKELY(callee_object->type != LZ_OBJ_NATIVE)) {
                 goto run_plain;
             }
-            /* What the reference's call does: the native sees the stack as it is, the result
-             * replaces the callee and its arguments. On failure nothing is popped. */
+            /*
+             * What the reference's call does. The native sees the stack as it is, and the result
+             * replaces the callee and its arguments. On failure nothing is popped.
+             */
             LzValue result = GE_NIL_INIT;
             SYNC_OUT();
             vm->native_call_offset = ins->offset;
@@ -903,7 +909,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
             if (GE_LIKELY(sp > base && base > 0 &&
                           (vm->open_upvalues == NULL || vm->open_upvalues->location < &stack[base]))) {
-                /* No variable of this frame was captured: drop the frame and keep the result. */
+                /* No variable of this frame was captured, so drop the frame and keep the result. */
                 LzValue result = stack[--sp];
                 while (sp > base - 1) {
                     sp--;
@@ -938,8 +944,6 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             nt_count = 0;
             goto native_try;
         }
-
-        /* ---- fused instructions ---- */
 
         case GE_OP_BIN: { /* [load a] [load b] ARITH [store] */
             FUSED_GUARD(2);
@@ -977,7 +981,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             pc += ins->span;
             break;
         }
-        case GE_OP_BIN1: { /* [load b] ARITH [store], left operand on the stack */
+        case GE_OP_BIN1: { /* [load b] ARITH [store], with the left operand on the stack */
             FUSED_GUARD(1);
             if (GE_UNLIKELY(sp < 1)) {
                 goto plain_tick;
@@ -990,7 +994,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             }
             switch (KIND_S(ins)) {
             case GE_ST_NONE:
-                stack[sp - 1] = out; /* the left operand is a number: nothing to release */
+                stack[sp - 1] = out; /* the left operand is a number, so there's nothing to release */
                 break;
             case GE_ST_LOCAL: {
                 if (GE_UNLIKELY(base + ins->c >= sp - 1)) {
@@ -1030,7 +1034,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             pc = outcome ? pc + ins->span : ins->target;
             break;
         }
-        case GE_OP_CMPJ1: { /* [load b] CMP JUMP_IF_FALSE POP, left operand on the stack */
+        case GE_OP_CMPJ1: { /* [load b] CMP JUMP_IF_FALSE POP, with the left operand on the stack */
             FUSED_GUARD(1);
             if (GE_UNLIKELY(sp < 1)) {
                 goto plain_tick;
@@ -1045,7 +1049,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             pc = outcome ? pc + ins->span : ins->target;
             break;
         }
-        case GE_OP_INDEX: { /* [load a] [load b] INDEX: the array is borrowed, not copied */
+        case GE_OP_INDEX: { /* [load a] [load b] INDEX, where the array is borrowed and not copied */
             FUSED_GUARD(2);
             const LzValue *a = load_operand(vm, constants, stack, base, sp, KIND_A(ins), ins->a, &ins->hint_a);
             const LzValue *b = load_operand(vm, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
@@ -1061,7 +1065,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             pc += ins->span;
             break;
         }
-        case GE_OP_INDEX1: { /* [load b] INDEX, array on the stack */
+        case GE_OP_INDEX1: { /* [load b] INDEX, with the array on the stack */
             FUSED_GUARD(1);
             if (GE_UNLIKELY(sp < 1)) {
                 goto plain_tick;
@@ -1088,13 +1092,13 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
         }
         continue;
 
-    /* A frame was just pushed for a call that needed the slow path: start running it. */
+    /* A frame was just pushed for a call that needed the slow path, so start running it. */
     enter_callee : {
         const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
         LzFunction *function = frame->closure->function;
         GeProgram *program = function_program(function, run);
         if (program == NULL) {
-            /* Code GE cannot translate: the reference interpreter runs this call. */
+            /* Code GE can't translate, so the reference interpreter runs this call. */
             size_t depth = vm->frame_count - 1;
             size_t nested = 0;
             SYNC_OUT();
@@ -1120,7 +1124,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
 
     /*
      * Hot code runs as machine code (ge_jit.c). It returns here when it finishes, hands an
-     * instruction back, or fails; the stack and frames are always in the interpreter's form.
+     * instruction back, or fails, and the stack and frames are always in the interpreter's form.
      */
     native_try : {
         if (!run->jit || vm->fuel != LZ_FUEL_UNLIMITED || prog->jit_state >= GE_JIT_FAILED) {
@@ -1182,7 +1186,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             status = (LzStatus)jx.status;
             goto fail;
         }
-        /* BAIL: the interpreter runs this instruction. Give up on code that keeps bailing. */
+        /* BAIL means the interpreter runs this instruction. Give up on code that keeps bailing. */
         prog->jit_bails++;
         if (!run->jit_eager && prog->jit_bails > 256 && prog->jit_bails * 2 > prog->jit_enters) {
             prog->jit_state = GE_JIT_DISABLED;

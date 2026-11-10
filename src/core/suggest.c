@@ -48,7 +48,7 @@ void lz_suggester_init(LzSuggester *suggester, const char *target, size_t length
     suggester->target[length] = '\0';
     suggester->target_length = length;
     suggester->active = true;
-    /* One typo per three letters; one or two letters only forgive a wrong case. */
+    /* One typo per three letters. One or two letters only forgive a wrong case. */
     suggester->max_distance = length <= 2 ? 0u : (unsigned)(length / 3 > 0 ? length / 3 : 1);
 }
 
@@ -79,7 +79,7 @@ void lz_suggester_offer(LzSuggester *suggester, const char *candidate) {
         }
     }
 
-    /* Insertion sort into the top LZ_SUGGEST_MAX: closest first, then alphabetical. */
+    /* Insertion sort into the top LZ_SUGGEST_MAX, closest first and then alphabetical. */
     size_t at = found->count;
     while (at > 0 && (suggester->distances[at - 1] > distance ||
                       (suggester->distances[at - 1] == distance &&

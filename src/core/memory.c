@@ -11,11 +11,12 @@
 #include <string.h>
 
 /*
- * Poison mode (cmake -DLZ_ENABLE_POISON=ON, defines LZ_POISON): a block that is freed is first
- * filled with 0xDD and parked in a quarantine ring instead of going back to malloc, so that its
- * address is not reused and a stale pointer reads 0xDD (refcount 0xDDDDDDDD, type out of range),
- * which the asserts in lz_object_retain / lz_object_release / lz_link_deref catch. This finds
- * use-after-free without ASan. The ring is flushed by lz_heap_destroy.
+ * Poison mode is enabled with cmake -DLZ_ENABLE_POISON=ON, which defines LZ_POISON. A block that
+ * is freed is first filled with 0xDD and parked in a quarantine ring instead of going back to
+ * malloc, so that its address is not reused and a stale pointer reads 0xDD. That means refcount
+ * 0xDDDDDDDD and a type out of range, which the asserts in lz_object_retain, lz_object_release
+ * and lz_link_deref catch. This finds use-after-free without ASan. The ring is flushed by
+ * lz_heap_destroy.
  */
 #ifdef LZ_POISON
 #define LZ_QUARANTINE_SIZE 4096
@@ -38,7 +39,7 @@ static void quarantine_put(void *block, size_t size) {
 }
 #endif
 
-/* Frees a block of `size` bytes (poison mode: poisons and quarantines it instead). */
+/* Frees a block of `size` bytes. In poison mode it poisons and quarantines it instead. */
 void lz_free_sized(void *block, size_t size) {
 #ifdef LZ_POISON
     if (block != NULL) {
@@ -75,9 +76,9 @@ void lz_heap_init(LzHeap *heap) {
 
 /*
  * Invariant: objects still alive here are freed directly, without finalize and without telling
- * the link table, so link cells (which may be among these objects, or may already be freed in
- * this loop) can point at freed memory. That is safe only because nothing runs afterwards that
- * reads a cell or a target: lz_vm_free calls lz_link_table_free next, which frees rows only and
+ * the link table. So link cells, which may be among these objects or may already be freed in
+ * this loop, can point at freed memory. That is safe only because nothing runs afterwards that
+ * reads a cell or a target. lz_vm_free calls lz_link_table_free next, which frees rows only and
  * never dereferences a row's target or a cell. Do not add code after lz_heap_destroy that does.
  */
 void lz_heap_destroy(LzHeap *heap) {
@@ -111,7 +112,7 @@ static bool over_limit(const LzHeap *heap, size_t bytes) {
     return heap->live_bytes > heap->limit_bytes || bytes > heap->limit_bytes - heap->live_bytes;
 }
 
-/* True when bytes fit under the limit, after asking the reclaim hook once if they do not. */
+/* True when bytes fit under the limit, after asking the reclaim hook once if they don't. */
 static bool make_room(LzHeap *heap, size_t bytes) {
     if (!over_limit(heap, bytes)) {
         return true;
@@ -197,7 +198,7 @@ void lz_heap_uncharge(LzHeap *heap, size_t bytes) {
 
 uint32_t lz_heap_next_epoch(LzHeap *heap) {
     if (heap->epoch == UINT32_MAX) {
-        /* Wrapped: clear every stamp so an old mark cannot look current. */
+        /* The counter wrapped, so every stamp is cleared and an old mark can't look current. */
         for (LzObject *object = heap->head; object != NULL; object = object->next) {
             if (object->type == LZ_OBJ_ARRAY) {
                 lz_array_clear_mark(object);
@@ -235,9 +236,9 @@ void lz_object_release(LzHeap *heap, LzObject *object) {
 
     /*
      * The object is dead. Empty the links to it now, before anything else, whether this is the
-     * outermost release or one queued while draining: a queued object is finalized and freed
+     * outermost release or one queued while draining. A queued object is finalized and freed
      * later, so a link must not be left pointing at it in between or afterwards. The hook only
-     * edits the link table and the cells (it releases no object), so it is safe mid-drain.
+     * edits the link table and the cells and releases no object, so it's safe mid-drain.
      */
 #ifndef LZ_TEST_REINTRODUCE_LINK_BUG1
     if (object->linked && heap->on_link_freed != NULL) {

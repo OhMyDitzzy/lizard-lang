@@ -70,7 +70,7 @@ static void reindex(LzDict *dict) {
     }
 }
 
-/* Makes room for at least count entries. Same failure rules as lz_array_reserve. */
+/* Makes room for at least count entries, with the same failure rules as lz_array_reserve. */
 static bool reserve(LzHeap *heap, LzDict *dict, size_t count) {
     if (count > LZ_DICT_MAX_LENGTH) {
         return false;
@@ -340,7 +340,7 @@ LzStatus lz_dict_remove(LzVM *vm, LzDict *dict, const LzValue *key, LzValue *out
     *out = dict->entries[index].value;
     lz_drop_container_holder(out);
     lz_value_release(&vm->heap, &dict->entries[index].key);
-    /* Everything after the hole moves down; a later add of the key goes to the end. */
+    /* Everything after the hole moves down, and a later add of the key goes to the end. */
     memmove(&dict->entries[index], &dict->entries[index + 1],
             (dict->count - index - 1) * sizeof(LzDictEntry));
     dict->count--;

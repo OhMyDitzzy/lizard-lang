@@ -2,9 +2,9 @@
 #define LIZARD_GE_JIT_COMMON_H
 
 /*
- * What the JIT backends share: the layout of the VM structures they poke at, and the
- * architecture-independent half of the compiler: decoding the program, the stack-height
- * analysis, and the discovery of the places control can enter (leaders).
+ * What the JIT backends share. That's the layout of the VM structures they poke at, and the
+ * architecture-independent half of the compiler, which decodes the program, does the
+ * stack-height analysis, and finds the places control can enter (leaders).
  */
 
 #include <stddef.h>
@@ -98,7 +98,7 @@ static inline bool const_is_number(const LzChunk *chunk, uint16_t index, bool in
     return v->type == LZ_VAL_INT || (!int_only && v->type == LZ_VAL_FLOAT);
 }
 
-/* May this operand be read in place by the fused form? (Mirrors load_operand in ge_exec.c.) */
+/* May this operand be read in place by the fused form? Mirrors load_operand in ge_exec.c. */
 static inline bool operand_ok(const JitIR *c, unsigned kind, uint16_t index, int d, bool int_only) {
     if (kind == GE_K_LOCAL) {
         return index < d;
@@ -134,12 +134,12 @@ static inline void note_peak(JitIR *c, int32_t depth) {
 }
 
 /*
- * Stack-height analysis. Every instruction that can run must see the same number of
- * values above the frame base on every path, and may not pop more than there are. The
- * compiler always produces such code; anything else (hand-made bytecode that underflows
- * the stack, say) is left to the interpreter. Also decides, per fused instruction,
- * whether its fused form is valid here (otherwise it is compiled as the plain
- * instructions it covers, exactly like the interpreter falls back).
+ * Stack-height analysis. Every instruction that can run must see the same number of values above
+ * the frame base on every path, and may not pop more than there are. The compiler always
+ * produces such code, and anything else, like hand-made bytecode that underflows the stack, is
+ * left to the interpreter. It also decides, per fused instruction, whether its fused form is
+ * valid here. Otherwise it's compiled as the plain instructions it covers, exactly like the
+ * interpreter falls back.
  */
 static inline bool analyse(JitIR *c, int32_t entry_depth) {
     const GeIns *ins = c->prog->ins;
@@ -161,7 +161,7 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
         int32_t d = c->depth[i];
         c->reach[i] = 1;
         if (i == n) {
-            continue; /* ran off the end of the chunk: the interpreter reports it */
+            continue; /* ran off the end of the chunk, and the interpreter reports it */
         }
         const GeIns *in = &ins[i];
         uint8_t op = in->op;
@@ -215,7 +215,7 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
                 }
                 continue;
             }
-            /* not usable here: fall through to the plain instruction */
+            /* not usable here, so fall through to the plain instruction */
         }
 
         const uint16_t a = c->oa[i];
@@ -226,7 +226,7 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
 
         if (op == GE_OP_DELEGATE &&
             (plain == LZ_OP_CONSTANT || plain == LZ_OP_GET_GLOBAL || plain == LZ_OP_SET_GLOBAL)) {
-            continue; /* bad operands: always the interpreter's (an error) */
+            continue; /* bad operands, which are always the interpreter's and are an error */
         }
 
         switch (plain) {
@@ -409,7 +409,7 @@ static inline void jit_ir_free(JitIR *ir) {
     memset(ir, 0, sizeof *ir);
 }
 
-/* Decodes and analyses a program. False when it is not of a shape the JIT handles. */
+/* Decodes and analyses a program. False when it isn't of a shape the JIT handles. */
 static inline bool jit_ir_build(JitIR *c, const LzChunk *chunk, const GeProgram *program,
                                 size_t entry_depth) {
     const size_t n = program->count - 1;
