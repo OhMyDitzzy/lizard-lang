@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L /* realpath */
+#define _XOPEN_SOURCE 700 /* realpath is XSI, not plain POSIX, and -std=c11 hides it otherwise */
 
 #include "lizard/module_file.h"
 

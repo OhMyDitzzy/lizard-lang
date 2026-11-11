@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L /* mkdtemp, symlink */
+#define _XOPEN_SOURCE 700 /* mkdtemp, symlink */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,13 +34,13 @@ static bool fails_with(LzVM *vm, const char *name, const char *text) {
 
 int main(void) {
     /* Termux has no /tmp, so try $TMPDIR first, then /tmp, then the current folder. */
-    char dir[512] = "";
+    char dir[256] = "";
     const char *bases[3] = {getenv("TMPDIR"), "/tmp", "."};
     for (int i = 0; i < 3 && dir[0] == '\0'; i++) {
         if (bases[i] == NULL || bases[i][0] == '\0') {
             continue;
         }
-        char attempt[512];
+        char attempt[256];
         (void)snprintf(attempt, sizeof attempt, "%s/lizard-modfile-XXXXXX", bases[i]);
         if (mkdtemp(attempt) != NULL) {
             memcpy(dir, attempt, strlen(attempt) + 1);
