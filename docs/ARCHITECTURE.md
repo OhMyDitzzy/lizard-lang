@@ -6,7 +6,7 @@
 | --- | --- |
 | `include/lizard/` | Public headers of the core (values, heap, VM, writer) |
 | `src/core/` | Core implementation, no knowledge of any builtin (`array.c` holds the array operations) |
-| `src/frontend/` | Lexer and the single-pass compiler |
+| `src/frontend/` | Lexer, the single-pass compiler, and the module loader and file resolver (they compile, so they live here, [MODULES.md](MODULES.md)) |
 | `src/engine/` | The Gecko Engine, a faster execution engine for the same bytecode ([ENGINE.md](ENGINE.md)) |
 | `src/cli/` | The `lizard` binary: argument parsing and process entry point |
 | `builtin/` | Builtin functions and their registry, one subfolder per area (`io/`, ...) |
@@ -510,6 +510,17 @@ check and the fuel charge.
 To add a builtin: implement it under `builtin/<area>/`, declare it in that
 area's header, add one row to the table in `registry.c`, and add the source to
 `lizard_builtin_SOURCES` in `mk/sources.am`.
+
+## Modules
+
+A module is a source with its own global table (`LzModule`, `include/lizard/module.h`). The main
+program is the module `main`, and `vm->globals` is its table. Every `LzChunk` has a `module`
+pointer (`NULL` is main), and running code reads and writes the globals of its chunk's module
+(`lz_chunk_globals`). The JIT puts the table's address into the code, the Gecko Engine keeps it
+next to `constants`. An `extend` block remembers the module that ran its statement, and
+`lz_ext_find_*` only sees blocks of the module on top of the call stack (`lz_vm_scope`). Traces
+and the failing offset carry their own source (`LzTraceEntry.source`, `vm->error_source`), so a
+report can name files from several modules. The chapter [MODULES.md](MODULES.md) has the rest.
 
 ## Not decided yet
 

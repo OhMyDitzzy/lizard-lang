@@ -1,6 +1,7 @@
 #include "lizard/vm.h"
 #include "lizard/class.h"
 #include "lizard/link.h"
+#include "lizard/module.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -10,6 +11,15 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     lz_heap_init(&vm->heap);
     lz_table_init(&vm->strings);
     lz_table_init(&vm->globals);
+    lz_modules_init(vm);
+    vm->main_module = calloc(1, sizeof *vm->main_module);
+    if (vm->main_module != NULL) {
+        lz_table_init(&vm->main_module->globals); /* unused, main's globals are vm->globals */
+        vm->main_module->state = LZ_MODULE_READY;
+        vm->main_module->is_main = true;
+        vm->modules = vm->main_module;
+        vm->module_count = 1;
+    }
     lz_table_init(&vm->builtins);
     lz_table_init(&vm->methods);
     vm->current_native = NULL;
@@ -25,6 +35,7 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     vm->fuel = LZ_FUEL_UNLIMITED;
     vm->instructions = 0;
     vm->error_offset = LZ_NO_OFFSET;
+    vm->error_source = NULL;
     vm->native_call_offset = LZ_NO_OFFSET;
     vm->native_depth = 0;
     vm->c_stack_floor = 0;
@@ -120,6 +131,7 @@ void lz_vm_release_roots(LzVM *vm) {
     lz_table_free(&vm->heap, &vm->methods);
     lz_table_free(&vm->heap, &vm->builtins);
     lz_table_free(&vm->heap, &vm->globals);
+    lz_modules_release_tables(vm); /* module globals are roots too, and they go before the heap does */
     lz_table_free(&vm->heap, &vm->strings);
     lz_vm_release_extensions(vm);
     lz_vm_release_class_constants(vm); /* a constant may be an instance of its own class */
@@ -156,6 +168,7 @@ void lz_vm_free(LzVM *vm) {
     lz_link_table_free(vm);
     free(vm->class_registry);
     vm->class_registry = NULL;
+    lz_modules_free(vm); /* last: chunks and classes keep borrowed pointers to modules until the heap is gone */
 }
 
 LzString *lz_vm_intern(LzVM *vm, const char *chars, size_t length) {
@@ -187,8 +200,7 @@ bool lz_vm_define_method(LzVM *vm, LzString *name, LzValue value) {
 }
 
 const LzValue *lz_vm_lookup(const LzVM *vm, const LzString *name) {
-    const LzValue *value = lz_table_get(&vm->globals, name);
-    return value != NULL ? value : lz_table_get(&vm->builtins, name);
+    return lz_module_lookup(vm, &vm->globals, name);
 }
 
 bool lz_vm_take_text_status(LzVM *vm, LzStatus *status) {

@@ -729,6 +729,7 @@ static bool unwind_to_handler(LzVM *vm, LzStatus *status, size_t floor, size_t f
     const LzChunk *failing = vm->frames[vm->frame_count - 1].chunk;
     if (vm->error_offset == LZ_NO_OFFSET && failed_ip < failing->count) {
         vm->error_offset = failing->offsets[failed_ip];
+        vm->error_source = lz_chunk_source(failing);
     }
     if (!vm->trace_fixed) {
         lz_vm_capture_trace(vm);
@@ -757,6 +758,7 @@ static bool unwind_to_handler(LzVM *vm, LzStatus *status, size_t floor, size_t f
     vm->trace_count = 0;
     vm->trace_total = 0;
     vm->error_offset = LZ_NO_OFFSET;
+    vm->error_source = NULL;
     vm->stack[vm->stack_count++] = lz_value_object(&error->base); /* the creation reference */
     *chunk_io = vm->frames[handler.frame].chunk;
     *ip_io = handler.target;
@@ -999,10 +1001,11 @@ static LzStatus extend_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     }
     uint8_t mode = chunk->code[(*ip)++];
     LzClass *ext = lz_value_as_class(constant);
+    ext->module = chunk->module; /* the module that runs the statement, the only one that sees the block */
     if (mode == 0) {
         return lz_vm_extend_register(vm, ext, NULL);
     }
-    const LzValue *target = lz_vm_lookup(vm, target_name);
+    const LzValue *target = lz_module_lookup(vm, lz_chunk_globals(vm, chunk), target_name);
     if (target == NULL) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "'%s' is not a type that can be extended", target_name->data);
     }
@@ -1499,7 +1502,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         if (status != LZ_OK) {
             break;
         }
-        const LzValue *value = lz_vm_lookup(vm, name);
+        const LzValue *value = lz_module_lookup(vm, lz_chunk_globals(vm, chunk), name);
         if (value == NULL) {
             status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "undefined variable '%s'", name->data);
         } else {
@@ -1515,7 +1518,8 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         }
         if (vm->stack_count == 0) {
             status = malformed(vm, "stack underflow");
-        } else if (!lz_vm_define_global(vm, name, vm->stack[vm->stack_count - 1])) {
+        } else if (!lz_table_set(&vm->heap, lz_chunk_globals(vm, chunk), name,
+                                 vm->stack[vm->stack_count - 1])) {
             status = lz_vm_out_of_memory(vm);
         } else {
             pop(vm);
@@ -1612,9 +1616,10 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         }
         if (vm->stack_count == 0) {
             status = malformed(vm, "stack underflow");
-        } else if (lz_table_get(&vm->globals, name) == NULL) {
+        } else if (lz_table_get(lz_chunk_globals(vm, chunk), name) == NULL) {
             status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "undefined variable '%s'", name->data);
-        } else if (!lz_vm_define_global(vm, name, vm->stack[vm->stack_count - 1])) {
+        } else if (!lz_table_set(&vm->heap, lz_chunk_globals(vm, chunk), name,
+                                 vm->stack[vm->stack_count - 1])) {
             status = lz_vm_out_of_memory(vm);
         } else {
             pop(vm);
@@ -2051,6 +2056,7 @@ LzStatus lz_vm_eval_with(LzVM *vm, const LzChunk *chunk, LzValue *result, LzExec
     size_t failed_at = 0;
     vm->error[0] = '\0';
     vm->error_offset = LZ_NO_OFFSET;
+    vm->error_source = NULL;
     vm->native_depth = 0;
     vm->trace_fixed = false;
     vm->heap.limit_hit = false;
@@ -2066,6 +2072,7 @@ LzStatus lz_vm_eval_with(LzVM *vm, const LzChunk *chunk, LzValue *result, LzExec
         /* A failure inside a callback has already recorded its own offset. */
         if (failed_at < failing->count && vm->error_offset == LZ_NO_OFFSET) {
             vm->error_offset = failing->offsets[failed_at];
+            vm->error_source = lz_chunk_source(failing);
         }
         if (!vm->trace_fixed) {
             lz_vm_capture_trace(vm);

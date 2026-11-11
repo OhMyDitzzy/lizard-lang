@@ -5,6 +5,7 @@
 #include "ge_jit.h"
 #include "lizard/arith.h"
 #include "lizard/array.h"
+#include "lizard/module.h"
 #include "lizard/native.h"
 
 /*
@@ -353,9 +354,8 @@ GE_INLINE bool compare(uint8_t op, const LzValue *a, const LzValue *b, bool *res
  * undefined, and the reference decides. *hint remembers the table slot the name was last found
  * in, and the key comparison makes a stale hint harmless after the table grows.
  */
-GE_INLINE LzValue *global_ref(LzVM *vm, const LzValue *constants, uint16_t name_index,
+GE_INLINE LzValue *global_ref(LzTable *table, const LzValue *constants, uint16_t name_index,
                               uint32_t *hint) {
-    LzTable *table = &vm->globals;
     const LzString *name = (const LzString *)constants[name_index].as.object;
     uint32_t slot = *hint;
     if (GE_LIKELY(slot < table->capacity && table->entries[slot].key == name)) {
@@ -378,10 +378,11 @@ GE_INLINE LzValue *global_ref(LzVM *vm, const LzValue *constants, uint16_t name_
  * globals table at that moment. This relies on tables never removing a key, which is true today,
  * see core/table.h. A table that learns to delete needs an epoch counter here instead.
  */
-GE_INLINE const LzValue *builtin_cached(LzVM *vm, const LzValue *constants, const GeIns *in) {
+GE_INLINE const LzValue *builtin_cached(LzVM *vm, const LzTable *globals, const LzValue *constants,
+                                        const GeIns *in) {
     const LzTable *builtins = &vm->builtins;
     uint32_t slot = in->hint_b;
-    if (GE_LIKELY(in->target == (uint32_t)vm->globals.count && slot < builtins->capacity &&
+    if (GE_LIKELY(in->target == (uint32_t)globals->count && slot < builtins->capacity &&
                   builtins->entries[slot].key == (const LzString *)constants[in->a].as.object)) {
         return &builtins->entries[slot].value;
     }
@@ -389,7 +390,8 @@ GE_INLINE const LzValue *builtin_cached(LzVM *vm, const LzValue *constants, cons
 }
 
 /* Looks the name up as a builtin and remembers where. Only for a name that is not a global. */
-GE_INLINE const LzValue *builtin_fill(LzVM *vm, const LzValue *constants, GeIns *in) {
+GE_INLINE const LzValue *builtin_fill(LzVM *vm, const LzTable *globals, const LzValue *constants,
+                                      GeIns *in) {
     const LzString *name = (const LzString *)constants[in->a].as.object;
     const LzValue *found = lz_table_get(&vm->builtins, name);
     if (found == NULL) {
@@ -398,7 +400,7 @@ GE_INLINE const LzValue *builtin_fill(LzVM *vm, const LzValue *constants, GeIns 
     const LzTableEntry *entry =
         (const LzTableEntry *)((const char *)found - offsetof(LzTableEntry, value));
     in->hint_b = (uint32_t)(entry - vm->builtins.entries);
-    in->target = (uint32_t)vm->globals.count;
+    in->target = (uint32_t)globals->count;
     return found;
 }
 
@@ -407,17 +409,16 @@ GE_INLINE const LzValue *builtin_fill(LzVM *vm, const LzValue *constants, GeIns 
  * the global doesn't exist or the table is about to grow. lz_table_set grows before it looks for
  * the key, even when the key exists.
  */
-GE_INLINE LzValue *global_store(LzVM *vm, const LzValue *constants, uint16_t name_index,
+GE_INLINE LzValue *global_store(LzTable *table, const LzValue *constants, uint16_t name_index,
                                 uint32_t *hint) {
-    const LzTable *table = &vm->globals;
     if (GE_UNLIKELY(table->count + 1 > table->capacity * 3 / 4)) {
         return NULL;
     }
-    return global_ref(vm, constants, name_index, hint);
+    return global_ref(table, constants, name_index, hint);
 }
 
 /* A fused operand, which is a local, a constant or a global. NULL means "run it plain". */
-GE_INLINE const LzValue *load_operand(LzVM *vm, const LzValue *constants, const LzValue *stack,
+GE_INLINE const LzValue *load_operand(LzTable *globals, const LzValue *constants, const LzValue *stack,
                                       size_t base, size_t sp, unsigned kind, uint16_t index,
                                       uint32_t *hint) {
     if (kind == GE_K_LOCAL) {
@@ -426,7 +427,7 @@ GE_INLINE const LzValue *load_operand(LzVM *vm, const LzValue *constants, const 
     if (kind == GE_K_CONST) {
         return &constants[index];
     }
-    return global_ref(vm, constants, index, hint);
+    return global_ref(globals, constants, index, hint);
 }
 
 /* array[index] for an int index in range, where a negative one counts from the end. */
@@ -483,6 +484,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
     const LzChunk *chunk = main_chunk;
     GeIns *code = run->program->ins;
     const LzValue *constants = chunk->constants;
+    LzTable *globals = lz_chunk_globals(vm, chunk);
     size_t base = 0; /* stack index of the frame's local slot 0 */
     size_t forced_fail = SIZE_MAX; /* failure offset reported by a call run on the reference interpreter */
     LzValue *const stack = vm->stack;
@@ -613,11 +615,11 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
         }
         case LZ_OP_GET_GLOBAL: {
             TICK(1);
-            const LzValue *found = builtin_cached(vm, constants, ins);
+            const LzValue *found = builtin_cached(vm, globals, constants, ins);
             if (found == NULL) {
-                found = global_ref(vm, constants, ins->a, &ins->hint_a);
+                found = global_ref(globals, constants, ins->a, &ins->hint_a);
                 if (found == NULL) {
-                    found = builtin_fill(vm, constants, ins); /* not a global: maybe a builtin */
+                    found = builtin_fill(vm, globals, constants, ins); /* not a global: maybe a builtin */
                 }
             }
             if (GE_UNLIKELY(found == NULL || sp >= LZ_STACK_MAX)) {
@@ -631,7 +633,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
         }
         case LZ_OP_SET_GLOBAL: {
             TICK(1);
-            LzValue *slot = sp > 0 ? global_store(vm, constants, ins->a, &ins->hint_a) : NULL;
+            LzValue *slot = sp > 0 ? global_store(globals, constants, ins->a, &ins->hint_a) : NULL;
             if (GE_UNLIKELY(slot == NULL)) {
                 goto run_plain;
             }
@@ -822,6 +824,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                     code = callee_program->ins;
                     prog = callee_program;
                     constants = chunk->constants;
+                    globals = lz_chunk_globals(vm, chunk);
                     pc = 0;
                     nt_count = 1;
                     goto native_try;
@@ -941,14 +944,15 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 prog = run->program;
             }
             constants = chunk->constants;
+            globals = lz_chunk_globals(vm, chunk);
             nt_count = 0;
             goto native_try;
         }
 
         case GE_OP_BIN: { /* [load a] [load b] ARITH [store] */
             FUSED_GUARD(2);
-            const LzValue *a = load_operand(vm, constants, stack, base, sp, KIND_A(ins), ins->a, &ins->hint_a);
-            const LzValue *b = load_operand(vm, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
+            const LzValue *a = load_operand(globals, constants, stack, base, sp, KIND_A(ins), ins->a, &ins->hint_a);
+            const LzValue *b = load_operand(globals, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
             LzValue out = GE_NIL_INIT;
             if (GE_UNLIKELY(a == NULL || b == NULL || !arith(ins->sub, a, b, &out))) {
                 goto plain_tick;
@@ -967,7 +971,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 break;
             }
             default: {
-                LzValue *slot = global_store(vm, constants, ins->c, &ins->hint_c);
+                LzValue *slot = global_store(globals, constants, ins->c, &ins->hint_c);
                 if (GE_UNLIKELY(slot == NULL)) {
                     goto plain_tick;
                 }
@@ -987,7 +991,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 goto plain_tick;
             }
             const LzValue *a = &stack[sp - 1];
-            const LzValue *b = load_operand(vm, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
+            const LzValue *b = load_operand(globals, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
             LzValue out = GE_NIL_INIT;
             if (GE_UNLIKELY(b == NULL || !arith(ins->sub, a, b, &out))) {
                 goto plain_tick;
@@ -1007,7 +1011,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 break;
             }
             default: {
-                LzValue *slot = global_store(vm, constants, ins->c, &ins->hint_c);
+                LzValue *slot = global_store(globals, constants, ins->c, &ins->hint_c);
                 if (GE_UNLIKELY(slot == NULL)) {
                     goto plain_tick;
                 }
@@ -1024,8 +1028,8 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
         }
         case GE_OP_CMPJ: { /* [load a] [load b] CMP JUMP_IF_FALSE POP */
             FUSED_GUARD(2);
-            const LzValue *a = load_operand(vm, constants, stack, base, sp, KIND_A(ins), ins->a, &ins->hint_a);
-            const LzValue *b = load_operand(vm, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
+            const LzValue *a = load_operand(globals, constants, stack, base, sp, KIND_A(ins), ins->a, &ins->hint_a);
+            const LzValue *b = load_operand(globals, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
             bool outcome = false;
             if (GE_UNLIKELY(a == NULL || b == NULL || !compare(ins->sub, a, b, &outcome))) {
                 goto plain_tick;
@@ -1039,7 +1043,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             if (GE_UNLIKELY(sp < 1)) {
                 goto plain_tick;
             }
-            const LzValue *b = load_operand(vm, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
+            const LzValue *b = load_operand(globals, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
             bool outcome = false;
             if (GE_UNLIKELY(b == NULL || !compare(ins->sub, &stack[sp - 1], b, &outcome))) {
                 goto plain_tick;
@@ -1051,8 +1055,8 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
         }
         case GE_OP_INDEX: { /* [load a] [load b] INDEX, where the array is borrowed and not copied */
             FUSED_GUARD(2);
-            const LzValue *a = load_operand(vm, constants, stack, base, sp, KIND_A(ins), ins->a, &ins->hint_a);
-            const LzValue *b = load_operand(vm, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
+            const LzValue *a = load_operand(globals, constants, stack, base, sp, KIND_A(ins), ins->a, &ins->hint_a);
+            const LzValue *b = load_operand(globals, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
             LzArray *array = NULL;
             size_t position = 0;
             if (GE_UNLIKELY(a == NULL || b == NULL || !array_position(a, b, &array, &position))) {
@@ -1070,7 +1074,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             if (GE_UNLIKELY(sp < 1)) {
                 goto plain_tick;
             }
-            const LzValue *b = load_operand(vm, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
+            const LzValue *b = load_operand(globals, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
             LzArray *array = NULL;
             size_t position = 0;
             if (GE_UNLIKELY(b == NULL || !array_position(&stack[sp - 1], b, &array, &position))) {
@@ -1117,6 +1121,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
         code = program->ins;
         prog = program;
         constants = chunk->constants;
+        globals = lz_chunk_globals(vm, chunk);
         pc = 0;
         nt_count = 1;
         goto native_try;
@@ -1175,6 +1180,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             }
             code = prog->ins;
             constants = chunk->constants;
+            globals = lz_chunk_globals(vm, chunk);
             if (jx.reason == GE_JX_RETURNED) {
                 pc = top->ip;
                 nt_count = 0;

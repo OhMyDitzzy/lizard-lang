@@ -12,6 +12,7 @@
 
 #include "lizard/class.h"
 #include "lizard/error.h"
+#include "lizard/module.h"
 #include "lizard/native.h"
 #include "lizard/vm.h"
 
@@ -24,10 +25,15 @@ static const LzMember *ext_member(const LzClass *ext, const LzString *name) {
     return NULL;
 }
 
+/*
+ * An extend block is private to the module that wrote it, and lexical: only code of that module
+ * sees it. The code that runs now is the one in the top frame, see lz_vm_scope.
+ */
 bool lz_ext_find_kind(const LzVM *vm, uint16_t kind, const LzString *name, LzFound *out) {
+    const LzModule *scope = lz_vm_scope(vm);
     for (size_t i = 0; i < vm->ext_count; i++) {
         const LzClass *ext = vm->exts[i];
-        if ((ext->ext_kinds & kind) == 0) {
+        if (ext->module != scope || (ext->ext_kinds & kind) == 0) {
             continue;
         }
         const LzMember *member = ext_member(ext, name);
@@ -48,9 +54,10 @@ bool lz_ext_find_value(const LzVM *vm, const LzValue *value, const LzString *nam
     uint16_t kind = lz_kind_of(value);
     if (kind == LZ_KIND_ERROR) {
         const LzError *error = (const LzError *)value->as.object;
+        const LzModule *scope = lz_vm_scope(vm);
         for (size_t i = 0; i < vm->ext_count; i++) {
             const LzClass *ext = vm->exts[i];
-            if (ext->ext_error_kind == 0) {
+            if (ext->ext_error_kind == 0 || ext->module != scope) {
                 continue;
             }
             size_t bit = (size_t)(ext->ext_error_kind - 1);
@@ -73,10 +80,11 @@ bool lz_ext_find_class(const LzVM *vm, const LzClass *cls, const LzString *name,
     if (vm->ext_count == 0) {
         return false;
     }
+    const LzModule *scope = lz_vm_scope(vm);
     for (const LzClass *c = cls; c != NULL; c = c->parent) {
         for (size_t i = 0; i < vm->ext_count; i++) {
             const LzClass *ext = vm->exts[i];
-            if (ext->ext_target_id != c->id) {
+            if (ext->module != scope || ext->ext_target_id != c->id) {
                 continue;
             }
             const LzMember *member = ext_member(ext, name);
@@ -130,7 +138,8 @@ LzStatus lz_vm_extend_register(LzVM *vm, LzClass *ext, const LzValue *target) {
             }
             for (size_t e = 0; e < vm->ext_count; e++) {
                 const LzClass *other = vm->exts[e];
-                if (other->ext_error_kind == ext->ext_error_kind && ext_member(other, name) != NULL) {
+                if (other->module == ext->module && other->ext_error_kind == ext->ext_error_kind &&
+                    ext_member(other, name) != NULL) {
                     return ext_fail(vm, "an earlier extend already added it", "'%s' is already defined for %s", text,
                                     target_name);
                 }

@@ -16,6 +16,7 @@ void lz_chunk_init(LzChunk *chunk) {
     chunk->type_capacity = 0;
     chunk->type_slots = NULL;
     chunk->type_slot_capacity = 0;
+    chunk->module = NULL;
     chunk->iface = NULL;
 }
 

@@ -32,6 +32,7 @@ typedef struct JitSite {
     uint32_t hint;  /* slot in the globals table */
     uint32_t bhint; /* slot in the builtins table */
     uint32_t count; /* size of the globals table when the builtin was cached */
+    const LzTable *table; /* the globals of the chunk's module, or NULL for vm->globals */
 } JitSite;
 
 enum { GE_JX_BAIL = 1, GE_JX_FAIL, GE_JX_HALT, GE_JX_RETURNED, GE_JX_ENTER };

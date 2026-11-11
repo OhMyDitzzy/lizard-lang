@@ -302,9 +302,10 @@ LzStatus lz_error_attach_trace(LzVM *vm, LzError *error) {
     for (size_t i = 0; i < vm->trace_count && i < LZ_TRACE_MAX; i++) {
         const LzTraceEntry *entry = &vm->trace[i];
         char line[128];
-        if (entry->offset != LZ_NO_OFFSET && vm->trace_source != NULL) {
-            LzLocation at = lz_source_locate(vm->trace_source, entry->offset);
-            (void)snprintf(line, sizeof line, "%s (%s:%u:%u)", entry->name, vm->trace_source->name,
+        const LzSource *where = entry->source != NULL ? entry->source : vm->trace_source;
+        if (entry->offset != LZ_NO_OFFSET && where != NULL) {
+            LzLocation at = lz_source_locate(where, entry->offset);
+            (void)snprintf(line, sizeof line, "%s (%s:%u:%u)", entry->name, where->name,
                            (unsigned)at.line, (unsigned)at.column);
         } else {
             (void)snprintf(line, sizeof line, "%s", entry->name);

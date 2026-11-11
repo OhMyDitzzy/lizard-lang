@@ -74,6 +74,26 @@ typedef struct LzDiagnostics {
  */
 LzStatus lz_compile(LzVM *vm, const LzSource *source, LzChunk *chunk, LzDiagnostics *diagnostics);
 
+/*
+ * Why a module failed to compile, kept for the host and replaced by the next failure. The source
+ * is the module's own text. See lz_vm_module_failure.
+ */
+typedef struct LzModuleFailure {
+    LzSource source;
+    LzDiagnostics diagnostics;
+} LzModuleFailure;
+
+/* The full diagnostics of the last module that failed to compile, or NULL. Owned by the VM. */
+const LzModuleFailure *lz_vm_module_failure(const LzVM *vm);
+
+/*
+ * Like lz_compile, but the script is the code of `module`: its globals are the module's table,
+ * and every chunk it makes has chunk.module set. The module owns `source`'s text for as long as
+ * the VM lives, because chunks and functions point at offsets in it and reports need it.
+ */
+LzStatus lz_compile_module(LzVM *vm, LzModule *module, const LzSource *source, LzChunk *chunk,
+                           LzDiagnostics *diagnostics);
+
 /* Prints every collected error with its source line, then a count of dropped ones. */
 void lz_diagnostics_write(const LzDiagnostics *diagnostics, const LzSource *source,
                           const LzWriter *out);

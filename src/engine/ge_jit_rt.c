@@ -42,7 +42,7 @@ static const LzValue *cell_of(const LzTable *table, const LzValue *found, uint32
 
 /* The cell of a global variable, or NULL when the name is not one. */
 const LzValue *jit_global_cell(LzVM *vm, const LzString *name, JitSite *site) {
-    const LzTable *table = &vm->globals;
+    const LzTable *table = site->table != NULL ? site->table : &vm->globals;
     if (site->hint < table->capacity && table->entries[site->hint].key == name) {
         return &table->entries[site->hint].value;
     }
@@ -57,7 +57,8 @@ const LzValue *jit_global_ptr(LzVM *vm, const LzString *name, JitSite *site) {
         return found;
     }
     const LzTable *builtins = &vm->builtins;
-    if (site->count == (uint32_t)vm->globals.count && site->bhint < builtins->capacity &&
+    const LzTable *globals = site->table != NULL ? site->table : &vm->globals;
+    if (site->count == (uint32_t)globals->count && site->bhint < builtins->capacity &&
         builtins->entries[site->bhint].key == name) {
         return &builtins->entries[site->bhint].value;
     }
@@ -65,7 +66,7 @@ const LzValue *jit_global_ptr(LzVM *vm, const LzString *name, JitSite *site) {
     if (found == NULL) {
         return NULL;
     }
-    site->count = (uint32_t)vm->globals.count;
+    site->count = (uint32_t)globals->count;
     return cell_of(builtins, found, &site->bhint);
 }
 

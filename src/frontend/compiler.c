@@ -229,6 +229,8 @@ typedef struct TypeRef {
 
 typedef struct Parser {
     LzVM *vm;
+    const LzModule *module; /* the module being compiled, or NULL for main */
+    LzTable *globals;       /* its globals: the table of the module, or vm->globals for main */
     const LzSource *source;
     LzChunk *chunk;
     LzLexer lexer;
@@ -1629,7 +1631,7 @@ static LzSuggestions suggest_names(Parser *parser, const LzToken *token, bool fu
         }
         lz_suggester_offer(&suggester, symbol->name->data);
     }
-    offer_table(&suggester, &parser->vm->globals, functions_only);
+    offer_table(&suggester, parser->globals, functions_only);
     offer_table(&suggester, &parser->vm->builtins, functions_only);
     if (parser->method_name) {
         offer_table(&suggester, &parser->vm->methods, functions_only);
@@ -1729,7 +1731,7 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
                 }
             }
             /* A class made by an earlier source in this VM: the binding of the name right now. */
-            const LzValue *bound = lz_table_get(&parser->vm->globals, id);
+            const LzValue *bound = lz_table_get(parser->globals, id);
             if (bound != NULL && lz_value_is_class(bound)) {
                 *out = lz_type_of_kinds(LZ_KIND_INSTANCE);
                 out->class_name = id;
@@ -2256,7 +2258,7 @@ static bool head_name_is_trait(const Parser *parser, const LzString *name, bool 
     if (index != SIZE_MAX) {
         return parser->class_trait[index];
     }
-    const LzValue *bound = lz_table_get(&parser->vm->globals, name);
+    const LzValue *bound = lz_table_get(parser->globals, name);
     if (bound != NULL && lz_value_is_class(bound)) {
         return lz_value_as_class(bound)->is_trait;
     }
@@ -2277,7 +2279,7 @@ static LzIfaceSig *build_constructor(Parser *parser, const LzClass *cls, const L
     bool ok = lz_iface_sig_set_result(sig, "nil", false);
     if (parent != NULL && ok) {
         size_t index = find_class_index(parser, parent);
-        const LzValue *bound = lz_table_get(&parser->vm->globals, parent);
+        const LzValue *bound = lz_table_get(parser->globals, parent);
         if (index != SIZE_MAX) {
             ok = parser->class_ctor[index] == NULL || add_sig_params(sig, parser->class_ctor[index]);
         } else if (bound != NULL && lz_value_is_class(bound)) {
@@ -3153,7 +3155,7 @@ static Expr variable_at(Parser *parser, const LzToken *token) {
         }
     }
 
-    const LzValue *defined = lz_vm_lookup(parser->vm, name);
+    const LzValue *defined = lz_module_lookup(parser->vm, parser->globals, name);
     if (defined == NULL) {
         /*
          * Sequential execution: a name that is not defined yet is not a compile error. The
@@ -4700,7 +4702,7 @@ static bool function_named(Parser *parser, const LzString *name) {
     if (symbol != NULL) {
         return (lz_type_possible_kinds(&symbol->type) & LZ_KIND_FUNCTION) != 0;
     }
-    const LzValue *global = lz_vm_lookup(parser->vm, name);
+    const LzValue *global = lz_module_lookup(parser->vm, parser->globals, name);
     return global != NULL && (lz_kind_of(global) & LZ_KIND_FUNCTION) != 0;
 }
 
@@ -6967,7 +6969,7 @@ static void assignment_statement(Parser *parser) {
     }
     bool is_constant = symbol != NULL && (symbol->is_const || symbol->kind == SYMBOL_CONSTANT);
     if (compound && name != NULL) {
-        if (symbol == NULL && lz_vm_lookup(parser->vm, name) != NULL) {
+        if (symbol == NULL && lz_module_lookup(parser->vm, parser->globals, name) != NULL) {
             error_with_name(parser, &name_token, "cannot assign to builtin '", "'");
         } else if (is_constant) {
             error_with_name(parser, &name_token, "cannot assign to constant '", "'");
@@ -6999,7 +7001,7 @@ static void assignment_statement(Parser *parser) {
     }
 
     if (symbol == NULL) {
-        if (lz_vm_lookup(parser->vm, name) != NULL) {
+        if (lz_module_lookup(parser->vm, parser->globals, name) != NULL) {
             error_with_name(parser, &name_token, "cannot assign to builtin '", "'");
         } else {
             /* Sequential execution, so this is checked when the assignment runs (SET_GLOBAL). */
@@ -7323,6 +7325,9 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
         return result;
     }
     LzFunction *function = lz_function_new(heap, name);
+    if (function != NULL) {
+        function->chunk.module = parser->module;
+    }
     FuncSig *sig = function != NULL ? new_sig(parser, name) : NULL;
     if (function == NULL || sig == NULL) {
         if (function != NULL) {
@@ -7712,6 +7717,9 @@ static LzToken peek_token(const Parser *parser, int count) {
 static bool compile_thunk(Parser *parser, LzString *name, uint32_t offset, LzValue *out) {
     LzHeap *heap = &parser->vm->heap;
     LzFunction *function = lz_function_new(heap, name);
+    if (function != NULL) {
+        function->chunk.module = parser->module;
+    }
     FuncSig *sig = function != NULL ? new_sig(parser, name) : NULL;
     if (function == NULL || sig == NULL) {
         if (function != NULL) {
@@ -8334,6 +8342,9 @@ static void class_declaration(Parser *parser) {
     parser->vm->has_classes = true;
 
     LzClass *cls = lz_class_new(parser->vm, name, name_token.offset);
+    if (cls != NULL) {
+        cls->module = parser->module;
+    }
     if (cls == NULL) {
         fail(parser, lz_vm_out_of_memory(parser->vm));
         return;
@@ -8525,6 +8536,9 @@ static void extend_declaration(Parser *parser) {
     }
     parser->vm->has_classes = true;
     LzClass *cls = lz_class_new(parser->vm, name, target.offset);
+    if (cls != NULL) {
+        cls->module = parser->module;
+    }
     if (cls == NULL) {
         fail(parser, lz_vm_out_of_memory(parser->vm));
         return;
@@ -8785,7 +8799,7 @@ static void declare_error_kind(Parser *parser, ErrorDecl *decl, bool collides) {
         fail(parser, lz_vm_out_of_memory(vm));
         return;
     }
-    if (collides || lz_vm_lookup(vm, name) != NULL) {
+    if (collides || lz_module_lookup(vm, parser->globals, name) != NULL) {
         decl->problem = ERROR_DECL_COLLISION;
         return;
     }
@@ -8949,6 +8963,9 @@ static void error_class_body(Parser *parser, const LzToken *name_token, uint8_t 
     }
     parser->vm->has_classes = true;
     LzClass *cls = lz_class_new(parser->vm, name, name_token->offset);
+    if (cls != NULL) {
+        cls->module = parser->module;
+    }
     if (cls == NULL) {
         fail(parser, lz_vm_out_of_memory(parser->vm));
         return;
@@ -9169,7 +9186,7 @@ static void error_declaration(Parser *parser) {
             for (size_t i = 0; parent_name != NULL && i < parser->class_count; i++) {
                 is_class = is_class || parser->classes[i] == parent_name;
             }
-            const LzValue *bound = parent_name != NULL ? lz_table_get(&parser->vm->globals, parent_name) : NULL;
+            const LzValue *bound = parent_name != NULL ? lz_table_get(parser->globals, parent_name) : NULL;
             if (is_class || (bound != NULL && lz_value_is_class(bound))) {
                 error_with_name(parser, &parent_token, "'", "' is not an error kind");
                 if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
@@ -9550,9 +9567,16 @@ static void pub_prefix(Parser *parser) {
     char name[48];
     token_text(parser, &word, name, sizeof name);
     if (word_is(parser, &word, "extend")) {
-        diag_label(parser, "`extend` adds to a type, it does not declare something to use");
-        pub_removal_fix(parser, &pub, "remove `pub`: it goes in front of the thing you declare, not in front of `extend`");
-        record(parser, pub.offset, pub.length, "`pub` cannot go in front of `extend`");
+        LzToken target = peek_token(parser, 1);
+        char target_name[48] = "that type";
+        if (target.type == LZ_TOKEN_IDENTIFIER || target.type == LZ_TOKEN_NIL) {
+            token_text(parser, &target, target_name, sizeof target_name);
+        }
+        diag_label(parser, "an extension stays inside the module that writes it");
+        diag_note(parser, "other modules never see it, so it cannot change how they use %s", target_name);
+        diag_help(parser, "remove `pub`, or share the behavior with a `pub fn` that takes the value");
+        pub_removal_fix(parser, &pub, "remove `pub`, or share the behavior with a `pub fn` that takes the value");
+        record(parser, pub.offset, pub.length, "'pub' cannot be used on 'extend'");
     } else if (word_is(parser, &word, "import")) {
         diag_label(parser, "`import` brings names in; it does not declare one to share");
         pub_removal_fix(parser, &pub, "remove `pub`: it goes in front of a declaration, not in front of `import`");
@@ -9755,7 +9779,10 @@ static LzStatus compile_into(Parser *parser) {
     return parser->diagnostics->count > 0 ? LZ_ERR_COMPILE : LZ_OK;
 }
 
-LzStatus lz_compile(LzVM *vm, const LzSource *source, LzChunk *chunk, LzDiagnostics *diagnostics) {
+LzStatus lz_compile_module(LzVM *vm, LzModule *module, const LzSource *source, LzChunk *chunk,
+                           LzDiagnostics *diagnostics) {
+    const LzModule *scope = module != NULL && !module->is_main ? module : NULL;
+    chunk->module = scope;
     diagnostics->count = 0;
     diagnostics->dropped = 0;
     diagnostics->hint_count = 0;
@@ -9765,6 +9792,8 @@ LzStatus lz_compile(LzVM *vm, const LzSource *source, LzChunk *chunk, LzDiagnost
         return lz_vm_set_error(vm, LZ_ERR_MEMORY, "out of memory");
     }
     parser->vm = vm;
+    parser->module = scope;
+    parser->globals = lz_module_table(vm, scope);
     parser->source = source;
     parser->chunk = chunk;
     parser->diagnostics = diagnostics;
@@ -9799,6 +9828,10 @@ LzStatus lz_compile(LzVM *vm, const LzSource *source, LzChunk *chunk, LzDiagnost
     free(parser->error_decls);
     free(parser);
     return status;
+}
+
+LzStatus lz_compile(LzVM *vm, const LzSource *source, LzChunk *chunk, LzDiagnostics *diagnostics) {
+    return lz_compile_module(vm, vm->main_module, source, chunk, diagnostics);
 }
 
 void lz_diagnostics_write(const LzDiagnostics *diagnostics, const LzSource *source,

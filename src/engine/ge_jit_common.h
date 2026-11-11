@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "ge_jit.h"
+#include "lizard/module.h"
 #include "lizard/array.h"
 #include "lizard/native.h"
 
@@ -27,6 +28,18 @@
 #define O_GENT (OFFS(LzVM, globals) + OFFS(LzTable, entries))
 #define O_GCNT (OFFS(LzVM, globals) + OFFS(LzTable, count))
 #define O_GCAP (OFFS(LzVM, globals) + OFFS(LzTable, capacity))
+/*
+ * The globals table of the module the chunk belongs to, or NULL for the module main, whose table is
+ * vm->globals and is addressed through the VM register. A module's table doesn't move while the VM
+ * lives, so its address goes into the code.
+ */
+static inline const LzTable *jit_chunk_table(const LzChunk *chunk) {
+    const LzModule *module = chunk->module;
+    return module == NULL || module->is_main ? NULL : &module->globals;
+}
+#define O_TCAP OFFS(LzTable, capacity)
+#define O_TCNT OFFS(LzTable, count)
+#define O_TENT OFFS(LzTable, entries)
 #define O_RC OFFS(LzObject, refcount)
 #define O_OTYPE OFFS(LzObject, type)
 #define O_ARR_ITEMS OFFS(LzArray, items)
@@ -436,6 +449,7 @@ static inline bool jit_ir_build(JitIR *c, const LzChunk *chunk, const GeProgram 
         c->sites[i].hint = GE_NO_HINT;
         c->sites[i].bhint = GE_NO_HINT;
         c->sites[i].count = GE_NO_HINT;
+        c->sites[i].table = jit_chunk_table(chunk);
     }
     for (size_t i = 0; i < n; i++) {
         const GeIns *in = &program->ins[i];

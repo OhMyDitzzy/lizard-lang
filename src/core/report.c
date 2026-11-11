@@ -438,7 +438,8 @@ void lz_report_write(const LzSource *source, const LzReport *report, bool color,
             styled_cstr(&out, C_BOLD, frame->name);
             if (frame->has_location) {
                 raw(&out, " (", 2);
-                raw(&out, source->name, strlen(source->name));
+                const char *file = frame->file != NULL ? frame->file : source->name;
+                raw(&out, file, strlen(file));
                 raw(&out, ":", 1);
                 put_unsigned(&out, NULL, frame->line);
                 raw(&out, ":", 1);

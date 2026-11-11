@@ -10,6 +10,7 @@
 
 #include "lizard/builtin.h"
 #include "lizard/compiler.h"
+#include "lizard/module_file.h"
 #include "lizard/engine.h"
 #include "lizard/lexer.h"
 #include "lizard/report.h"
@@ -197,8 +198,10 @@ static int dump_tokens(const char *path, bool color) {
     return failed ? EXIT_DATA_ERROR : EXIT_SUCCESS;
 }
 
-static void report_runtime_error(const LzVM *vm, const LzSource *source,
+static void report_runtime_error(const LzVM *vm, const LzSource *main_source,
                                  const LzDiagnostics *diagnostics, bool color) {
+    /* The failing line may be in another module, and then the report is about that source. */
+    const LzSource *source = vm->error_source != NULL ? vm->error_source : main_source;
     if (vm->error_offset == LZ_NO_OFFSET) {
         report_plain_error(color, vm->error);
         return;
@@ -226,7 +229,7 @@ static void report_runtime_error(const LzVM *vm, const LzSource *source,
 
     /* An undefined name: the compiler kept what it knew about the names in scope. */
     char headline[160];
-    const LzNameHint *hint = lz_diagnostics_find_hint(diagnostics, vm->error_offset);
+    const LzNameHint *hint = vm->error_source == NULL ? lz_diagnostics_find_hint(diagnostics, vm->error_offset) : NULL;
     if (hint != NULL && strncmp(vm->error, "undefined variable '", 20) == 0) {
         report.length = hint->length;
         report.label = "not found in this scope";
@@ -296,11 +299,13 @@ static void report_runtime_error(const LzVM *vm, const LzSource *source,
         const LzTraceEntry *entry = &vm->trace[i];
         (void)snprintf(names[i], sizeof names[i], "%s", entry->name);
         frames[i].name = names[i];
+        frames[i].file = entry->source != NULL ? entry->source->name : main_source->name;
         frames[i].has_location = entry->offset != LZ_NO_OFFSET;
         frames[i].line = 0;
         frames[i].column = 0;
         if (frames[i].has_location) {
-            LzLocation where = lz_source_locate(source, entry->offset);
+            LzLocation where = lz_source_locate(entry->source != NULL ? entry->source : main_source,
+                                                entry->offset);
             frames[i].line = where.line;
             frames[i].column = where.column;
         }
@@ -393,6 +398,9 @@ static int run_script(const char *script_path, bool heap_stats, bool trace_memor
             lz_engine_set_jit(mode);
         }
         LzEngineStats stats = {0};
+
+        /* Only the command line looks for modules in files, the VM has no resolver of its own. */
+        (void)lz_file_resolver_install(&vm, script_path);
 
         LzDiagnostics diagnostics;
         LzStatus status = lz_compile(&vm, &source, &chunk, &diagnostics);

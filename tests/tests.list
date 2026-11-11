@@ -31,6 +31,8 @@ test_try test_try plain - -
 test_classes test_classes plain - -
 test_interface test_interface plain - -
 test_extend test_extend plain - -
+test_modules test_modules plain - -
+test_module_file test_module_file plain - -
 test_error_classes test_error_classes plain - -
 test_error_types test_error_types plain - -
 test_links test_links plain - -
@@ -57,6 +59,7 @@ test_strings_ge test_strings_ge ge - -
 test_bits_ge test_bits_ge ge - -
 test_classes_ge test_classes_ge ge - -
 test_extend_ge test_extend_ge ge - -
+test_modules_ge test_modules_ge ge - -
 test_error_classes_ge test_error_classes_ge ge - -
 test_loops_ge test_loops_ge ge - -
 test_for_ge test_for_ge ge - -
@@ -89,6 +92,7 @@ fuzz_compile_ge_jit fuzz_compile_ge none LZ_JIT=eager -
 test_skink_ge_jit test_skink_ge none LZ_JIT=eager -
 test_classes_ge_jit test_classes_ge none LZ_JIT=eager -
 test_extend_ge_jit test_extend_ge none LZ_JIT=eager -
+test_modules_ge_jit test_modules_ge none LZ_JIT=eager -
 test_error_classes_ge_jit test_error_classes_ge none LZ_JIT=eager -
 test_links_ge_jit test_links_ge none LZ_JIT=eager -
 fuzz_links_ge_jit fuzz_links_ge none LZ_JIT=eager -

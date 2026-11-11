@@ -364,14 +364,23 @@ static void emit_global(Cx *c, int reg, uint16_t name_index, JitSite *site, bool
     const LzObject *name = c->ir.chunk->constants[name_index].as.object;
     int slow = a_label(X);
     int done = a_label(X);
+    const LzTable *table = jit_chunk_table(c->ir.chunk);
+    int tbase = R_VM; /* the globals live in the VM (main), or in a table of their own (a module) */
+    int32_t tcap = O_GCAP, tent = O_GENT;
     mov_imm(X, 1, (uint64_t)(uintptr_t)site);
     ldr_w(X, 0, 1, 0);
-    ldr_x(X, 2, R_VM, O_GCAP);
+    if (table != NULL) {
+        mov_imm(X, 3, (uint64_t)(uintptr_t)table);
+        tbase = 3;
+        tcap = O_TCAP;
+        tent = O_TENT;
+    }
+    ldr_x(X, 2, tbase, tcap);
     cmp_r(X, 0, 2);
     bcond_l(X, CD_HS, slow);
     mov_imm(X, 2, sizeof(LzTableEntry));
     mul_r(X, 0, 0, 2);
-    ldr_x(X, 2, R_VM, O_GENT);
+    ldr_x(X, 2, tbase, tent);
     addsub_r(X, A_ADD, 0, 0, 2);
     mov_imm(X, 2, (uint64_t)(uintptr_t)name);
     ldr_x(X, 3, 0, 0);
@@ -399,11 +408,20 @@ static void emit_global(Cx *c, int reg, uint16_t name_index, JitSite *site, bool
 
 /* Where an assignment to an existing global goes, see global_store in ge_exec.c. */
 static void emit_global_store_cell(Cx *c, int reg, uint16_t name_index, JitSite *site, int bail) {
-    ldr_x(X, 0, R_VM, O_GCAP);
+    const LzTable *table = jit_chunk_table(c->ir.chunk);
+    int tbase = R_VM;
+    int32_t tcap = O_GCAP, tcnt = O_GCNT;
+    if (table != NULL) {
+        mov_imm(X, 2, (uint64_t)(uintptr_t)table);
+        tbase = 2;
+        tcap = O_TCAP;
+        tcnt = O_TCNT;
+    }
+    ldr_x(X, 0, tbase, tcap);
     mov_imm(X, 1, 3);
     mul_r(X, 0, 0, 1);
     lsr_i(X, 0, 0, 2);
-    ldr_x(X, 1, R_VM, O_GCNT);
+    ldr_x(X, 1, tbase, tcnt);
     addsub_i(X, A_ADD, 1, 1, 1);
     cmp_r(X, 1, 0);
     bcond_l(X, CD_HI, bail);

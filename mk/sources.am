@@ -16,6 +16,7 @@ lizard_core_SOURCES = \
 	src/core/interface.c \
 	src/core/link.c \
 	src/core/memory.c \
+	src/core/module.c \
 	src/core/number.c \
 	src/core/native.c \
 	src/core/run.c \
@@ -34,6 +35,8 @@ lizard_core_SOURCES = \
 lizard_frontend_SOURCES = \
 	src/frontend/compiler.c \
 	src/frontend/lexer.c \
+	src/frontend/module_file.c \
+	src/frontend/module_load.c \
 	src/frontend/strlit.c
 
 lizard_engine_SOURCES = \
@@ -77,6 +80,7 @@ lizard_docs = \
 	docs/FUNCTIONS.md \
 	docs/MEMORY.md \
 	docs/METHODS.md \
+	docs/MODULES.md \
 	docs/README.md \
 	docs/STRINGS.md \
 	docs/SYNTAX.md \

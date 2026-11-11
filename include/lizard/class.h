@@ -95,6 +95,11 @@ typedef struct LzClass {
     uint64_t ext_target_id;   /* is_ext only, the id of the class it extends, or 0 */
     uint16_t ext_error_kind;  /* is_ext only, the error kind it extends + 1, which covers an error and its descendants, or 0 */
     LzString *ext_target;     /* is_ext only, the name of the target as written, interned and retained */
+    /*
+     * The module whose code declared the class, borrowed, and NULL for main. For an `extend` block it
+     * is the module that runs the statement, and only code of that module sees the block.
+     */
+    const struct LzModule *module;
 } LzClass;
 
 typedef struct LzInstance {
@@ -162,6 +167,9 @@ typedef struct LzFound {
     const LzMember *member;
     const LzClass *declared_in;
 } LzFound;
+/* The name of the source that declared the class, or NULL for main. For messages that say where a class comes from. */
+const char *lz_class_module_name(const LzClass *cls);
+
 bool lz_class_lookup(const LzClass *cls, const LzString *name, LzFound *out);
 
 /*

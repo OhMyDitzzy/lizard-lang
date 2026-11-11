@@ -435,8 +435,9 @@ static void test_interface_cases(void) {
                 "this is inside a function", "", true);
     check_error("if true {\n    pub let x = 1\n}\n", "`pub` only works on top-level declarations",
                 "this is inside a block", "", true);
-    check_error("pub extend int {\n    pub fn d(self) => 1\n}\n", "`pub` cannot go in front of `extend`",
-                "`extend` adds to a type, it does not declare something to use", "", true);
+    check_error("pub extend int {\n    pub fn d(self) => 1\n}\n", "'pub' cannot be used on 'extend'",
+                "an extension stays inside the module that writes it",
+                "other modules never see it, so it cannot change how they use int", true);
     check_error("pub import foo\n", "`pub` cannot go in front of `import`",
                 "`import` brings names in; it does not declare one to share", "", true);
     check_error("pub switch 1 {\n    case 1 => 1\n    else => 2\n}\n", "`pub` cannot go in front of `switch`",

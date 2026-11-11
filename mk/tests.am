@@ -31,6 +31,8 @@ check_PROGRAMS = \
 	test_classes \
 	test_interface \
 	test_extend \
+	test_modules \
+	test_module_file \
 	test_error_classes \
 	test_error_types \
 	test_links \
@@ -57,6 +59,7 @@ check_PROGRAMS = \
 	test_bits_ge \
 	test_classes_ge \
 	test_extend_ge \
+	test_modules_ge \
 	test_error_classes_ge \
 	test_loops_ge \
 	test_for_ge \
@@ -92,6 +95,7 @@ check_SCRIPTS = \
 	test_skink_ge_jit \
 	test_classes_ge_jit \
 	test_extend_ge_jit \
+	test_modules_ge_jit \
 	test_error_classes_ge_jit \
 	test_links_ge_jit \
 	fuzz_links_ge_jit \
@@ -131,6 +135,8 @@ TESTS = \
 	test_classes \
 	test_interface \
 	test_extend \
+	test_modules \
+	test_module_file \
 	test_error_classes \
 	test_error_types \
 	test_links \
@@ -157,6 +163,7 @@ TESTS = \
 	test_bits_ge \
 	test_classes_ge \
 	test_extend_ge \
+	test_modules_ge \
 	test_error_classes_ge \
 	test_loops_ge \
 	test_for_ge \
@@ -189,6 +196,7 @@ TESTS = \
 	test_skink_ge_jit \
 	test_classes_ge_jit \
 	test_extend_ge_jit \
+	test_modules_ge_jit \
 	test_error_classes_ge_jit \
 	test_links_ge_jit \
 	fuzz_links_ge_jit \
@@ -257,6 +265,10 @@ test_interface_SOURCES = tests/test_interface.c
 test_interface_LDADD = $(LZ_LDADD_PLAIN)
 test_extend_SOURCES = tests/test_extend.c
 test_extend_LDADD = $(LZ_LDADD_PLAIN)
+test_modules_SOURCES = tests/test_modules.c
+test_modules_LDADD = $(LZ_LDADD_PLAIN)
+test_module_file_SOURCES = tests/test_module_file.c
+test_module_file_LDADD = $(LZ_LDADD_PLAIN)
 test_error_classes_SOURCES = tests/test_error_classes.c
 test_error_classes_LDADD = $(LZ_LDADD_PLAIN)
 test_error_types_SOURCES = tests/test_error_types.c
@@ -320,6 +332,9 @@ test_classes_ge_LDADD = $(LZ_LDADD_ENGINE)
 test_extend_ge_SOURCES = tests/test_extend.c
 test_extend_ge_CFLAGS = $(AM_CFLAGS) -include $(top_srcdir)/tests/engine_redirect.h
 test_extend_ge_LDADD = $(LZ_LDADD_ENGINE)
+test_modules_ge_SOURCES = tests/test_modules.c
+test_modules_ge_CFLAGS = $(AM_CFLAGS) -include $(top_srcdir)/tests/engine_redirect.h
+test_modules_ge_LDADD = $(LZ_LDADD_ENGINE)
 test_error_classes_ge_SOURCES = tests/test_error_classes.c
 test_error_classes_ge_CFLAGS = $(AM_CFLAGS) -include $(top_srcdir)/tests/engine_redirect.h
 test_error_classes_ge_LDADD = $(LZ_LDADD_ENGINE)
@@ -401,6 +416,8 @@ test_skink_ge_jit:
 test_classes_ge_jit:
 	@$(lz_make_stub)
 test_extend_ge_jit:
+	@$(lz_make_stub)
+test_modules_ge_jit:
 	@$(lz_make_stub)
 test_error_classes_ge_jit:
 	@$(lz_make_stub)

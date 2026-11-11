@@ -385,6 +385,7 @@ LzStatus lz_vm_call_value(LzVM *vm, const LzValue *callee, size_t argc, const Lz
             const LzChunk *failing = vm->frames[vm->frame_count - 1].chunk;
             if (failed_at < failing->count) {
                 vm->error_offset = failing->offsets[failed_at];
+                vm->error_source = lz_chunk_source(failing);
             }
         }
     }
@@ -665,10 +666,12 @@ LzStatus lz_vm_return(LzVM *vm) {
         return malformed(vm, "return outside a function");
     }
     size_t base = vm->frames[vm->frame_count - 1].base;
-    if (vm->stack_count <= base) {
+    LzValue result = lz_value_nil();
+    if (vm->stack_count > base) {
+        result = vm->stack[--vm->stack_count];
+    } else if (vm->frames[vm->frame_count - 1].closure != NULL) {
         return malformed(vm, "stack underflow");
-    }
-    LzValue result = vm->stack[--vm->stack_count];
+    } /* else the top-level code of a module loaded from inside a run, which gives back nil */
     /* A try left open in this frame, from a `return` that skipped its end, dies with the frame. */
     while (vm->handler_count > 0 && vm->handlers[vm->handler_count - 1].frame >= vm->frame_count - 1) {
         vm->handler_count--;
@@ -779,6 +782,7 @@ void lz_vm_capture_trace(LzVM *vm) {
                                                   : "<script>";
         (void)snprintf(entry->name, sizeof entry->name, "%s", name);
         entry->offset = offset;
+        entry->source = lz_chunk_source(frame->chunk);
         /* The next frame down was paused at the call that created this one. */
         offset = LZ_NO_OFFSET;
         if (i >= 2 && frame->call_offset < vm->frames[i - 2].chunk->count) {

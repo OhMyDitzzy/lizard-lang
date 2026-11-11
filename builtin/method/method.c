@@ -6,6 +6,7 @@
 #include "array/array.h"
 #include "array/higher.h"
 #include "convert/convert.h"
+#include "lizard/module.h"
 #include "lizard/array.h"
 #include "lizard/class.h"
 #include "lizard/dict.h"
@@ -267,7 +268,7 @@ static LzStatus dispatch(LzVM *vm, int argc, const LzValue *argv, LzValue *resul
 
     /* No row for this kind. There is no fallback to a function of the same name: a method is
      * found in the type of the value and nowhere else. */
-    const LzValue *global = lz_vm_lookup(vm, self->name);
+    const LzValue *global = lz_vm_scope_lookup(vm, self->name);
     /* nil has no methods at all, which says more than naming a function. */
     if (kind != LZ_KIND_NIL && global != NULL && (lz_kind_of(global) & LZ_KIND_FUNCTION) != 0) {
         return lz_vm_not_a_method_error(vm, self->name->data, lz_kind_name(kind));

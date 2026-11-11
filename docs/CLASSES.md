@@ -360,6 +360,10 @@ is not supported yet`).
   add any name the type does not have yet.
 * **From the statement on.** The block is a hidden class (`LzClass.is_ext`) registered in
   `vm->exts` when its statement runs; it is not hoisted. Two blocks cannot add the same name.
+* **Modules.** A block is private to the module that writes it and is seen only by code written
+  in that module, whoever calls that code. `pub extend` is an error
+  (`'pub' cannot be used on 'extend'`). Two modules may add the same name to one type. See
+  [MODULES.md](MODULES.md).
 * **Privacy.** `pub` members are visible everywhere; others only inside the same block. The code in
   a block is not "inside the class": it sees only the public members of `self`
   (`'x' is private to Point`, help: `an extension can only use the public members of Point`).

@@ -9,6 +9,7 @@
 /* One line of a stack trace, already resolved to a position. */
 typedef struct LzReportFrame {
     const char *name;
+    const char *file; /* the source file of this frame, or NULL for the one the report is about */
     bool has_location;
     uint32_t line;
     uint32_t column;

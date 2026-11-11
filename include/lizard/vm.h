@@ -6,6 +6,7 @@
 #include "lizard/common.h"
 #include "lizard/function.h"
 #include "lizard/memory.h"
+#include "lizard/module.h"
 #include "lizard/skink.h"
 #include "lizard/suggest.h"
 #include "lizard/table.h"
@@ -32,11 +33,14 @@ typedef struct LzCallFrame {
     uint32_t call_offset;  /* byte offset of the call instruction, in the caller's chunk */
 } LzCallFrame;
 
+struct LzSource;
+
 /* One line of the call stack at the moment a run failed. */
 #define LZ_TRACE_MAX 16
 typedef struct LzTraceEntry {
     char name[48];   /* the function, or "<script>" */
     uint32_t offset; /* source offset of the call, or of the failure for the innermost */
+    const struct LzSource *source; /* the source that offset points into, or NULL for the main one (trace_source) */
 } LzTraceEntry;
 
 /*
@@ -60,8 +64,6 @@ typedef struct LzErrorType {
     uint8_t parent;
     struct LzClass *cls; /* the class of an error declared with a body, which is retained, or NULL */
 } LzErrorType;
-
-struct LzSource;
 
 /*
  * A visual fix for the run-time error in vm->error, see LzFix in report.h. It's an edit at a source
@@ -98,6 +100,7 @@ struct LzVM {
     uint64_t fuel;
     uint64_t instructions;
     uint32_t error_offset; /* source offset of the failing instruction, or LZ_NO_OFFSET */
+    const struct LzSource *error_source; /* the source error_offset points into, or NULL for the main one (trace_source) */
     LzTraceEntry trace[LZ_TRACE_MAX]; /* innermost first, and empty unless the failure was inside a function */
     size_t trace_count;
     size_t trace_total; /* frames in the whole stack, so a caller can say how many were left out */
@@ -151,6 +154,16 @@ struct LzVM {
     uintptr_t c_stack_floor;     /* lowest C stack address a nested callback may reach, see call.c */
     uintptr_t c_stack_lo;        /* the thread stack the floor was measured on, as [lo, hi), because asking the system is slow */
     uintptr_t c_stack_hi;
+    /* Modules, see module.h. They stay before skink so the JIT's field offsets don't move. */
+    LzModule *modules;           /* every module, the main one first. The VM owns them */
+    LzModule *main_module;       /* its globals are vm->globals */
+    size_t module_count;
+    LzModule *retired;           /* modules whose code failed while it ran, kept so borrowed pointers stay valid */
+    LzModuleResolver resolver;   /* empty (resolve == NULL) means imports are not available */
+    const LzModule **loading;    /* the modules whose code is being compiled or run, outermost first */
+    size_t loading_count;
+    size_t loading_capacity;
+    struct LzModuleFailure *module_failure; /* why the last module failed to compile, or NULL */
     LzSkink skink; /* cycle collector, see skink.h. It stays last so the JIT's field offsets don't move */
 };
 

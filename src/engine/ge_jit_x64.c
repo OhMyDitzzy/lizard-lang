@@ -332,12 +332,21 @@ static void emit_global(Cx *c, int reg, uint16_t name_index, JitSite *site, bool
     const LzObject *name = c->ir.chunk->constants[name_index].as.object;
     int slow = x_label(X);
     int done = x_label(X);
+    const LzTable *table = jit_chunk_table(c->ir.chunk);
+    int tbase = RBX; /* the globals live in the VM (main), or in a table of their own (a module) */
+    int32_t tcap = O_GCAP, tent = O_GENT;
     mov_ri(X, RCX, (uint64_t)(uintptr_t)site);
     mov_rm32(X, RAX, RCX, 0);
-    alu_rm(X, ALU_CMP, RAX, RBX, O_GCAP);
+    if (table != NULL) {
+        mov_ri(X, RDX, (uint64_t)(uintptr_t)table);
+        tbase = RDX;
+        tcap = O_TCAP;
+        tent = O_TENT;
+    }
+    alu_rm(X, ALU_CMP, RAX, tbase, tcap);
     jcc_l(X, CC_AE, slow);
     imul_rri(X, RAX, RAX, (int32_t)sizeof(LzTableEntry));
-    alu_rm(X, ALU_ADD, RAX, RBX, O_GENT);
+    alu_rm(X, ALU_ADD, RAX, tbase, tent);
     mov_ri(X, RDX, (uint64_t)(uintptr_t)name);
     alu_rm(X, ALU_CMP, RDX, RAX, 0);
     jcc_l(X, CC_NE, slow);
@@ -370,10 +379,19 @@ static void emit_global(Cx *c, int reg, uint16_t name_index, JitSite *site, bool
 
 /* Where an assignment to an existing global goes, see global_store in ge_exec.c. */
 static void emit_global_store_cell(Cx *c, int reg, uint16_t name_index, JitSite *site, int bail) {
-    mov_rm(X, RAX, RBX, O_GCAP);
+    const LzTable *table = jit_chunk_table(c->ir.chunk);
+    int tbase = RBX;
+    int32_t tcap = O_GCAP, tcnt = O_GCNT;
+    if (table != NULL) {
+        mov_ri(X, RDX, (uint64_t)(uintptr_t)table);
+        tbase = RDX;
+        tcap = O_TCAP;
+        tcnt = O_TCNT;
+    }
+    mov_rm(X, RAX, tbase, tcap);
     imul_rri(X, RAX, RAX, 3);
     shift_ri(X, 5, RAX, 2);
-    mov_rm(X, RCX, RBX, O_GCNT);
+    mov_rm(X, RCX, tbase, tcnt);
     inc_r(X, RCX);
     alu_rr(X, ALU_CMP, RCX, RAX);
     jcc_l(X, CC_A, bail);

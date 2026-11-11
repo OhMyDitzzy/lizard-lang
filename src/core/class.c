@@ -1,3 +1,4 @@
+#include "lizard/module.h"
 #include "lizard/class.h"
 #include "lizard/source.h"
 
@@ -111,6 +112,7 @@ LzClass *lz_class_new(LzVM *vm, LzString *name, uint32_t offset) {
     cls->ext_target_id = 0;
     cls->ext_error_kind = 0;
     cls->ext_target = NULL;
+    cls->module = NULL;
     if (!registry_add(vm, cls)) {
         lz_object_release(&vm->heap, &cls->base); /* the finalizer drops the name it holds */
         return NULL;
@@ -217,6 +219,10 @@ static bool trait_find(const LzClass *trait, const LzString *name, bool required
         }
     }
     return false;
+}
+
+const char *lz_class_module_name(const LzClass *cls) {
+    return lz_module_name(cls->module);
 }
 
 /*
@@ -535,6 +541,7 @@ static LzStatus link_fail(LzVM *vm, uint32_t offset, const char *help, const cha
     va_end(args);
     LzStatus status = fail(vm, LZ_ERR_RUNTIME, help, "%s", message);
     vm->error_offset = offset;
+    vm->error_source = vm->frame_count > 0 ? lz_chunk_source(vm->frames[vm->frame_count - 1].chunk) : NULL;
     return status;
 }
 
@@ -1004,7 +1011,7 @@ static void link_declaration(const LzVM *vm, const LzMember *member, char *out, 
     const char *prefix = member->vis == LZ_VIS_PUB        ? "pub link "
                          : member->vis == LZ_VIS_PUB_READ ? "pub read link "
                                                           : "link ";
-    const LzSource *source = vm->trace_source;
+    const LzSource *source = vm->error_source != NULL ? vm->error_source : vm->trace_source;
     if (source != NULL && member->offset < source->length &&
         strncmp(source->text + member->offset, member->name->data, member->name->length) == 0) {
         size_t end = member->offset;
@@ -1059,7 +1066,7 @@ LzStatus lz_vm_cycle_error(LzVM *vm, const LzInstance *instance, const LzMember 
      * declaration is known to be there, meaning the name is at the recorded offset, and never by
      * guessing.
      */
-    const LzSource *source = vm->trace_source;
+    const LzSource *source = vm->error_source != NULL ? vm->error_source : vm->trace_source;
     bool placed = source == NULL || (member->offset < source->length &&
                                      strncmp(source->text + member->offset, member->name->data,
                                              member->name->length) == 0);
@@ -2018,7 +2025,7 @@ static LzStatus instance_callee(LzVM *vm, uint64_t owner, const LzString *name, 
     }
     const LzValue *found = lz_table_get(&vm->methods, name);
     if (found == NULL) {
-        const LzValue *global = lz_vm_lookup(vm, name);
+        const LzValue *global = lz_vm_scope_lookup(vm, name);
         if (global != NULL && (lz_kind_of(global) & LZ_KIND_FUNCTION) != 0) {
             return lz_vm_not_a_method_error(vm, name->data, cls->name->data); /* no fallback to functions */
         }
@@ -2404,7 +2411,7 @@ LzStatus lz_vm_method_lookup(LzVM *vm, uint64_t owner, const LzString *name, int
     }
     const LzValue *found = lz_table_get(&vm->methods, name);
     if (found == NULL) {
-        const LzValue *global = lz_vm_lookup(vm, name);
+        const LzValue *global = lz_vm_scope_lookup(vm, name);
         if (global != NULL && (lz_kind_of(global) & LZ_KIND_FUNCTION) != 0) {
             return lz_vm_not_a_method_error(vm, name->data, lz_kind_name(lz_kind_of(receiver)));
         }
