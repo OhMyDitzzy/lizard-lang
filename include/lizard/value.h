@@ -103,6 +103,13 @@ bool lz_value_equal_budget(const LzValue *left, const LzValue *right, uint64_t *
  */
 bool lz_value_write(const LzValue *value, const LzWriter *writer);
 
+/*
+ * The decimal text of an int, which is what "%" PRId64 prints, in out followed by a NUL. Returns
+ * the length. out must have room for LZ_INT_TEXT_MAX bytes.
+ */
+#define LZ_INT_TEXT_MAX 22
+size_t lz_int_to_text(int64_t value, char *out);
+
 /* Like lz_value_write, but a string is quoted and escaped even at the top level. */
 bool lz_value_write_debug(const LzValue *value, const LzWriter *writer);
 

@@ -2,6 +2,7 @@
 #include "lizard/chunk.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 void lz_chunk_init(LzChunk *chunk) {
     chunk->code = NULL;
@@ -18,6 +19,8 @@ void lz_chunk_init(LzChunk *chunk) {
     chunk->type_slot_capacity = 0;
     chunk->module = NULL;
     chunk->iface = NULL;
+    chunk->global_sites = NULL;
+    chunk->global_site_count = 0;
 }
 
 void lz_chunk_discard(LzChunk *chunk) {
@@ -26,6 +29,7 @@ void lz_chunk_discard(LzChunk *chunk) {
     free(chunk->constants);
     free(chunk->types);
     free(chunk->type_slots);
+    free(chunk->global_sites);
     lz_interface_free(chunk->iface);
     lz_chunk_init(chunk);
 }
@@ -451,4 +455,23 @@ void lz_chunk_truncate(LzHeap *heap, LzChunk *chunk, size_t code_count, size_t c
         chunk->constant_count--;
         lz_value_release(heap, &chunk->constants[chunk->constant_count]);
     }
+    /* A dropped constant index may come back as another name. */
+    free(chunk->global_sites);
+    chunk->global_sites = NULL;
+    chunk->global_site_count = 0;
+}
+
+LzGlobalSite *lz_chunk_global_site(const LzChunk *chunk, uint16_t index) {
+    LzChunk *cache = (LzChunk *)chunk;
+    if (index >= cache->global_site_count) {
+        size_t count = cache->constant_count > (size_t)index + 1 ? cache->constant_count : (size_t)index + 1;
+        LzGlobalSite *sites = realloc(cache->global_sites, count * sizeof *sites);
+        if (sites == NULL) {
+            return NULL;
+        }
+        memset(sites + cache->global_site_count, 0, (count - cache->global_site_count) * sizeof *sites);
+        cache->global_sites = sites;
+        cache->global_site_count = count;
+    }
+    return &cache->global_sites[index];
 }

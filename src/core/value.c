@@ -356,6 +356,7 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
         if (error->trace != NULL) {
             lz_object_release(heap, &error->trace->base);
         }
+        lz_error_raw_trace_free(heap, error);
         lz_value_release(heap, &error->cause);
         if (error->payload != NULL) {
             error->payload->owner_error = NULL;
@@ -706,6 +707,25 @@ bool lz_value_equal(const LzValue *left, const LzValue *right) {
     return lz_value_equal_budget(left, right, &work);
 }
 
+size_t lz_int_to_text(int64_t value, char *out) {
+    char digits[LZ_INT_TEXT_MAX];
+    size_t at = sizeof digits;
+    /* Negate in unsigned arithmetic so INT64_MIN has no overflow. */
+    uint64_t magnitude = value < 0 ? 0 - (uint64_t)value : (uint64_t)value;
+    do {
+        digits[--at] = (char)('0' + magnitude % 10);
+        magnitude /= 10;
+    } while (magnitude != 0);
+    size_t length = 0;
+    if (value < 0) {
+        out[length++] = '-';
+    }
+    memcpy(out + length, digits + at, sizeof digits - at);
+    length += sizeof digits - at;
+    out[length] = '\0';
+    return length;
+}
+
 bool lz_value_write(const LzValue *value, const LzWriter *writer) {
     switch (value->type) {
     case LZ_VAL_NIL:
@@ -713,9 +733,9 @@ bool lz_value_write(const LzValue *value, const LzWriter *writer) {
     case LZ_VAL_BOOL:
         return lz_writer_write_cstr(writer, value->as.boolean ? "true" : "false");
     case LZ_VAL_INT: {
-        char text[32];
-        (void)snprintf(text, sizeof text, "%" PRId64, value->as.integer);
-        return lz_writer_write_cstr(writer, text);
+        char text[LZ_INT_TEXT_MAX];
+        size_t length = lz_int_to_text(value->as.integer, text);
+        return lz_writer_write(writer, text, length);
     }
     case LZ_VAL_FLOAT:
         return write_float(value->as.number, writer);

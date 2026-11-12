@@ -69,6 +69,74 @@ static LzStatus read_name(LzVM *vm, const LzChunk *chunk, size_t *ip, LzString *
     return LZ_OK;
 }
 
+/* The name constant at index, checked the way read_name checks it. */
+static LzStatus name_at(LzVM *vm, const LzChunk *chunk, uint16_t index, LzString **name) {
+    if (index >= chunk->constant_count) {
+        return malformed(vm, "constant index out of range");
+    }
+    const LzValue *constant = &chunk->constants[index];
+    if (constant->type != LZ_VAL_OBJECT || constant->as.object->type != LZ_OBJ_STRING) {
+        return malformed(vm, "name operand is not a string");
+    }
+    *name = (LzString *)constant->as.object;
+    return LZ_OK;
+}
+
+/*
+ * The cached cell of a name constant, or NULL. A cell is only made for an index that passed
+ * name_at, and constants never change under a cell, so a hit needs no further checks. Both
+ * shapes must match, because a new global can shadow a builtin that was cached.
+ */
+static inline const LzGlobalSite *global_site_hit(LzVM *vm, const LzChunk *chunk, uint16_t index) {
+    if (index < chunk->global_site_count) {
+        const LzGlobalSite *site = &chunk->global_sites[index];
+        if (site->slot != NULL && site->globals_shape == lz_chunk_globals(vm, chunk)->shape &&
+            site->builtins_shape == vm->builtins.shape) {
+            return site;
+        }
+    }
+    return NULL;
+}
+
+/* Remembers where the name is now. Call it only for a name that exists. */
+static void global_site_fill(LzVM *vm, const LzChunk *chunk, uint16_t index, const LzString *name) {
+    LzTable *globals = lz_chunk_globals(vm, chunk);
+    bool builtin = false;
+    const LzValue *found = lz_table_get(globals, name);
+    if (found == NULL) {
+        found = lz_table_get(&vm->builtins, name);
+        builtin = true;
+    }
+    LzGlobalSite *site = found != NULL ? lz_chunk_global_site(chunk, index) : NULL;
+    if (site != NULL) {
+        site->slot = (LzValue *)found;
+        site->globals_shape = globals->shape;
+        site->builtins_shape = vm->builtins.shape;
+        site->builtin = builtin;
+    }
+}
+
+/*
+ * Stores the top of the stack into a global that is already in the table, which is what both
+ * SET_GLOBAL and DEFINE_GLOBAL do for an existing name. The table takes over the stack's
+ * reference, which is the retain and pop of lz_table_set. A table that is about to grow goes
+ * the long way, because lz_table_set grows before it looks for the key.
+ */
+static inline bool global_site_store(LzVM *vm, const LzChunk *chunk, uint16_t index) {
+    const LzGlobalSite *site = global_site_hit(vm, chunk, index);
+    if (site == NULL || site->builtin) {
+        return false;
+    }
+    const LzTable *globals = lz_chunk_globals(vm, chunk);
+    if (globals->count + 1 > globals->capacity * 3 / 4) {
+        return false;
+    }
+    LzValue old = *site->slot;
+    *site->slot = vm->stack[--vm->stack_count];
+    lz_value_release(&vm->heap, &old);
+    return true;
+}
+
 /*
  * What a failed check was about, for the message. It's an argument, a returned value, or
  * nothing.
@@ -208,8 +276,8 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
  * Does the value fit the type? An array is checked item by item and then restricted to the item
  * type, which costs fuel in proportion to its size.
  */
-static LzStatus check_value(LzVM *vm, const LzType *type, const LzValue *value, CheckSubject subject,
-                            size_t slot) {
+static LzStatus check_value_general(LzVM *vm, const LzType *type, const LzValue *value,
+                                    CheckSubject subject, size_t slot) {
     LzStatus status = LZ_OK;
     bool fits;
     if (lz_value_is_array(value)) {
@@ -222,6 +290,38 @@ static LzStatus check_value(LzVM *vm, const LzType *type, const LzValue *value, 
         status = type_mismatch(vm, type, value, subject, slot);
     }
     return status;
+}
+
+/*
+ * A nil, bool, int, float or string whose kind the type lists is accepted without more ado, which
+ * is all lz_type_matches would conclude for these values: the array, dict, error, link, instance
+ * and function branches need an object of that kind. A type that lists only literals, or a value
+ * that misses the kinds, takes the general path, which also writes every message.
+ */
+static inline LzStatus check_value(LzVM *vm, const LzType *type, const LzValue *value,
+                                   CheckSubject subject, size_t slot) {
+    uint16_t kind;
+    switch (value->type) {
+    case LZ_VAL_NIL:
+        kind = LZ_KIND_NIL;
+        break;
+    case LZ_VAL_BOOL:
+        kind = LZ_KIND_BOOL;
+        break;
+    case LZ_VAL_INT:
+        kind = LZ_KIND_INT;
+        break;
+    case LZ_VAL_FLOAT:
+        kind = LZ_KIND_FLOAT;
+        break;
+    default:
+        kind = value->as.object->type == LZ_OBJ_STRING ? LZ_KIND_STRING : 0;
+        break;
+    }
+    if ((kind & type->kinds) != 0) {
+        return LZ_OK;
+    }
+    return check_value_general(vm, type, value, subject, slot);
 }
 
 static LzStatus array_new(LzVM *vm) {
@@ -1270,14 +1370,11 @@ static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool wr
     } else if (strcmp(name->data, "data") == 0) {
         field = error->data;
     } else if (strcmp(name->data, "trace") == 0) {
-        if (error->trace == NULL) {
-            empty = lz_array_new(&vm->heap, 0);
-            if (empty == NULL) {
-                return lz_vm_out_of_memory(vm);
-            }
-            error->trace = empty;
+        LzStatus made = lz_error_trace(vm, error, &empty);
+        if (made != LZ_OK) {
+            return made;
         }
-        field = lz_value_object(&error->trace->base);
+        field = lz_value_object(&empty->base);
     } else {
         return lz_vm_set_error(vm, LZ_ERR_TYPE, "error has no field '%s'", name->data);
     }
@@ -1471,6 +1568,59 @@ static LzStatus array_extend(LzVM *vm) {
     return status;
 }
 
+/*
+ * a OP b for two ints or two floats, where OP is a comparison or '=='. These are exactly the
+ * answers of lz_number_order, including NaN, which is unordered and so false for everything, and
+ * -0 equal to 0. It costs no fuel, like lz_vm_values_equal on numbers. Mixed int and float needs
+ * the exact order of lz_number_order and is left to the general path.
+ */
+static inline bool number_pair_test(const LzValue *left, const LzValue *right, bool *result,
+                                    LzOpCode op) {
+    if (left->type == LZ_VAL_INT && right->type == LZ_VAL_INT) {
+        int64_t x = left->as.integer;
+        int64_t y = right->as.integer;
+        switch (op) {
+        case LZ_OP_LESS:
+            *result = x < y;
+            return true;
+        case LZ_OP_GREATER:
+            *result = x > y;
+            return true;
+        case LZ_OP_LESS_EQUAL:
+            *result = x <= y;
+            return true;
+        case LZ_OP_GREATER_EQUAL:
+            *result = x >= y;
+            return true;
+        default:
+            *result = x == y;
+            return true;
+        }
+    }
+    if (left->type == LZ_VAL_FLOAT && right->type == LZ_VAL_FLOAT) {
+        double x = left->as.number;
+        double y = right->as.number;
+        switch (op) {
+        case LZ_OP_LESS:
+            *result = x < y;
+            return true;
+        case LZ_OP_GREATER:
+            *result = x > y;
+            return true;
+        case LZ_OP_LESS_EQUAL:
+            *result = x <= y;
+            return true;
+        case LZ_OP_GREATER_EQUAL:
+            *result = x >= y;
+            return true;
+        default:
+            *result = x == y;
+            return true;
+        }
+    }
+    return false;
+}
+
 static LzStatus binary_op(LzVM *vm, LzOpCode op) {
     if (vm->stack_count < 2) {
         return malformed(vm, "stack underflow");
@@ -1604,8 +1754,18 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         }
         break;
     case LZ_OP_GET_GLOBAL: {
+        uint16_t index;
+        if (!read_u16(chunk, &ip, &index)) {
+            status = malformed(vm, "truncated operand");
+            break;
+        }
+        const LzGlobalSite *site = global_site_hit(vm, chunk, index);
+        if (site != NULL) {
+            status = push(vm, *site->slot);
+            break;
+        }
         LzString *name;
-        status = read_name(vm, chunk, &ip, &name);
+        status = name_at(vm, chunk, index, &name);
         if (status != LZ_OK) {
             break;
         }
@@ -1613,23 +1773,40 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         if (value == NULL) {
             status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "undefined variable '%s'", name->data);
         } else {
+            global_site_fill(vm, chunk, index, name);
             status = push(vm, *value);
         }
         break;
     }
     case LZ_OP_DEFINE_GLOBAL: {
-        LzString *name;
-        status = read_name(vm, chunk, &ip, &name);
-        if (status != LZ_OK) {
+        uint16_t index;
+        if (!read_u16(chunk, &ip, &index)) {
+            status = malformed(vm, "truncated operand");
             break;
         }
         if (vm->stack_count == 0) {
-            status = malformed(vm, "stack underflow");
-        } else if (!lz_table_set(&vm->heap, lz_chunk_globals(vm, chunk), name,
-                                 vm->stack[vm->stack_count - 1])) {
+            /* the name is checked first, as read_name would have */
+            LzString *unused;
+            status = name_at(vm, chunk, index, &unused);
+            if (status == LZ_OK) {
+                status = malformed(vm, "stack underflow");
+            }
+            break;
+        }
+        if (global_site_store(vm, chunk, index)) {
+            break;
+        }
+        LzString *name;
+        status = name_at(vm, chunk, index, &name);
+        if (status != LZ_OK) {
+            break;
+        }
+        if (!lz_table_set(&vm->heap, lz_chunk_globals(vm, chunk), name,
+                          vm->stack[vm->stack_count - 1])) {
             status = lz_vm_out_of_memory(vm);
         } else {
             pop(vm);
+            global_site_fill(vm, chunk, index, name);
         }
         break;
     }
@@ -1672,16 +1849,41 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         }
         break;
     }
-    case LZ_OP_ADD:
-    case LZ_OP_SUBTRACT:
-    case LZ_OP_MULTIPLY:
+#define ARITH_FAST_CASE(OPC)                                                                       \
+    case OPC: {                                                                                    \
+        LzValue fast;                                                                              \
+        if (vm->stack_count >= 2 && lz_arith_fast(OPC, &vm->stack[vm->stack_count - 2],           \
+                                                  &vm->stack[vm->stack_count - 1], &fast)) {       \
+            vm->stack[--vm->stack_count - 1] = fast;                                               \
+            break;                                                                                 \
+        }                                                                                          \
+        status = binary_op(vm, (LzOpCode)opcode);                                                  \
+        break;                                                                                     \
+    }
+#define COMPARE_FAST_CASE(OPC, TEST)                                                               \
+    case OPC: {                                                                                    \
+        bool fast;                                                                                 \
+        if (vm->stack_count >= 2 &&                                                                \
+            number_pair_test(&vm->stack[vm->stack_count - 2], &vm->stack[vm->stack_count - 1],    \
+                             &fast, OPC)) {                                                        \
+            vm->stack[--vm->stack_count - 1] = lz_value_bool(fast);                                \
+            break;                                                                                 \
+        }                                                                                          \
+        status = binary_op(vm, (LzOpCode)opcode);                                                  \
+        break;                                                                                     \
+    }
+    ARITH_FAST_CASE(LZ_OP_ADD)
+    ARITH_FAST_CASE(LZ_OP_SUBTRACT)
+    ARITH_FAST_CASE(LZ_OP_MULTIPLY)
+    COMPARE_FAST_CASE(LZ_OP_LESS, <)
+    COMPARE_FAST_CASE(LZ_OP_GREATER, >)
+    COMPARE_FAST_CASE(LZ_OP_LESS_EQUAL, <=)
+    COMPARE_FAST_CASE(LZ_OP_GREATER_EQUAL, >=)
+#undef ARITH_FAST_CASE
+#undef COMPARE_FAST_CASE
     case LZ_OP_DIVIDE:
     case LZ_OP_FLOOR_DIVIDE:
     case LZ_OP_MODULO:
-    case LZ_OP_LESS:
-    case LZ_OP_GREATER:
-    case LZ_OP_LESS_EQUAL:
-    case LZ_OP_GREATER_EQUAL:
     case LZ_OP_BIT_AND:
     case LZ_OP_BIT_OR:
     case LZ_OP_BIT_XOR:
@@ -1716,20 +1918,35 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         break;
     }
     case LZ_OP_SET_GLOBAL: {
-        LzString *name;
-        status = read_name(vm, chunk, &ip, &name);
-        if (status != LZ_OK) {
+        uint16_t index;
+        if (!read_u16(chunk, &ip, &index)) {
+            status = malformed(vm, "truncated operand");
             break;
         }
         if (vm->stack_count == 0) {
-            status = malformed(vm, "stack underflow");
-        } else if (lz_table_get(lz_chunk_globals(vm, chunk), name) == NULL) {
+            LzString *unused;
+            status = name_at(vm, chunk, index, &unused);
+            if (status == LZ_OK) {
+                status = malformed(vm, "stack underflow");
+            }
+            break;
+        }
+        if (global_site_store(vm, chunk, index)) {
+            break;
+        }
+        LzString *name;
+        status = name_at(vm, chunk, index, &name);
+        if (status != LZ_OK) {
+            break;
+        }
+        if (lz_table_get(lz_chunk_globals(vm, chunk), name) == NULL) {
             status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "undefined variable '%s'", name->data);
         } else if (!lz_table_set(&vm->heap, lz_chunk_globals(vm, chunk), name,
                                  vm->stack[vm->stack_count - 1])) {
             status = lz_vm_out_of_memory(vm);
         } else {
             pop(vm);
+            global_site_fill(vm, chunk, index, name);
         }
         break;
     }
@@ -1762,9 +1979,17 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         }
         break;
     }
-    case LZ_OP_EQUAL:
+    case LZ_OP_EQUAL: {
+        bool same;
+        if (vm->stack_count >= 2 &&
+            number_pair_test(&vm->stack[vm->stack_count - 2], &vm->stack[vm->stack_count - 1], &same,
+                             LZ_OP_EQUAL)) {
+            vm->stack[--vm->stack_count - 1] = lz_value_bool(same);
+            break;
+        }
         status = equal(vm);
         break;
+    }
     case LZ_OP_NOT:
         status = not_op(vm);
         break;

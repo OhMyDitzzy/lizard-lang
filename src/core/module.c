@@ -5,11 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-LzTable *lz_chunk_globals(LzVM *vm, const LzChunk *chunk) {
-    const LzModule *module = chunk->module;
-    return module == NULL || module->is_main ? &vm->globals : (LzTable *)&module->globals;
-}
-
 const LzValue *lz_module_lookup(const LzVM *vm, const LzTable *globals, const LzString *name) {
     const LzValue *value = lz_table_get(globals, name);
     return value != NULL ? value : lz_table_get(&vm->builtins, name);

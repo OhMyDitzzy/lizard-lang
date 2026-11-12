@@ -17,6 +17,13 @@ typedef struct LzTable {
     LzTableEntry *entries;
     size_t count;
     size_t capacity;
+    /*
+     * Changes whenever an entry address can move or a key can appear: a new key, a rehash and
+     * lz_table_free. Replacing a value in place keeps it. Inline caches that remember an entry
+     * stay valid while this is unchanged, and a free keeps counting so a cache never matches a
+     * table that was emptied and refilled.
+     */
+    uint32_t shape;
 } LzTable;
 
 void lz_table_init(LzTable *table);

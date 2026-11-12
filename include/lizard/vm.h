@@ -375,4 +375,10 @@ static inline LzStatus lz_vm_charge_fuel(LzVM *vm, uint64_t cost) {
     return LZ_OK;
 }
 
+/* The globals that code of this chunk reads and writes, see lizard/module.h. */
+static inline LzTable *lz_chunk_globals(LzVM *vm, const LzChunk *chunk) {
+    const LzModule *module = chunk->module;
+    return module == NULL || module->is_main ? &vm->globals : (LzTable *)&module->globals;
+}
+
 #endif

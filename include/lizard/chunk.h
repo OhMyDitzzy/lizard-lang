@@ -143,6 +143,18 @@ Mode 0 is `import m`: every export is stored as "bound.name". Mode 1 is `from m 
 #define LZ_CONSTANTS_MAX 65536
 #define LZ_TYPES_MAX 65536
 
+/*
+ * What GET_GLOBAL, SET_GLOBAL and DEFINE_GLOBAL remember about one name constant of a chunk: where
+ * the name was found and the shape of both tables at that moment, see LzTable. It is only
+ * trusted while both shapes match, and a name that is not found is never remembered.
+ */
+typedef struct LzGlobalSite {
+    LzValue *slot;           /* the value in the table that holds the name, or NULL when empty */
+    uint32_t globals_shape;
+    uint32_t builtins_shape;
+    bool builtin;            /* found in the builtins because the module's globals lack the name */
+} LzGlobalSite;
+
 typedef struct LzChunk {
     uint8_t *code;
     uint32_t *offsets; /* source offset of each byte, see lizard/source.h */
@@ -158,6 +170,8 @@ typedef struct LzChunk {
     size_t type_slot_capacity;
     const struct LzModule *module; /* the module this chunk's code belongs to, borrowed, or NULL for main */
     struct LzInterface *iface; /* what the unit's `pub` declarations offer, see lizard/interface.h, or NULL for a function's chunk */
+    LzGlobalSite *global_sites; /* one per constant, made on first use, see lz_chunk_global_site */
+    size_t global_site_count;
 } LzChunk;
 
 void lz_chunk_init(LzChunk *chunk);
@@ -176,6 +190,13 @@ bool lz_chunk_add_constant(LzChunk *chunk, LzValue value, uint16_t *index);
 
 /* Stores a type once, and an identical type already in the table is reused. */
 bool lz_chunk_add_type(LzChunk *chunk, const LzType *type, uint16_t *index);
+
+/*
+ * The cache cell for a name constant, grown to cover the index on demand. Returns NULL when out of
+ * memory, and the caller then just skips the cache. The cache is not part of the chunk's meaning,
+ * so a const chunk may fill it.
+ */
+LzGlobalSite *lz_chunk_global_site(const LzChunk *chunk, uint16_t index);
 
 const char *lz_opcode_name(uint8_t opcode);
 

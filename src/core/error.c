@@ -9,6 +9,7 @@
 #include "lizard/vm.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #include <string.h>
 
@@ -314,6 +315,7 @@ LzStatus lz_error_new(LzVM *vm, unsigned kind, const char *message, size_t lengt
     error->kind_name = kind_name;
     error->message = text; /* the string's creation reference moves into the error */
     error->trace = NULL;
+    error->raw_trace = NULL;
     error->cause = lz_value_nil();
     error->data = lz_value_nil();
     error->payload = NULL;
@@ -338,18 +340,61 @@ void lz_error_set_extra(LzVM *vm, LzError *error, const LzValue *cause, const Lz
     lz_note_container_store(&vm->heap, &error->data);
 }
 
+/* The frames of vm->trace as they were when the error was made. A frame's source is resolved then. */
+typedef struct LzRawTrace {
+    size_t count;
+    size_t bytes; /* what the heap was charged, to give back */
+    LzTraceEntry entries[];
+} LzRawTrace;
+
 LzStatus lz_error_attach_trace(LzVM *vm, LzError *error) {
-    if (error->trace != NULL) {
+    if (error->trace != NULL || error->raw_trace != NULL) {
         return LZ_OK;
     }
-    LzArray *trace = lz_array_new(&vm->heap, vm->trace_count);
+    size_t count = vm->trace_count < LZ_TRACE_MAX ? vm->trace_count : LZ_TRACE_MAX;
+    size_t bytes = sizeof(LzRawTrace) + count * sizeof(LzTraceEntry);
+    if (!lz_heap_charge(&vm->heap, bytes)) {
+        return lz_vm_out_of_memory(vm);
+    }
+    LzRawTrace *raw = malloc(bytes);
+    if (raw == NULL) {
+        lz_heap_uncharge(&vm->heap, bytes);
+        return lz_vm_out_of_memory(vm);
+    }
+    raw->count = count;
+    raw->bytes = bytes;
+    for (size_t i = 0; i < count; i++) {
+        raw->entries[i] = vm->trace[i];
+        if (raw->entries[i].source == NULL) {
+            raw->entries[i].source = vm->trace_source;
+        }
+    }
+    error->raw_trace = raw;
+    return LZ_OK;
+}
+
+void lz_error_raw_trace_free(LzHeap *heap, LzError *error) {
+    if (error->raw_trace != NULL) {
+        lz_heap_uncharge(heap, error->raw_trace->bytes);
+        lz_free_sized(error->raw_trace, error->raw_trace->bytes);
+        error->raw_trace = NULL;
+    }
+}
+
+LzStatus lz_error_trace(LzVM *vm, LzError *error, LzArray **out) {
+    if (error->trace != NULL) {
+        *out = error->trace;
+        return LZ_OK;
+    }
+    const LzRawTrace *raw = error->raw_trace;
+    LzArray *trace = lz_array_new(&vm->heap, raw != NULL ? raw->count : 0);
     if (trace == NULL) {
         return lz_vm_out_of_memory(vm);
     }
-    for (size_t i = 0; i < vm->trace_count && i < LZ_TRACE_MAX; i++) {
-        const LzTraceEntry *entry = &vm->trace[i];
+    for (size_t i = 0; raw != NULL && i < raw->count; i++) {
+        const LzTraceEntry *entry = &raw->entries[i];
         char line[128];
-        const LzSource *where = entry->source != NULL ? entry->source : vm->trace_source;
+        const LzSource *where = entry->source;
         if (entry->offset != LZ_NO_OFFSET && where != NULL) {
             LzLocation at = lz_source_locate(where, entry->offset);
             (void)snprintf(line, sizeof line, "%s (%s:%u:%u)", entry->name, where->name,
@@ -370,7 +415,10 @@ LzStatus lz_error_attach_trace(LzVM *vm, LzError *error) {
             return lz_vm_out_of_memory(vm);
         }
     }
+    /* The error's own reference to the array. The captured frames are no longer needed. */
     error->trace = trace;
+    lz_error_raw_trace_free(&vm->heap, error);
+    *out = trace;
     return LZ_OK;
 }
 

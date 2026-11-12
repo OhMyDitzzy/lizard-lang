@@ -55,7 +55,7 @@ typedef struct LzModuleResolver {
 } LzModuleResolver;
 
 /* The globals that code of this chunk reads and writes: its module's table, or vm->globals. */
-LzTable *lz_chunk_globals(LzVM *vm, const LzChunk *chunk);
+/* Defined inline at the end of lizard/vm.h, which has the layout of the VM. */
 
 /* A global of the table, then a builtin. name must be interned. NULL when undefined. */
 const LzValue *lz_module_lookup(const LzVM *vm, const LzTable *globals, const LzString *name);

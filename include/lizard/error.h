@@ -65,7 +65,8 @@ typedef struct LzError {
     uint8_t kind;
     LzString *kind_name; /* the interned name of the kind, retained, so an error can write itself */
     LzString *message;
-    LzArray *trace; /* strings, innermost first, and may be NULL */
+    LzArray *trace; /* strings, innermost first, and may be NULL. Made from raw_trace on first read, see lz_error_trace */
+    struct LzRawTrace *raw_trace; /* the frames as captured, until trace is made, or NULL. Owned, and counted by the heap */
     LzValue cause;
     LzValue data;
     uint64_t is_kind[4];        /* bit k is set if the kind of this error is kind k or a descendant of it */
@@ -165,6 +166,19 @@ LzStatus lz_error_new(struct LzVM *vm, unsigned kind, const char *message, size_
  * keeps the trace of where it first was.
  */
 LzStatus lz_error_attach_trace(struct LzVM *vm, LzError *error);
+
+/*
+ * The trace of an error as an array of strings, made on the first call from what
+ * lz_error_attach_trace captured, and an empty array for an error that never got one. *out is
+ * borrowed from the error. It fails with the heap's status when the strings can't be made, and the
+ * error keeps what it captured so a later call can try again. The source files that the frames
+ * point into must stay alive as long as the error does: the VM keeps module sources until
+ * lz_vm_free, and the host keeps the one it set in vm->trace_source.
+ */
+LzStatus lz_error_trace(struct LzVM *vm, LzError *error, LzArray **out);
+
+/* Drops the captured frames of an error that dies, see LzError.raw_trace. */
+void lz_error_raw_trace_free(struct LzHeap *heap, LzError *error);
 
 /*
  * Gives the error a cause (an error or nil) and data (any value), both retained. Nothing can form

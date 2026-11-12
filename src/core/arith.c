@@ -14,61 +14,6 @@ static double as_double(const LzValue *value) {
     return value->type == LZ_VAL_INT ? (double)value->as.integer : value->as.number;
 }
 
-#if defined(__GNUC__) && !defined(LZ_PORTABLE_OVERFLOW)
-
-static bool add_overflows(int64_t a, int64_t b, int64_t *out) {
-    return __builtin_add_overflow(a, b, out);
-}
-
-static bool subtract_overflows(int64_t a, int64_t b, int64_t *out) {
-    return __builtin_sub_overflow(a, b, out);
-}
-
-static bool multiply_overflows(int64_t a, int64_t b, int64_t *out) {
-    return __builtin_mul_overflow(a, b, out);
-}
-
-#else
-
-static bool add_overflows(int64_t a, int64_t b, int64_t *out) {
-    if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) {
-        return true;
-    }
-    *out = a + b;
-    return false;
-}
-
-static bool subtract_overflows(int64_t a, int64_t b, int64_t *out) {
-    if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) {
-        return true;
-    }
-    *out = a - b;
-    return false;
-}
-
-static bool multiply_overflows(int64_t a, int64_t b, int64_t *out) {
-    if (a == 0 || b == 0) {
-        *out = 0;
-        return false;
-    }
-    if ((a == -1 && b == INT64_MIN) || (b == -1 && a == INT64_MIN)) {
-        return true;
-    }
-    bool overflow;
-    if (a > 0) {
-        overflow = b > 0 ? a > INT64_MAX / b : b < INT64_MIN / a;
-    } else {
-        overflow = b > 0 ? a < INT64_MIN / b : b < INT64_MAX / a;
-    }
-    if (overflow) {
-        return true;
-    }
-    *out = a * b;
-    return false;
-}
-
-#endif
-
 static bool is_string(const LzValue *value) {
     return value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_STRING;
 }
@@ -166,13 +111,13 @@ static LzStatus integer_arith(LzVM *vm, LzOpCode op, int64_t a, int64_t b, LzVal
 
     switch (op) {
     case LZ_OP_ADD:
-        overflow = add_overflows(a, b, &out);
+        overflow = lz_add_overflows(a, b, &out);
         break;
     case LZ_OP_SUBTRACT:
-        overflow = subtract_overflows(a, b, &out);
+        overflow = lz_subtract_overflows(a, b, &out);
         break;
     case LZ_OP_MULTIPLY:
-        overflow = multiply_overflows(a, b, &out);
+        overflow = lz_multiply_overflows(a, b, &out);
         break;
     case LZ_OP_FLOOR_DIVIDE:
         return integer_floor_divide(vm, a, b, result);

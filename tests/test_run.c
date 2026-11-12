@@ -2,7 +2,11 @@
 #include <string.h>
 
 #include "chunk_helpers.h"
+#include <math.h>
+
+#include "lizard/arith.h"
 #include "lizard/builtin.h"
+#include "lizard/compare.h"
 #include "test_util.h"
 
 static LzStatus make_greeting(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
@@ -525,6 +529,154 @@ static void test_check_type(void) {
     teardown(&vm, &truncated, &out, &err);
 }
 
+
+/*
+ * The interpreter's fast path for + - * and the comparisons must give what the general functions
+ * give, for the same values: same result bits, same error, same status.
+ */
+static void run_pair(LzOpCode op, LzValue a, LzValue b) {
+    LzBuffer out;
+    LzBuffer err;
+    LzVM vm;
+    setup(&vm, &out, &err);
+
+    LzValue expected = lz_value_nil();
+    LzStatus expected_status;
+    bool is_order = op == LZ_OP_LESS || op == LZ_OP_GREATER || op == LZ_OP_LESS_EQUAL ||
+                    op == LZ_OP_GREATER_EQUAL;
+    if (op == LZ_OP_EQUAL) {
+        bool same = false;
+        expected_status = lz_vm_values_equal(&vm, &a, &b, &same);
+        expected = lz_value_bool(same);
+    } else if (is_order) {
+        expected_status = lz_compare_order(&vm, op, &a, &b, &expected);
+    } else {
+        expected_status = lz_arith_binary(&vm, op, &a, &b, &expected);
+    }
+    char expected_error[sizeof vm.error];
+    memcpy(expected_error, vm.error, sizeof expected_error);
+
+    LzChunk chunk;
+    lz_chunk_init(&chunk);
+    uint16_t name = constant_name(&vm, &chunk, "r");
+    emit_u16(&chunk, LZ_OP_CONSTANT, constant_value(&chunk, a), 1);
+    emit_u16(&chunk, LZ_OP_CONSTANT, constant_value(&chunk, b), 1);
+    emit(&chunk, op, 1);
+    emit_u16(&chunk, LZ_OP_DEFINE_GLOBAL, name, 1);
+    emit(&chunk, LZ_OP_RETURN, 1);
+
+    LzStatus status = lz_vm_run(&vm, &chunk);
+    LZ_CHECK(status == expected_status);
+    if (expected_status != LZ_OK) {
+        LZ_CHECK(strcmp(vm.error, expected_error) == 0);
+    } else {
+        const LzValue *got = lz_vm_lookup(&vm, lz_vm_intern(&vm, "r", 1));
+        LZ_CHECK(got != NULL && got->type == expected.type);
+        if (got != NULL && got->type == expected.type) {
+            if (got->type == LZ_VAL_FLOAT) {
+                LZ_CHECK(memcmp(&got->as.number, &expected.as.number, sizeof(double)) == 0);
+            } else if (got->type == LZ_VAL_INT) {
+                LZ_CHECK(got->as.integer == expected.as.integer);
+            } else {
+                LZ_CHECK(got->as.boolean == expected.as.boolean);
+            }
+        }
+    }
+    teardown(&vm, &chunk, &out, &err);
+}
+
+static void test_fast_path_matches_general(void) {
+    const LzValue values[] = {
+        lz_value_int(0),         lz_value_int(1),          lz_value_int(-1),
+        lz_value_int(2),         lz_value_int(INT64_MAX),  lz_value_int(INT64_MIN),
+        lz_value_int(INT64_MAX - 1), lz_value_int(INT64_MIN + 1), lz_value_int(3037000500),
+        lz_value_int(-3037000500), lz_value_int(9007199254740993),
+        lz_value_float(0.0),     lz_value_float(-0.0),     lz_value_float(1.5),
+        lz_value_float(-2.25),   lz_value_float(1e308),    lz_value_float(-1e308),
+        lz_value_float(5e-324),  lz_value_float(HUGE_VAL), lz_value_float(-HUGE_VAL),
+        lz_value_float(NAN),     lz_value_float(9007199254740992.0),
+        lz_value_float(9223372036854775808.0),
+        lz_value_bool(true),     lz_value_nil(),
+    };
+    const LzOpCode ops[] = {LZ_OP_ADD,  LZ_OP_SUBTRACT,    LZ_OP_MULTIPLY,
+                            LZ_OP_LESS, LZ_OP_GREATER,     LZ_OP_LESS_EQUAL,
+                            LZ_OP_GREATER_EQUAL, LZ_OP_EQUAL};
+    size_t count = sizeof values / sizeof values[0];
+    for (size_t o = 0; o < sizeof ops / sizeof ops[0]; o++) {
+        for (size_t i = 0; i < count; i++) {
+            for (size_t j = 0; j < count; j++) {
+                run_pair(ops[o], values[i], values[j]);
+            }
+        }
+    }
+}
+
+/* The primitive shortcut of the type check must agree with lz_type_matches on every pairing. */
+static void test_check_type_shortcut_agrees(void) {
+    LzBuffer out;
+    LzBuffer err;
+    LzVM vm;
+    setup(&vm, &out, &err);
+    LzString *text = lz_vm_intern(&vm, "abc", 3);
+    LzString *other = lz_vm_intern(&vm, "xyz", 3);
+
+    LzType types[16];
+    size_t type_count = 0;
+    const uint16_t kind_sets[] = {LZ_KIND_NIL, LZ_KIND_BOOL, LZ_KIND_INT, LZ_KIND_FLOAT, LZ_KIND_STRING,
+                                  LZ_KIND_INT | LZ_KIND_NIL, LZ_KINDS_NUMBER, LZ_KINDS_ANY, 0,
+                                  LZ_KIND_STRING | LZ_KIND_ARRAY};
+    for (size_t i = 0; i < sizeof kind_sets / sizeof kind_sets[0]; i++) {
+        types[type_count++] = lz_type_of_kinds(kind_sets[i]);
+    }
+    LzType literal_int = lz_type_of_kinds(0);
+    literal_int.literal_count = 1;
+    literal_int.literals[0].kind = LZ_VAL_INT;
+    literal_int.literals[0].as.integer = 3;
+    types[type_count++] = literal_int;
+    LzType literal_bool = lz_type_of_kinds(0);
+    literal_bool.literal_count = 1;
+    literal_bool.literals[0].kind = LZ_VAL_BOOL;
+    literal_bool.literals[0].as.boolean = true;
+    types[type_count++] = literal_bool;
+    LzType literal_text = lz_type_of_kinds(0);
+    literal_text.literal_count = 1;
+    literal_text.literals[0].kind = LZ_VAL_OBJECT;
+    literal_text.literals[0].as.string = text;
+    types[type_count++] = literal_text;
+    LzType mixed = lz_type_of_kinds(LZ_KIND_FLOAT);
+    mixed.literal_count = 1;
+    mixed.literals[0].kind = LZ_VAL_INT;
+    mixed.literals[0].as.integer = 3;
+    types[type_count++] = mixed;
+
+    LzValue values[] = {lz_value_nil(),      lz_value_bool(true),   lz_value_bool(false),
+                        lz_value_int(3),     lz_value_int(4),       lz_value_float(1.5),
+                        lz_value_object(&text->base), lz_value_object(&other->base)};
+    for (size_t t = 0; t < type_count; t++) {
+        for (size_t v = 0; v < sizeof values / sizeof values[0]; v++) {
+            LzChunk chunk;
+            lz_chunk_init(&chunk);
+            uint16_t type_index = 0;
+            LZ_CHECK(lz_chunk_add_type(&chunk, &types[t], &type_index));
+            emit_u16(&chunk, LZ_OP_CONSTANT, constant_value(&chunk, values[v]), 1);
+            emit_u16(&chunk, LZ_OP_CHECK_TYPE, type_index, 1);
+            emit(&chunk, LZ_OP_POP, 1);
+            emit(&chunk, LZ_OP_RETURN, 1);
+            LzStatus status = lz_vm_run(&vm, &chunk);
+            LZ_CHECK((status == LZ_OK) == lz_type_matches(&types[t], &values[v]));
+            if (status != LZ_OK) {
+                LZ_CHECK(status == LZ_ERR_TYPE);
+                LZ_CHECK(strstr(vm.error, "type error: expected") != NULL);
+                vm.stack_count = 0;
+            }
+            lz_chunk_free(&vm.heap, &chunk);
+        }
+    }
+    LzChunk none;
+    lz_chunk_init(&none);
+    teardown(&vm, &none, &out, &err);
+}
+
 int main(void) {
     test_check_type();
     test_println_call();
@@ -539,5 +691,7 @@ int main(void) {
     test_comparison_errors();
     test_stage3_program();
     test_stage3_errors();
+    test_fast_path_matches_general();
+    test_check_type_shortcut_agrees();
     return LZ_TEST_RESULT();
 }

@@ -474,6 +474,94 @@ static void test_alloc_failures(void) {
     }
 }
 
+
+/* The inline caches of global access, see LzGlobalSite. Each case must read the same on every engine. */
+
+static void test_cache_global_updated_in_loop(void) {
+    Env env;
+    setup(&env, NULL, 0, false);
+    LZ_CHECK(run_main(&env,
+                      "let total = 0\nlet step = 1\nfn bump() {\n    step = step + 1\n    return step\n}\n"
+                      "for i in 0..5 {\n    total = total + bump()\n    total = total + step\n}\n"
+                      "println(total, step)\n") == LZ_OK);
+    expect_out(&env, "40 6\n");
+    finish(&env);
+}
+
+static void test_cache_global_shadows_builtin(void) {
+    Env env;
+    setup(&env, NULL, 0, false);
+    /* len is a builtin at first and a global once defined, in code that already ran it */
+    LZ_CHECK(run_main(&env,
+                      "fn probe(a) => len(a)\nprintln(probe([1, 2, 3]))\nprintln(probe([1, 2, 3]))\n"
+                      "let len = fn(a) => 99\nprintln(probe([1, 2, 3]))\nprintln(len([1]))\n") == LZ_OK);
+    expect_out(&env, "3\n3\n99\n99\n");
+    finish(&env);
+}
+
+static void test_cache_per_module(void) {
+    Src sources[] = {{"a", "let x = 1\nfn getx() => x\nfn setx(v) {\n    x = v\n}\n"},
+                     {"b", "let x = 2\nfn getx() => x\nfn setx(v) {\n    x = v\n}\n"}};
+    Env env;
+    setup(&env, sources, 2, true);
+    LzModule *a = load(&env, "a");
+    LzModule *b = load(&env, "b");
+    export_global(&env, a, "getx", "ga");
+    export_global(&env, a, "setx", "sa");
+    export_global(&env, b, "getx", "gb");
+    export_global(&env, b, "setx", "sb");
+    LZ_CHECK(run_main(&env,
+                      "let x = 0\nlet out = []\nfor i in 0..3 {\n    sa(10 + i)\n    sb(20 + i)\n    x = x + 1\n"
+                      "    out.push(ga() + gb() + x)\n}\nprintln(out)\n") == LZ_OK);
+    expect_out(&env, "[31, 34, 37]\n");
+    finish(&env);
+}
+
+static void test_cache_survives_rehash_and_embedder_writes(void) {
+    Env env;
+    setup(&env, NULL, 0, false);
+    LzString *g = lz_vm_intern(&env.vm, "g", 1);
+    LZ_CHECK(lz_vm_define_global(&env.vm, g, lz_value_int(1)));
+    lz_source_from_string(&env.main_source, "main.lz", "let t = 0\nfor i in 0..3 {\n    t = t + g + len([1])\n}\nprintln(t)\n");
+    env.vm.trace_source = &env.main_source;
+    lz_chunk_init(&env.chunk);
+    env.has_chunk = true;
+    LZ_CHECK(lz_compile(&env.vm, &env.main_source, &env.chunk, &env.diagnostics) == LZ_OK);
+    LZ_CHECK(lz_vm_run(&env.vm, &env.chunk) == LZ_OK);
+    for (int round = 0; round < 3; round++) {
+        /* new names grow the table, then the value of g changes in place */
+        for (int i = 0; i < 40; i++) {
+            char name[24];
+            (void)snprintf(name, sizeof name, "pad_%d_%d", round, i);
+            LzString *key = lz_vm_intern(&env.vm, name, strlen(name));
+            LZ_CHECK(lz_vm_define_global(&env.vm, key, lz_value_int(i)));
+        }
+        LZ_CHECK(lz_vm_define_global(&env.vm, g, lz_value_int(10 * (round + 1))));
+        LZ_CHECK(lz_vm_run(&env.vm, &env.chunk) == LZ_OK);
+    }
+    expect_out(&env, "6\n33\n63\n93\n");
+    finish(&env);
+}
+
+static void test_cache_builtin_shadowed_by_embedder(void) {
+    Env env;
+    setup(&env, NULL, 0, false);
+    lz_source_from_string(&env.main_source, "main.lz", "println(len([1, 2]))\n");
+    env.vm.trace_source = &env.main_source;
+    lz_chunk_init(&env.chunk);
+    env.has_chunk = true;
+    LZ_CHECK(lz_compile(&env.vm, &env.main_source, &env.chunk, &env.diagnostics) == LZ_OK);
+    LZ_CHECK(lz_vm_run(&env.vm, &env.chunk) == LZ_OK);
+    LzString *len = lz_vm_intern(&env.vm, "len", 3);
+    LzValue seven = lz_value_int(7);
+    LZ_CHECK(lz_vm_define_global(&env.vm, len, seven));
+    LzStatus status = lz_vm_run(&env.vm, &env.chunk);
+    LZ_CHECK(status != LZ_OK); /* 7 is not callable, and a stale builtin would have answered 2 */
+    expect_out(&env, "2\n");
+    env.vm.stack_count = 0;
+    finish(&env);
+}
+
 int main(void) {
     test_separate_globals();
     test_function_uses_its_module();
@@ -491,5 +579,10 @@ int main(void) {
     test_is_main_checks();
     test_is_main_assignment_in_module();
     test_alloc_failures();
+    test_cache_global_updated_in_loop();
+    test_cache_global_shadows_builtin();
+    test_cache_per_module();
+    test_cache_survives_rehash_and_embedder_writes();
+    test_cache_builtin_shadowed_by_embedder();
     return LZ_TEST_RESULT();
 }

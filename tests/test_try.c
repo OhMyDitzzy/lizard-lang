@@ -288,6 +288,31 @@ static void test_callbacks(void) {
     check_output("try { map([1], fn(a) => filter([0], fn(b) => 1 / b)) } catch e { println(e.kind) } finally { println(\"fin\") }\n", "ArithmeticError\nfin\n");
 }
 
+/* The trace is captured when the error is made and turned into strings when it is first read. */
+static void test_lazy_trace(void) {
+    /* never read: nothing may leak, and the heap charge for the captured frames is given back */
+    check_output("fn a(n) { throw RangeError(\"m\") }\nfn b(n) { a(n) }\nlet total = 0\n"
+                 "for i in 0..50 { try { b(i) } catch e { total += 1 } }\nprintln(total)\n",
+                 "50\n");
+    /* read twice, the same array both times */
+    check_output("fn a() { throw RangeError(\"m\") }\ntry { a() } catch e { println(e.trace == e.trace, len(e.trace), e.trace[0]) }\n",
+                 "true 2 a (t.lz:1:10)\n");
+    /* kept in an array and read much later, after other errors came and went */
+    check_output("fn a(k) { throw RangeError(k) }\nfn b(k) { a(k) }\nlet kept = []\n"
+                 "for i in 0..3 { try { b(\"x\") } catch e { kept.push(e) } }\n"
+                 "try { b(\"late\") } catch e { println(e.trace[1]) }\n"
+                 "for e in kept { println(e.message, e.trace[0], e.trace[1]) }\n",
+                 "b (t.lz:2:12)\nx a (t.lz:1:11) b (t.lz:2:12)\nx a (t.lz:1:11) b (t.lz:2:12)\nx a (t.lz:1:11) b (t.lz:2:12)\n");
+    /* thrown again without being read: it keeps where it was first made */
+    check_output("fn a() { throw ValueError(\"v\") }\nfn b() { a() }\nfn c() { try { b() } catch e { throw e } }\n"
+                 "try { c() } catch e2 { println(len(e2.trace), e2.trace[0], e2.trace[2]) }\n",
+                 "4 a (t.lz:1:10) c (t.lz:3:17)\n");
+    /* more frames than the trace keeps */
+    check_output("fn deep(n) { if n == 0 { throw RangeError(\"d\") }\n return deep(n - 1) }\n"
+                 "try { deep(40) } catch e { println(len(e.trace)) }\n",
+                 "16\n");
+}
+
 static void test_fields(void) {
     check_output("try { throw RangeError(\"m\") } catch e { println(e.message, e.kind, len(e.trace)) }\n", "m RangeError 0\n");
     check_output("fn a() { throw RangeError(\"m\") }\nfn b() { a() }\ntry { b() } catch e { println(len(e.trace))\n println(e.trace[0])\n println(e.trace[1])\n println(e.trace[2]) }\n",
@@ -425,6 +450,7 @@ int main(void) {
     test_nesting();
     test_callbacks();
     test_fields();
+    test_lazy_trace();
     test_uncaught();
     test_sandbox_limits();
     test_many_rounds();

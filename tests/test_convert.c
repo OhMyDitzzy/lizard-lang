@@ -1,4 +1,6 @@
+#include <inttypes.h>
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "lizard/builtin.h"
@@ -173,6 +175,41 @@ static void test_number_parsers(void) {
     LZ_CHECK(lz_parse_float("1.5", 2, &number) == LZ_PARSE_SYNTAX);
 }
 
+/* The hand-written int text must match printf for every value. */
+static void check_int_text(int64_t value) {
+    char expected[32];
+    char got[LZ_INT_TEXT_MAX];
+    (void)snprintf(expected, sizeof expected, "%" PRId64, value);
+    size_t length = lz_int_to_text(value, got);
+    LZ_CHECK(length == strlen(expected));
+    LZ_CHECK(strcmp(got, expected) == 0);
+
+    LzBuffer written = {0};
+    LzWriter writer = lz_writer_from_buffer(&written);
+    LzValue integer = lz_value_int(value);
+    LZ_CHECK(lz_value_write(&integer, &writer));
+    LZ_CHECK(written.length == length && memcmp(written.data, expected, length) == 0);
+    lz_buffer_free(&written);
+}
+
+static void test_int_text(void) {
+    const int64_t edges[] = {0, 1, -1, 9, 10, -10, 99, 100, 101, 999999999, 1000000000, 2147483647,
+                             -2147483648LL, 4294967295LL, 4294967296LL, 9007199254740992LL,
+                             INT64_MAX, INT64_MAX - 1, INT64_MIN, INT64_MIN + 1,
+                             1000000000000000000LL, -1000000000000000000LL, 999999999999999999LL};
+    for (size_t i = 0; i < sizeof edges / sizeof edges[0]; i++) {
+        check_int_text(edges[i]);
+    }
+    uint64_t state = 0x9E3779B97F4A7C15ull;
+    for (int i = 0; i < 1000; i++) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        /* spread over every length from 1 to 19 digits */
+        check_int_text((int64_t)(state >> (i % 64)) * ((i & 1) ? -1 : 1));
+    }
+}
+
 int main(void) {
     LzBuffer out = {0};
     lz_vm_init(&vm, lz_writer_from_buffer(&out), lz_writer_from_buffer(&out));
@@ -185,6 +222,7 @@ int main(void) {
     test_result_kinds();
     test_arity();
     test_number_parsers();
+    test_int_text();
 
     lz_vm_free(&vm);
     lz_buffer_free(&out);

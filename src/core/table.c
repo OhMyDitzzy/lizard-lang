@@ -31,6 +31,7 @@ static bool grow(LzTable *table) {
     free(table->entries);
     table->entries = entries;
     table->capacity = capacity;
+    table->shape++;
     return true;
 }
 
@@ -38,6 +39,7 @@ void lz_table_init(LzTable *table) {
     table->entries = NULL;
     table->count = 0;
     table->capacity = 0;
+    table->shape = 0;
 }
 
 void lz_table_free(LzHeap *heap, LzTable *table) {
@@ -49,7 +51,9 @@ void lz_table_free(LzHeap *heap, LzTable *table) {
         }
     }
     free(table->entries);
+    uint32_t shape = table->shape + 1;
     lz_table_init(table);
+    table->shape = shape;
 }
 
 bool lz_table_set(LzHeap *heap, LzTable *table, LzString *key, LzValue value) {
@@ -64,6 +68,7 @@ bool lz_table_set(LzHeap *heap, LzTable *table, LzString *key, LzValue value) {
         entry->key = key;
         entry->value = value;
         table->count++;
+        table->shape++;
     } else {
         lz_value_release(heap, &entry->value);
         entry->value = value;
