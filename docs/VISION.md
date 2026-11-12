@@ -18,5 +18,5 @@ When something is restricted, the restriction is the feature.
 
 ## Kind
 Every error says what happened, where, and, when there is a clear fix, how to
-repair it, often showing the corrected code. Documentation examples are run by the
-test suite, so what the docs say is what Lizard does.
+repair it, often showing the corrected code. Documentation examples are written and
+run by hand, so each one shows what Lizard did when it was written.

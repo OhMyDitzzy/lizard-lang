@@ -377,6 +377,86 @@ static void test_single_file_extend(void) {
     finish(&env);
 }
 
+/* The same text, compiled as the main program and as an imported module. */
+static const char *const IS_MAIN_TEXT =
+    "println(\"top\", is_main)\n"
+    "fn probe() => is_main\n"
+    "println(\"fn\", probe())\n"
+    "println(typeof(is_main))\n"
+    "let flag: bool = is_main\n"
+    "println(\"and\", is_main and 1 < 2, \"or\", is_main or false, \"not\", not is_main)\n"
+    "println(if is_main { \"yes\" } else { \"no\" })\n"
+    "let doubled = [1, 2].map(fn(n) => if is_main { n * 2 } else { n })\n"
+    "println(doubled)\n";
+
+static void test_is_main_in_main(void) {
+    Env env;
+    setup(&env, NULL, 0, false);
+    LZ_CHECK(run_main(&env, IS_MAIN_TEXT) == LZ_OK);
+    expect_out(&env, "top true\nfn true\nbool\nand true or true not false\nyes\n[2, 4]\n");
+    finish(&env);
+}
+
+static void test_is_main_module_value(void) {
+    Src sources[] = {{"same", IS_MAIN_TEXT}, {"lib", "pub fn where_am_i() => if is_main { \"main\" } else { \"module\" }\n"}};
+    Env env;
+    setup(&env, sources, 2, true);
+    LzModule *same = load(&env, "same");
+    LZ_CHECK(same != NULL);
+    expect_out(&env, "top false\nfn false\nbool\nand false or false not true\nno\n[1, 2]\n");
+    env.out.length = 0;
+    if (env.out.data != NULL) {
+        env.out.data[0] = '\0';
+    }
+    LZ_CHECK(run_main(&env, "import lib\nprintln(is_main, lib.where_am_i())\n") == LZ_OK);
+    expect_out(&env, "true module\n");
+    finish(&env);
+}
+
+static void test_is_main_checks(void) {
+    Env env;
+    setup(&env, NULL, 0, false);
+    LzSource source;
+    LzDiagnostics diagnostics;
+    const char *bad[] = {"is_main = true\n", "is_main += 1\n", "fn f() {\n    is_main = false\n}\n",
+                         "let s: string = is_main\n"};
+    const char *message[] = {"cannot assign to 'is_main': it is a builtin constant",
+                             "cannot assign to 'is_main': it is a builtin constant",
+                             "cannot assign to 'is_main': it is a builtin constant", "type mismatch"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        LzChunk chunk;
+        lz_source_from_string(&source, "bad.lz", bad[i]);
+        lz_chunk_init(&chunk);
+        LZ_CHECK(lz_compile(&env.vm, &source, &chunk, &diagnostics) == LZ_ERR_COMPILE);
+        LZ_CHECK(diagnostics.count >= 1);
+        LZ_CHECK(strstr(diagnostics.items[0].message, message[i]) != NULL);
+        lz_chunk_free(&env.vm.heap, &chunk);
+    }
+    /* A let hides it, like it hides any builtin. */
+    LZ_CHECK(run_main(&env, "let is_main = 5\nprintln(is_main)\n") == LZ_OK);
+    expect_out(&env, "5\n");
+    finish(&env);
+}
+
+/* A module that assigns to it does not compile, and says so at its own file. */
+static void test_is_main_assignment_in_module(void) {
+    Src sources[] = {{"bad", "is_main = true\n"}};
+    Env env;
+    setup(&env, sources, 1, true);
+    LzModule *module = NULL;
+    LZ_CHECK(lz_module_load(&env.vm, NULL, "bad", &module) != LZ_OK);
+    const LzModuleFailure *failure = lz_vm_module_failure(&env.vm);
+    LZ_CHECK(failure != NULL);
+    bool found = false;
+    for (; failure != NULL; failure = failure->next) {
+        for (size_t i = 0; i < failure->diagnostics.count; i++) {
+            found = found || strstr(failure->diagnostics.items[i].message, "builtin constant") != NULL;
+        }
+    }
+    LZ_CHECK(found);
+    finish(&env);
+}
+
 static void test_alloc_failures(void) {
     Src sources[] = {{"a", "let x = 1\nfn f() => x\n"}};
     for (size_t n = 1; n <= 6; n++) {
@@ -406,6 +486,10 @@ int main(void) {
     test_classes_and_extend();
     test_extend_invisible_across_modules();
     test_single_file_extend();
+    test_is_main_in_main();
+    test_is_main_module_value();
+    test_is_main_checks();
+    test_is_main_assignment_in_module();
     test_alloc_failures();
     return LZ_TEST_RESULT();
 }

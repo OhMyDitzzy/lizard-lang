@@ -34,6 +34,9 @@ Hello, Lizard! Ana, round 3
 `from` and `as` are only special in that position, so they are still fine as variable names. See
 [MODULES.md](MODULES.md).
 
+`is_main` is a builtin `bool` that is `true` only in the file run directly and `false` in imported
+files, so a file can be a library and a program at once. See [MODULES.md](MODULES.md#a-file-that-is-a-library-and-a-program).
+
 ## Top-level declarations and `pub`
 
 `fn`, `const`, `let`, `class`, `trait`, `error` and `type` can stand at the top of a file, and

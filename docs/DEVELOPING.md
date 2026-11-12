@@ -20,8 +20,8 @@ Build with tests on, then run the suite:
 
 Without Autotools: `sh tools/build-plain.sh check` (see [building/plain.md](building/plain.md)).
 
-The `docs_check` test runs every code example in `docs/` and fails when an example's
-output does not match, so documentation examples are executed by the test suite.
+No test runs the examples in `docs/`. The author writes each example and runs it by hand,
+so check it again whenever the behavior it shows changes.
 
 ## Benchmarks
 
@@ -104,14 +104,14 @@ and checks `lz_link_check` and `live_objects == 0`.
 
 ## Adding a documented page
 
-Every code block in `docs/` is run by `docs_check` (listed in `tests/tests.list`), so an
-example in the docs must produce the output shown beside it. To add a page:
+Code blocks in `docs/` are not run by any test, so an example must produce the output shown
+beside it because the author ran it. To add a page:
 
 1. Create `docs/NAME.md` written in the natural style used by the other pages — an
    opening that explains what the feature is for, examples that build on each other,
    and errors explained where they naturally arise.
 2. Add it to [the index](README.md) and, when it is a user-facing page, to `README.md`.
-3. Run `make check TESTS=docs_check` and fix any mismatched example.
+3. Run every example by hand with `lizard` and fix any output that does not match.
 
 The engine and sanitizer behaviour is part of what the tests check, so keep examples
 engine-agnostic unless the page is specifically about engines.

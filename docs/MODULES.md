@@ -59,6 +59,36 @@ A missing module and a module that does not compile are reported at the `import`
 module's own report is printed first, with its own file name, and only once per run, however many
 files import it.
 
+## A file that is a library and a program
+
+Some files have functions worth importing and also a small program of their own, like a demo or a
+command line wrapper. The builtin `is_main` tells the two cases apart. It is `true` in the file you
+run with `lizard` and `false` in every file that another file imports.
+
+```lizard
+pub fn greet(name: string) -> string { return "hi " + name }
+
+if is_main {
+    println(greet("world"))
+}
+```
+
+Saved as `greeter.lz`, `lizard greeter.lz` prints this:
+
+```text
+hi world
+```
+
+A file that does `import greeter` and calls `greeter.greet("Ana")` gets the function and nothing is
+printed by `greeter.lz` itself, because there `is_main` is `false`.
+
+The value belongs to the file and never changes. The compiler writes it in as a plain `true` or
+`false`, so `if is_main` costs nothing when the program runs. An imported file sees `false` no
+matter who imported it, and the `main` file sees `true` even when it also imports other files. It is
+an ordinary `bool`, so `if is_main and verbose` works, but it cannot be assigned: `is_main = true` is
+a compile error. A `let is_main = ...` would hide it the way `let print = ...` hides `print`, so it
+is better to pick another name.
+
 ## Classes, traits and errors across modules
 
 A `pub class`, `pub trait`, `pub error` or `pub type` of another module is a type here. It works wherever a

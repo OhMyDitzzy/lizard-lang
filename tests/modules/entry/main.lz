@@ -1,0 +1,4 @@
+import lib
+
+println(lib.greet("main"))
+println("main:", is_main, "lib imported:", lib.imported)

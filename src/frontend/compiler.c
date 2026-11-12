@@ -1693,6 +1693,9 @@ static LzSuggestions suggest_names(Parser *parser, const LzToken *token, bool fu
     }
     offer_table(&suggester, parser->globals, functions_only);
     offer_table(&suggester, &parser->vm->builtins, functions_only);
+    if (!functions_only) {
+        lz_suggester_offer(&suggester, "is_main");
+    }
     if (parser->method_name) {
         offer_table(&suggester, &parser->vm->methods, functions_only);
     }
@@ -3197,6 +3200,11 @@ static const Facts *negate_facts(Parser *parser, const Facts *facts) {
 
 static bool import_name_expr(Parser *parser, const LzToken *token, LzString *name, Expr *out);
 
+/* `is_main` is a builtin constant, not an entry of the builtin table: see variable_at. */
+static bool is_main_name(const char *text, size_t length) {
+    return length == 7 && memcmp(text, "is_main", 7) == 0;
+}
+
 static Expr variable_at(Parser *parser, const LzToken *token) {
     LzString *name = intern_token(parser, token);
     if (name == NULL) {
@@ -3250,6 +3258,13 @@ static Expr variable_at(Parser *parser, const LzToken *token) {
     Expr imported;
     if (import_name_expr(parser, token, name, &imported)) {
         return imported;
+    }
+
+    if (is_main_name(name->data, name->length)) {
+        /* A constant of the file: main is true, every imported module is false. */
+        bool main_file = parser->module == NULL;
+        emit_op_at(parser, main_file ? LZ_OP_TRUE : LZ_OP_FALSE, token->offset);
+        return expr_of(lz_type_of_value(&(LzValue){.type = LZ_VAL_BOOL, .as.boolean = main_file}));
     }
 
     if (name->length == 4 && memcmp(name->data, "self", 4) == 0) {
@@ -7205,6 +7220,15 @@ static void assignment_statement(Parser *parser) {
     }
     if (symbol != NULL && symbol->catch_var) {
         error_with_name(parser, &name_token, "cannot assign to the catch variable '", "'");
+        return;
+    }
+    if (symbol == NULL && name != NULL && is_main_name(name->data, name->length)) {
+        /* The value is still read, so a mistake inside it is told too. */
+        (void)expression(parser);
+        diag_label(parser, "assigned here");
+        diag_help(parser, "it is true only in the file that is run directly, so keep your own flag in a variable with another name");
+        record(parser, name_token.offset, name_token.length, "cannot assign to 'is_main': it is a builtin constant");
+        end_statement(parser);
         return;
     }
     bool is_constant = symbol != NULL && (symbol->is_const || symbol->kind == SYMBOL_CONSTANT);

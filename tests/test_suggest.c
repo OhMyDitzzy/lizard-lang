@@ -111,6 +111,26 @@ static void test_builtin_hint(void) {
     release(&c);
 }
 
+static void test_is_main_hint(void) {
+    Compiled c;
+    compile(&c, "println(is_man)\n");
+    const LzNameHint *hint = first_hint(&c);
+    LZ_CHECK(hint != NULL);
+    if (hint != NULL) {
+        LZ_CHECK(!hint->is_call);
+        LZ_CHECK(offers(&hint->suggestions, "is_main"));
+    }
+    release(&c);
+    /* A call only offers things that can hold a function. */
+    compile(&c, "is_man()\n");
+    hint = first_hint(&c);
+    LZ_CHECK(hint != NULL);
+    if (hint != NULL) {
+        LZ_CHECK(!offers(&hint->suggestions, "is_main"));
+    }
+    release(&c);
+}
+
 static void test_script_functions_and_locals(void) {
     Compiled c;
     /* A function of the script itself, declared later than its use. */
@@ -273,6 +293,7 @@ int main(void) {
     test_edit_distance();
     test_ranking();
     test_builtin_hint();
+    test_is_main_hint();
     test_script_functions_and_locals();
     test_compile_error_suggestions();
     test_report_layout();

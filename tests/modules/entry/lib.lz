@@ -1,0 +1,7 @@
+pub fn greet(name: string) -> string { return "hi " + name }
+
+pub const imported = not is_main
+
+if is_main {
+    println("lib run directly:", greet("world"))
+}
