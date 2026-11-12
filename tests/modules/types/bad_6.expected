@@ -1,0 +1,7 @@
+error: type mismatch: expected Oops, got Point
+ --> bad_6.lz:2:20
+  |
+2 | let w: util.Oops = util.make(1)
+  |                    ^^^^^^^^^^^^
+
+error: aborting due to 1 previous error

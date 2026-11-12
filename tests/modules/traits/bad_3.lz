@@ -1,0 +1,5 @@
+class Base { pub s: int }
+class Big : Base { pub t: int = 0 }
+fn f(x: Big) => 1
+let b: Base = Base(1)
+f(b)

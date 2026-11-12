@@ -406,7 +406,11 @@ static int run_script(const char *script_path, bool heap_stats, bool trace_memor
         LzStatus status = lz_compile(&vm, &source, &chunk, &diagnostics);
         if (status == LZ_ERR_COMPILE) {
             lz_writer_flush(&vm.out);
-            lz_diagnostics_report(&diagnostics, &source, color, &vm.err);
+            /* The modules that failed come first, so the error at their import reads as a result. */
+            size_t others = lz_vm_module_failures_report(&vm, color, &vm.err);
+            lz_diagnostics_report_body(&diagnostics, &source, color, &vm.err);
+            lz_report_write_summary(others + diagnostics.count + diagnostics.dropped, diagnostics.dropped, color,
+                                    &vm.err);
             exit_code = EXIT_DATA_ERROR;
         } else if (status != LZ_OK) {
             report_plain_error(color, vm.error);

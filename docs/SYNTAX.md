@@ -27,6 +27,13 @@ Hello, Lizard! Ana, round 2
 Hello, Lizard! Ana, round 3
 ```
 
+## Imports
+
+`import util`, `import util as u`, `import tools.format` and `from util import a, b as c` bring in the
+`pub` names of another file. They stand at the top of the file, before any other statement. `import`,
+`from` and `as` are only special in that position, so they are still fine as variable names. See
+[MODULES.md](MODULES.md).
+
 ## Top-level declarations and `pub`
 
 `fn`, `const`, `let`, `class`, `trait`, `error` and `type` can stand at the top of a file, and

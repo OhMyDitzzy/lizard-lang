@@ -2,6 +2,7 @@
 #include "lizard/class.h"
 
 #include "lizard/dict.h"
+#include "lizard/module.h"
 #include "lizard/native.h"
 #include "lizard/source.h"
 #include "lizard/suggest.h"
@@ -157,20 +158,64 @@ const char *lz_vm_error_kind_name(const LzVM *vm, unsigned kind) {
     return index < vm->error_type_count ? vm->error_types[index].name->data : "Error";
 }
 
-bool lz_vm_error_kind_from_name(const LzVM *vm, const char *name, size_t length, uint8_t *out) {
+bool lz_vm_error_kind_from_name(const LzVM *vm, const LzModule *scope, const char *name, size_t length,
+                                uint8_t *out) {
+    for (size_t i = 0; i < vm->error_type_count; i++) {
+        const LzErrorType *type = &vm->error_types[i];
+        if (!type->dead && type->scope == scope && type->name->length == length &&
+            memcmp(type->name->data, name, length) == 0) {
+            *out = (uint8_t)(LZ_ERROR_KIND_COUNT + i);
+            return true;
+        }
+    }
     LzErrorKind builtin;
     if (lz_error_kind_from_name(name, length, &builtin)) {
         *out = (uint8_t)builtin;
         return true;
     }
-    for (size_t i = 0; i < vm->error_type_count; i++) {
-        const LzString *declared = vm->error_types[i].name;
-        if (declared->length == length && memcmp(declared->data, name, length) == 0) {
-            *out = (uint8_t)(LZ_ERROR_KIND_COUNT + i);
-            return true;
+    return false;
+}
+
+const LzModule *lz_vm_error_kind_scope(const LzVM *vm, unsigned kind) {
+    unsigned index = kind - LZ_ERROR_KIND_COUNT;
+    return kind >= LZ_ERROR_KIND_COUNT && index < vm->error_type_count ? vm->error_types[index].scope : NULL;
+}
+
+void lz_vm_error_kind_qualified_name(const LzVM *vm, unsigned kind, char *out, size_t size) {
+    const char *name = lz_vm_error_kind_name(vm, kind);
+    const char *module = lz_module_name(lz_vm_error_kind_scope(vm, kind));
+    if (module == NULL) {
+        (void)snprintf(out, size, "%s", name);
+        return;
+    }
+    char dotted[96];
+    size_t length = strlen(module);
+    if (length > 3 && strcmp(module + length - 3, ".lz") == 0) {
+        length -= 3;
+    }
+    if (length >= sizeof dotted) {
+        length = sizeof dotted - 1;
+    }
+    for (size_t i = 0; i < length; i++) {
+        dotted[i] = module[i] == '/' || module[i] == '\\' ? '.' : module[i];
+    }
+    dotted[length] = '\0';
+    (void)snprintf(out, size, "%s.%s", dotted, name);
+}
+
+void lz_vm_error_kind_set_parent(LzVM *vm, unsigned kind, uint8_t parent) {
+    unsigned index = kind - LZ_ERROR_KIND_COUNT;
+    if (kind >= LZ_ERROR_KIND_COUNT && index < vm->error_type_count) {
+        vm->error_types[index].parent = parent;
+    }
+}
+
+void lz_vm_error_scope_drop(LzVM *vm, const LzModule *scope) {
+    for (size_t i = 0; scope != NULL && i < vm->error_type_count; i++) {
+        if (vm->error_types[i].scope == scope) {
+            vm->error_types[i].dead = true;
         }
     }
-    return false;
 }
 
 bool lz_vm_error_kind_parent(const LzVM *vm, unsigned kind, uint8_t *parent) {
@@ -191,7 +236,7 @@ bool lz_vm_error_kind_parent(const LzVM *vm, unsigned kind, uint8_t *parent) {
 }
 
 bool lz_vm_error_kind_is(const LzVM *vm, unsigned kind, unsigned ancestor) {
-    /* Every parent was declared before its child, so each step goes to a smaller number. */
+    /* A parent is complete before its child is, so the chain ends and never loops. */
     for (;;) {
         if (kind == ancestor) {
             return true;
@@ -214,19 +259,19 @@ bool lz_native_error_kind(const LzNative *native, uint8_t *kind) {
     return true;
 }
 
-LzStatus lz_vm_error_define_constructor(LzVM *vm, LzString *name, uint8_t kind) {
+LzStatus lz_vm_error_define_constructor(LzVM *vm, const LzModule *scope, LzString *name, uint8_t kind) {
     LzNative *native = lz_native_new(&vm->heap, name, lz_error_type_native, 1, 1);
     if (native == NULL) {
         return lz_vm_out_of_memory(vm);
     }
     native->result_kinds = LZ_KIND_ERROR;
     native->data = (const void *)(uintptr_t)kind;
-    bool defined = lz_vm_define_builtin(vm, name, lz_value_object(&native->base));
+    bool defined = lz_table_set(&vm->heap, lz_module_table(vm, scope), name, lz_value_object(&native->base));
     lz_object_release(&vm->heap, &native->base);
     return defined ? LZ_OK : lz_vm_out_of_memory(vm);
 }
 
-LzStatus lz_vm_error_declare(LzVM *vm, LzString *name, uint8_t parent, uint8_t *out) {
+LzStatus lz_vm_error_declare(LzVM *vm, const LzModule *scope, LzString *name, uint8_t parent, uint8_t *out) {
     if (vm->error_type_count >= LZ_ERROR_TYPES_MAX - LZ_ERROR_KIND_COUNT) {
         LzStatus status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "too many error kinds (limit is %d)",
                                           LZ_ERROR_TYPES_MAX);
@@ -234,13 +279,15 @@ LzStatus lz_vm_error_declare(LzVM *vm, LzString *name, uint8_t parent, uint8_t *
         return status;
     }
     uint8_t kind = (uint8_t)(LZ_ERROR_KIND_COUNT + vm->error_type_count);
-    LzStatus status = lz_vm_error_define_constructor(vm, name, kind);
+    LzStatus status = lz_vm_error_define_constructor(vm, scope, name, kind);
     if (status != LZ_OK) {
         return status;
     }
     vm->error_types[vm->error_type_count].name = name;
     vm->error_types[vm->error_type_count].parent = parent;
     vm->error_types[vm->error_type_count].cls = NULL;
+    vm->error_types[vm->error_type_count].scope = scope;
+    vm->error_types[vm->error_type_count].dead = false;
     vm->error_type_count++;
     *out = kind;
     return LZ_OK;

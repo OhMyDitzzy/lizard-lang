@@ -22,6 +22,7 @@ typedef struct LzDiagExtras {
     bool has_fix;
     bool keep_help; /* show the help line next to the fix too, instead of only as its fallback */
     bool fix_insert_line;
+    bool fix_quiet;
     bool fix_has_indent;
     uint32_t fix_offset;
     uint32_t fix_delete;
@@ -81,10 +82,27 @@ LzStatus lz_compile(LzVM *vm, const LzSource *source, LzChunk *chunk, LzDiagnost
 typedef struct LzModuleFailure {
     LzSource source;
     LzDiagnostics diagnostics;
+    struct LzModuleFailure *next; /* the failure before this one: a module that this one imports */
+    char *id;                     /* the module's id, so a module that failed is reported once per compile */
+    bool cycle;                   /* it failed only because an import led back into a cycle, which is said once */
 } LzModuleFailure;
 
-/* The full diagnostics of the last module that failed to compile, or NULL. Owned by the VM. */
+/*
+ * The full diagnostics of the last module that failed to compile, or NULL. When it failed because a
+ * module it imports failed too, `next` leads to that one, and so on down to the first. Owned by the
+ * VM, and replaced when a new compile starts.
+ */
 const LzModuleFailure *lz_vm_module_failure(const LzVM *vm);
+
+/* The reports of lz_diagnostics_report without the closing "aborting" line, for a caller that writes several. */
+void lz_diagnostics_report_body(const LzDiagnostics *diagnostics, const LzSource *source, bool color,
+                                const LzWriter *out);
+
+/*
+ * Writes the reports of every module that failed to compile, the one that failed first first, each
+ * against its own source. Returns how many errors it wrote.
+ */
+size_t lz_vm_module_failures_report(const LzVM *vm, bool color, const LzWriter *out);
 
 /*
  * Like lz_compile, but the script is the code of `module`: its globals are the module's table,

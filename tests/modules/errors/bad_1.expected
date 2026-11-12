@@ -1,0 +1,19 @@
+error: module 'a' has no name 'Nope'
+ --> bad_1.lz:3:13
+  |
+3 | error K : a.Nope
+  |             ^^^^ not exported by this module
+
+error: 'zz' is not an imported module
+ --> bad_1.lz:4:11
+  |
+4 | error J : zz.Base
+  |           ^^
+
+error: unreachable catch: 'NotFound' is already caught by 'IOError' above
+ --> bad_1.lz:5:63
+  |
+5 | try { a.find("x") } catch IOError as e { println(1) } catch b.NotFound as e { println(2) }
+  |                                                               ^^^^^^^^
+
+error: aborting due to 3 previous errors

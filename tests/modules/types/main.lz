@@ -1,0 +1,8 @@
+import util
+let p = util.make(3)
+println(p.x, util.total([p, util.make(4)]), util.area(util.Sq(3)))
+let n: int = util.first([1, 2])
+let s: string = util.first(["a"])
+println(n, s, util.apply(4, fn(x: int) => x * 2), util.count([p]))
+let e: util.Oops = util.mk()
+println(e)

@@ -32,6 +32,7 @@ check_PROGRAMS = \
 	test_interface \
 	test_extend \
 	test_modules \
+	test_imports \
 	test_module_file \
 	test_error_classes \
 	test_error_types \
@@ -60,6 +61,7 @@ check_PROGRAMS = \
 	test_classes_ge \
 	test_extend_ge \
 	test_modules_ge \
+	test_imports_ge \
 	test_error_classes_ge \
 	test_loops_ge \
 	test_for_ge \
@@ -96,6 +98,7 @@ check_SCRIPTS = \
 	test_classes_ge_jit \
 	test_extend_ge_jit \
 	test_modules_ge_jit \
+	test_imports_ge_jit \
 	test_error_classes_ge_jit \
 	test_links_ge_jit \
 	fuzz_links_ge_jit \
@@ -103,7 +106,8 @@ check_SCRIPTS = \
 	error_types_cli \
 	version_cli \
 	sources_sync \
-	bench_scripts
+	bench_scripts \
+	modules_cli
 
 TESTS = \
 	test_memory \
@@ -136,6 +140,7 @@ TESTS = \
 	test_interface \
 	test_extend \
 	test_modules \
+	test_imports \
 	test_module_file \
 	test_error_classes \
 	test_error_types \
@@ -164,6 +169,7 @@ TESTS = \
 	test_classes_ge \
 	test_extend_ge \
 	test_modules_ge \
+	test_imports_ge \
 	test_error_classes_ge \
 	test_loops_ge \
 	test_for_ge \
@@ -197,6 +203,7 @@ TESTS = \
 	test_classes_ge_jit \
 	test_extend_ge_jit \
 	test_modules_ge_jit \
+	test_imports_ge_jit \
 	test_error_classes_ge_jit \
 	test_links_ge_jit \
 	fuzz_links_ge_jit \
@@ -205,7 +212,8 @@ TESTS = \
 	version_cli \
 	sources_sync \
 	test_typesys \
-	bench_scripts
+	bench_scripts \
+	modules_cli
 
 test_memory_SOURCES = tests/test_memory.c
 test_memory_LDADD = $(LZ_LDADD_PLAIN)
@@ -267,6 +275,8 @@ test_extend_SOURCES = tests/test_extend.c
 test_extend_LDADD = $(LZ_LDADD_PLAIN)
 test_modules_SOURCES = tests/test_modules.c
 test_modules_LDADD = $(LZ_LDADD_PLAIN)
+test_imports_SOURCES = tests/test_imports.c
+test_imports_LDADD = $(LZ_LDADD_PLAIN)
 test_module_file_SOURCES = tests/test_module_file.c
 test_module_file_LDADD = $(LZ_LDADD_PLAIN)
 test_error_classes_SOURCES = tests/test_error_classes.c
@@ -335,6 +345,9 @@ test_extend_ge_LDADD = $(LZ_LDADD_ENGINE)
 test_modules_ge_SOURCES = tests/test_modules.c
 test_modules_ge_CFLAGS = $(AM_CFLAGS) -include $(top_srcdir)/tests/engine_redirect.h
 test_modules_ge_LDADD = $(LZ_LDADD_ENGINE)
+test_imports_ge_SOURCES = tests/test_imports.c
+test_imports_ge_CFLAGS = $(AM_CFLAGS) -include $(top_srcdir)/tests/engine_redirect.h
+test_imports_ge_LDADD = $(LZ_LDADD_ENGINE)
 test_error_classes_ge_SOURCES = tests/test_error_classes.c
 test_error_classes_ge_CFLAGS = $(AM_CFLAGS) -include $(top_srcdir)/tests/engine_redirect.h
 test_error_classes_ge_LDADD = $(LZ_LDADD_ENGINE)
@@ -419,6 +432,8 @@ test_extend_ge_jit:
 	@$(lz_make_stub)
 test_modules_ge_jit:
 	@$(lz_make_stub)
+test_imports_ge_jit:
+	@$(lz_make_stub)
 test_error_classes_ge_jit:
 	@$(lz_make_stub)
 test_links_ge_jit:
@@ -434,6 +449,8 @@ version_cli:
 sources_sync:
 	@$(lz_make_stub)
 bench_scripts:
+	@$(lz_make_stub)
+modules_cli:
 	@$(lz_make_stub)
 else
 check_PROGRAMS =

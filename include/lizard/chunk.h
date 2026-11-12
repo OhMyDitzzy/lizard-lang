@@ -131,9 +131,13 @@ or trait named in the head `class A : B, C` and joins it to the class. Role 0 is
 entry and 1 is a later one */
     LZ_OP_ERROR_CLASS, /* u16 constant for the class, u16 constant for the name of the kind, u8 reserved. Binds the body
 of `error Name : Parent { ... }` to its kind */
-    LZ_OP_EXTEND       /* u16 constant for an extend block, which is a hidden class, u16 constant for the name of the
+    LZ_OP_EXTEND,      /* u16 constant for an extend block, which is a hidden class, u16 constant for the name of the
 target, u8 mode. Registers the block. Mode 0 is a builtin kind and the block says which, and
 mode 1 means the target is the class that the global of that name holds */
+    LZ_OP_IMPORT       /* u16 constant for the module id, u16 constant for the bound name, u16 constant for the
+name in the module, u8 mode. Runs the module once and copies its `pub` values into this module's globals.
+Mode 0 is `import m`: every export is stored as "bound.name". Mode 1 is `from m import a as b`: the export
+`a` is stored as `b` */
 } LzOpCode;
 
 #define LZ_CONSTANTS_MAX 65536

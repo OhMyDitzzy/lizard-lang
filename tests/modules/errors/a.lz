@@ -1,0 +1,3 @@
+pub error NotFound
+pub error Coded { pub code: int }
+pub fn find(key: string) { throw NotFound("a has no " + key) }

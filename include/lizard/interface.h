@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /*
  * The interface of a compiled unit, meaning what its `pub` declarations offer to other code.
@@ -78,6 +79,12 @@ const LzIfaceSig *lz_interface_entry_sig(const LzIfaceEntry *entry);
  * none is written. Else NULL.
  */
 const char *lz_interface_entry_parent(const LzIfaceEntry *entry);
+/*
+ * For class, trait and error, the identity the compiler reserved for it. The class that the unit
+ * makes when it runs has the same id (for an error it is the error kind plus one), so code that
+ * imports the unit can name the type before the unit has run. 0 when there is none.
+ */
+uint64_t lz_interface_entry_class_id(const LzIfaceEntry *entry);
 /* For class and error, the traits in the head. For a trait, the traits it extends. */
 size_t lz_interface_entry_trait_count(const LzIfaceEntry *entry);
 const char *lz_interface_entry_trait(const LzIfaceEntry *entry, size_t index);

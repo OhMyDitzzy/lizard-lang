@@ -63,10 +63,45 @@ static inline void outcome_free(Outcome *outcome) {
 }
 
 /* Compiles text and runs it. A fuel or heap_limit of 0 means unlimited. */
+/* A module in memory, so a generated program can import it. Its code is small and deterministic. */
+static inline char *fuzz_copy(const char *text) {
+    size_t length = strlen(text) + 1;
+    char *copy = malloc(length);
+    if (copy != NULL) {
+        memcpy(copy, text, length);
+    }
+    return copy;
+}
+
+static inline LzStatus fuzz_resolve(void *context, LzVM *vm, const LzModule *importer, const char *name,
+                                    LzModuleSource *out) {
+    (void)context;
+    (void)importer;
+    if (strcmp(name, "fz_util") != 0) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot find module '%s'", name);
+    }
+    out->id = fuzz_copy("fz_util.lz");
+    out->name = fuzz_copy("fz_util.lz");
+    out->text = fuzz_copy("pub fn mix(a: int, b: int) -> int => a * 31 + b\n"
+                          "pub class Box {\n    pub n: int\n    pub fn get(self) => self.n + 1\n}\n"
+                          "pub fn twice(b: Box) => b.get() * 2\n");
+    if (out->id == NULL || out->name == NULL || out->text == NULL) {
+        free(out->id);
+        free(out->name);
+        free(out->text);
+        out->id = out->name = out->text = NULL;
+        return lz_vm_out_of_memory(vm);
+    }
+    out->length = strlen(out->text);
+    return LZ_OK;
+}
+
 static inline void run_source(LzEngine engine, const char *text, uint64_t fuel, size_t heap_limit,
                               Outcome *outcome) {
     LzVM vm;
     outcome_begin(&vm, outcome);
+    LzModuleResolver fuzz_resolver = {NULL, fuzz_resolve, NULL};
+    lz_vm_set_resolver(&vm, &fuzz_resolver);
 
     LzSource source;
     lz_source_from_string(&source, "t.lz", text);

@@ -1,0 +1,7 @@
+error: type mismatch: argument 't' of f() expects T, got C
+ --> bad_2.lz:5:3
+  |
+5 | f(c)
+  |   ^
+
+error: aborting due to 1 previous error

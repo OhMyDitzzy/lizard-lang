@@ -1,0 +1,12 @@
+error: 'string' is a builtin, so this import needs another name
+ --> bad_1.lz:1:8
+  |
+1 | import string
+  |        ^^^^^^ this name is taken by a builtin
+  |
+help: give the import another name
+  |
+1 | import string as strings
+  |              +++++++++++
+
+error: aborting due to 1 previous error

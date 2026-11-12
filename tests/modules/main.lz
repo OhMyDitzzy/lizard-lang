@@ -1,0 +1,51 @@
+import util
+import tools.format as fmt
+from util import add as plus, LIMIT
+import shapes
+from shapes import Square as Sq
+
+println("main starts")
+println(util.add(1, 2))
+println(plus(5, 6) + LIMIT)
+println(fmt.label("sum", fmt.total(3, 4)))
+
+let p = util.Point(3, 4)
+println(p.norm())
+
+# Types, traits and errors of another module.
+let sq: shapes.Square = shapes.Square(3)
+let maybe: shapes.Square? = nil
+let all: shapes.Square[] = [sq, shapes.unit()]
+println(sq.area())
+println(maybe)
+println(all.len())
+println(sq is shapes.Square)
+println(sq is not shapes.Shape)
+println(sq is Sq)
+
+fn total(shape: shapes.Shape) => shape.area() + 1
+println(total(shapes.Square(3)))
+
+class Rect : shapes.Shape {
+    pub w: int
+    pub h: int
+
+    pub fn area(self) => self.w * self.h
+}
+println(total(Rect(2, 5)))
+
+class Big : shapes.Square {
+    pub override fn area(self) => self.side * self.side * 2
+}
+println(Big(2).area())
+
+extend shapes.Square {
+    pub fn doubled(self) => self.area() * 2
+}
+println(sq.doubled())
+
+try {
+    throw shapes.ShapeError("bad shape")
+} catch shapes.ShapeError as e {
+    println("caught " + e.message)
+}

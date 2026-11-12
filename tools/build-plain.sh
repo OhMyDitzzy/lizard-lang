@@ -168,12 +168,17 @@ objdir=$builddir/obj
 mkdir -p "$objdir" "$builddir/.status"
 rm -f "$builddir/.status/"* 2>/dev/null
 
-# an object is stale when its source or any header is newer
+# An object is stale when its source, or a header the compiler saw it include (the .d file that
+# -MMD -MP writes next to it), is newer. No .d file means the object is built again.
 stale() { # object source
     [ -f "$1" ] || return 0
     [ "$2" -nt "$1" ] 2>/dev/null && return 0
-    [ -n "$(find "$src/include" "$src/src" "$src/builtin" "$src/tests" "$builddir/generated" \
-        -name '*.h' -newer "$1" 2>/dev/null | head -1)" ]
+    [ -f "$1.d" ] || return 0
+    for dep in $(sed -e 's/^[^:]*://' -e 's/\\$//' "$1.d" | tr -s ' \n' '\n\n'); do
+        [ -f "$dep" ] || return 0 # a header that is gone: the object can't be trusted
+        [ "$dep" -nt "$1" ] && return 0
+    done
+    return 1
 }
 
 running=0
@@ -187,7 +192,7 @@ compile() { # object source extra-flags...
     say "  CC  ${csrc#"$src"/}"
     (
         # shellcheck disable=SC2086
-        if ! $CC $cflags "$@" -c "$csrc" -o "$obj.tmp"; then
+        if ! $CC $cflags "$@" -MMD -MP -MF "$obj.d" -c "$csrc" -o "$obj.tmp"; then
             : >"$builddir/.status/$(basename "$obj").fail"; rm -f "$obj.tmp"
         else mv -f "$obj.tmp" "$obj"; fi
     ) &

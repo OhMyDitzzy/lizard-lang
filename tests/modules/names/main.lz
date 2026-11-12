@@ -1,0 +1,3 @@
+from util import g as len
+import string as strings
+println(len(), strings.up("ok"), string(5))

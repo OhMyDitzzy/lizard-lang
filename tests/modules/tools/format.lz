@@ -1,0 +1,5 @@
+println("format loaded")
+
+pub fn label(name: string, value: int) -> string => $"{name} = {value}"
+
+pub fn total(a: int, b: int) -> int => a + b

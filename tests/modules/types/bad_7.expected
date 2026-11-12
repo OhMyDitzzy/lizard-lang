@@ -1,0 +1,7 @@
+error: type mismatch: argument 'p' of util.count() expects Point[], got 5
+ --> bad_7.lz:2:12
+  |
+2 | util.count(5)
+  |            ^
+
+error: aborting due to 1 previous error

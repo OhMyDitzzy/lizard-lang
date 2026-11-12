@@ -63,6 +63,8 @@ typedef struct LzErrorType {
     LzString *name; /* interned, so the intern table owns it */
     uint8_t parent;
     struct LzClass *cls; /* the class of an error declared with a body, which is retained, or NULL */
+    const struct LzModule *scope; /* the module that declared it, NULL for main. Only compared, never followed */
+    bool dead;                    /* its module was thrown away, so no name finds it any more */
 } LzErrorType;
 
 /*
@@ -164,6 +166,11 @@ struct LzVM {
     size_t loading_count;
     size_t loading_capacity;
     struct LzModuleFailure *module_failure; /* why the last module failed to compile, or NULL */
+    const struct LzModuleFailure *last_failure; /* the failure of the module the last prepare gave up on, or NULL */
+    bool import_cycle;                          /* the module being compiled failed because of a cycle */
+    /* Runs a compiled module once. The compiler sets it when a file imports another, for OP_IMPORT. */
+    LzStatus (*module_run)(struct LzVM *vm, struct LzModule *module);
+    size_t compiling;                       /* compiles in progress, so an import is nested when it is above 0 */
     LzSkink skink; /* cycle collector, see skink.h. It stays last so the JIT's field offsets don't move */
 };
 

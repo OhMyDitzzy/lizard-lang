@@ -58,6 +58,9 @@ void lz_modules_init(LzVM *vm) {
     vm->loading_count = 0;
     vm->loading_capacity = 0;
     vm->module_failure = NULL;
+    vm->last_failure = NULL;
+    vm->import_cycle = false;
+    vm->compiling = 0;
 }
 
 void lz_module_discard(LzModule *module) {
@@ -86,11 +89,13 @@ void lz_modules_release_tables(LzVM *vm) {
 }
 
 void lz_module_failure_free(LzVM *vm) {
-    if (vm->module_failure != NULL) {
-        free((void *)vm->module_failure->source.name);
-        lz_source_free(&vm->module_failure->source);
-        free(vm->module_failure);
-        vm->module_failure = NULL;
+    while (vm->module_failure != NULL) {
+        LzModuleFailure *failure = vm->module_failure;
+        vm->module_failure = failure->next;
+        free(failure->id);
+        free((void *)failure->source.name);
+        lz_source_free(&failure->source);
+        free(failure);
     }
 }
 

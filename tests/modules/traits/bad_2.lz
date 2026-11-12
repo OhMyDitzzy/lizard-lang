@@ -1,0 +1,5 @@
+trait T { fn go(self) }
+class C { pub x: int }
+fn f(t: T) => 1
+let c: C = C(1)
+f(c)

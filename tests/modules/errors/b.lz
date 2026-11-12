@@ -1,0 +1,2 @@
+pub error NotFound : IOError
+pub fn find(key: string) { throw NotFound("b has no " + key) }

@@ -225,6 +225,27 @@ const char *lz_class_module_name(const LzClass *cls) {
     return lz_module_name(cls->module);
 }
 
+void lz_class_qualified_name(const LzClass *cls, char *out, size_t size) {
+    const char *module = lz_class_module_name(cls);
+    if (module == NULL) {
+        (void)snprintf(out, size, "%s", cls->name->data);
+        return;
+    }
+    char dotted[96];
+    size_t length = strlen(module);
+    if (length > 3 && strcmp(module + length - 3, ".lz") == 0) {
+        length -= 3;
+    }
+    if (length >= sizeof dotted) {
+        length = sizeof dotted - 1;
+    }
+    for (size_t i = 0; i < length; i++) {
+        dotted[i] = module[i] == '/' || module[i] == '\\' ? '.' : module[i];
+    }
+    dotted[length] = '\0';
+    (void)snprintf(out, size, "%s.%s", dotted, cls->name->data);
+}
+
 /*
  * The classes of the chain win, and the default of a trait answers only when none of them has
  * the name.

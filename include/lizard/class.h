@@ -159,6 +159,11 @@ bool lz_class_sees(const LzVM *vm, uint64_t owner, const LzClass *declaring);
 LzStatus lz_vm_cycle_error(LzVM *vm, const LzInstance *instance, const LzMember *member, char kind);
 /* The live class with this id, or NULL. */
 const LzClass *lz_class_by_id(const LzVM *vm, uint64_t id);
+/*
+ * The name of a class with its module in front, like `util.Point`, for a message that has two
+ * different classes of the same name in it. A class of the main file has no module in front.
+ */
+void lz_class_qualified_name(const LzClass *cls, char *out, size_t size);
 /* Is `cls` the class with this id, or derived from it? */
 bool lz_class_is_a(const LzClass *cls, uint64_t id);
 

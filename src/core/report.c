@@ -281,6 +281,9 @@ static void write_fix(const Out *out, const LzSource *error_source, const LzLoca
     source_text(out, NULL, source->text, offset + removed, where.line_end);
     raw(out, "\n", 1);
 
+    if (fix->quiet && insert_length == 0) {
+        return; /* the line without the removed text says it all */
+    }
     gutter(out, width);
     raw(out, " ", 1);
     spaces(out, columns(source->text, where.line_start, offset));

@@ -1,0 +1,12 @@
+error: 'print' is a builtin, so this import needs another name
+ --> bad_3.lz:1:16
+  |
+1 | import util as print
+  |                ^^^^^ this name is taken by a builtin
+  |
+help: give the import another name
+  |
+1 | import util as utils
+  |                ~~~~~
+
+error: aborting due to 1 previous error

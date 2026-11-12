@@ -1,0 +1,5 @@
+import a
+import b
+error K : a.Nope
+error J : zz.Base
+try { a.find("x") } catch IOError as e { println(1) } catch b.NotFound as e { println(2) }

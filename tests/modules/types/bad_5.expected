@@ -1,0 +1,9 @@
+error: type mismatch: expected int, got string
+ --> bad_5.lz:2:14
+  |
+2 | let z: int = util.first(["a"])
+  |              ^^^^^^^^^^^^^^^^^
+  |
+  = help: convert the value: int(util.first(["a"]))
+
+error: aborting due to 1 previous error

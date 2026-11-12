@@ -78,15 +78,29 @@ static inline bool lz_value_is_error(const LzValue *value) {
 
 struct LzVM;
 struct LzNative;
+struct LzModule;
 
 /*
  * The kinds of one VM, which are the built-in ones and then the declared ones in the order of
- * their declarations. A declared kind has a parent that was known before it, so the chain of
- * parents never loops.
+ * their declarations. The chain of parents never loops: a parent is a kind that was complete
+ * before the child was, even when a module declares it later than the importing file did.
  */
 const char *lz_vm_error_kind_name(const struct LzVM *vm, unsigned kind);
-bool lz_vm_error_kind_from_name(const struct LzVM *vm, const char *name, size_t length,
-                                uint8_t *out);
+/*
+ * The kind a plain name stands for in `scope`, the module being compiled or run (NULL is main):
+ * a kind that module declared, and then a built-in one. The identity of a declared kind is its
+ * module and its name, so two modules can both declare `error NotFound`.
+ */
+bool lz_vm_error_kind_from_name(const struct LzVM *vm, const struct LzModule *scope, const char *name,
+                                size_t length, uint8_t *out);
+/* The module that declared the kind, NULL for main and for the built-in kinds. */
+const struct LzModule *lz_vm_error_kind_scope(const struct LzVM *vm, unsigned kind);
+/* "util.NotFound" for a declared kind of a module, and the plain name for main and built-in kinds. */
+void lz_vm_error_kind_qualified_name(const struct LzVM *vm, unsigned kind, char *out, size_t size);
+/* Gives a declared kind another parent, for `error E : util.Base` once the import is known. */
+void lz_vm_error_kind_set_parent(struct LzVM *vm, unsigned kind, uint8_t parent);
+/* The kinds of a module that was thrown away can't be found by name any more. */
+void lz_vm_error_scope_drop(struct LzVM *vm, const struct LzModule *scope);
 bool lz_vm_error_kind_parent(const struct LzVM *vm, unsigned kind, uint8_t *parent);
 bool lz_vm_error_kind_is(const struct LzVM *vm, unsigned kind, unsigned ancestor);
 size_t lz_vm_error_kind_count(const struct LzVM *vm);
@@ -96,7 +110,8 @@ size_t lz_vm_error_kind_count(const struct LzVM *vm);
  * builtin scope. `name` must be interned. Returns LZ_ERR_RUNTIME with vm->error set when the limit
  * of kinds is reached.
  */
-LzStatus lz_vm_error_declare(struct LzVM *vm, LzString *name, uint8_t parent, uint8_t *out);
+LzStatus lz_vm_error_declare(struct LzVM *vm, const struct LzModule *scope, LzString *name, uint8_t parent,
+                             uint8_t *out);
 
 /* Is this native the function that makes errors of a kind? *kind says which one. */
 bool lz_native_error_kind(const struct LzNative *native, uint8_t *kind);
@@ -123,10 +138,10 @@ void lz_vm_release_error_classes(struct LzVM *vm);
 LzStatus lz_error_type_native(struct LzVM *vm, int argc, const LzValue *argv, LzValue *result);
 
 /*
- * Installs the function that makes errors of `kind` under `name`. The built-in kinds and the
- * declared ones share it. `name` must be interned.
+ * Installs the function that makes errors of `kind` under `name` in the globals of `scope` (NULL is
+ * main), where `import` copies it from like any other export. `name` must be interned.
  */
-LzStatus lz_vm_error_define_constructor(struct LzVM *vm, LzString *name, uint8_t kind);
+LzStatus lz_vm_error_define_constructor(struct LzVM *vm, const struct LzModule *scope, LzString *name, uint8_t kind);
 
 /*
  * `Kind(message, cause: ..., data: ...)`, the call with named arguments. argv are the `positional`

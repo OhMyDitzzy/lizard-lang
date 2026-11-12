@@ -1,0 +1,24 @@
+import b
+import a
+from a import Coded
+
+error Mine : a.NotFound
+error Rich : Coded
+
+try { a.find("x") } catch a.NotFound as e { println("a:", e) }
+try { b.find("y") } catch b.NotFound as e { println("b:", e, e.kind) }
+try { a.find("z") } catch b.NotFound as e { println("wrong") } catch a.NotFound as e { println("a again:", e) }
+
+let ea = a.NotFound("one")
+let eb = b.NotFound("two")
+println(ea is a.NotFound, ea is b.NotFound, eb is b.NotFound, eb is IOError)
+
+fn only_a(e: a.NotFound) => "only_a " + e.message
+println(only_a(ea))
+println(only_a(Mine("child")))
+try { only_a(eb) } catch TypeError as e { println(e.message) }
+
+println(Mine("m") is a.NotFound, Rich("r", code: 4).code)
+try { throw Rich("boom", code: 9) } catch Coded as e { println("coded", e.code) }
+
+try { throw b.NotFound("late") } catch a.NotFound as e { println("wrong") } catch IOError as e { println("io:", e) }

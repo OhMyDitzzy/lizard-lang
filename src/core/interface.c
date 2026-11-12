@@ -46,6 +46,7 @@ struct LzIfaceEntry {
     LzIfaceMember *members;
     size_t member_count;
     size_t member_capacity;
+    uint64_t class_id;
 };
 
 struct LzInterface {
@@ -349,6 +350,14 @@ const char *lz_interface_entry_type(const LzIfaceEntry *entry) {
 
 const LzIfaceSig *lz_interface_entry_sig(const LzIfaceEntry *entry) {
     return entry->sig;
+}
+
+uint64_t lz_interface_entry_class_id(const LzIfaceEntry *entry) {
+    return entry->class_id;
+}
+
+void lz_iface_entry_set_class_id(LzIfaceEntry *entry, uint64_t id) {
+    entry->class_id = id;
 }
 
 const char *lz_interface_entry_parent(const LzIfaceEntry *entry) {

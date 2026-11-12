@@ -1,0 +1,6 @@
+error: Point has no field 'nope'
+ --> bad_9.lz:2:14
+  |
+2 | util.make(1).nope
+  |              ^^^^
+

@@ -1,0 +1,10 @@
+a: NotFound: a has no x
+b: NotFound: b has no y NotFound
+a again: NotFound: a has no z
+true false true true
+only_a one
+only_a child
+type error: argument 'e' of only_a(): expected a.NotFound, got b.NotFound
+true 4
+coded 9
+io: NotFound: late

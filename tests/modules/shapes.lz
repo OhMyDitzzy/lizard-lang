@@ -1,0 +1,17 @@
+# Types of one module used from another.
+pub trait Shape {
+    fn area(self)
+}
+
+pub class Square : Shape {
+    pub side: int
+    pub read id: int = 1
+    note: int = 7
+
+    pub fn area(self) => self.side * self.side
+    pub fn secret_note(self) => self.note
+}
+
+pub error ShapeError
+
+pub fn unit() => Square(1)

@@ -1,0 +1,23 @@
+pub class Point {
+    pub x: int
+}
+pub trait Shape {
+    fn area(self)
+}
+pub class Sq : Shape {
+    pub s: int
+    pub fn area(self) => self.s * self.s
+}
+pub error Oops
+pub type Pts = Point[]
+pub fn make(n: int) -> Point { return Point(n) }
+pub fn area(s: Shape) -> int { return s.area() }
+pub fn total(xs: Point[]) -> int {
+    let t = 0
+    for p in xs { t = t + p.x }
+    return t
+}
+pub fn first<T>(xs: T[]) -> T { return xs[0] }
+pub fn apply<T, U>(x: T, f: fn(T) -> U) -> U { return f(x) }
+pub fn count(p: Pts) -> int { return len(p) }
+pub fn mk() -> Oops { return Oops("m") }

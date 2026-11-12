@@ -1,0 +1,7 @@
+error: type mismatch: argument 'f' of util.apply() expects fn(T) -> U, got 5
+ --> bad_8.lz:2:15
+  |
+2 | util.apply(1, 5)
+  |               ^
+
+error: aborting due to 1 previous error

@@ -1,0 +1,20 @@
+import shapes
+trait Sq {
+    fn area(self)
+}
+class Base : Sq {
+    pub s: int
+    pub fn area(self) => self.s * self.s
+}
+class Big : Base {
+    pub fn extra(self) => 1
+}
+fn total(x: Sq) => x.area()
+let b: Base = Big(2)
+println(total(b))
+let c: Sq = Big(3)
+println(total(c), total(Big(4)), total(Base(1)))
+let q: shapes.Sq = shapes.Sq(5)
+println(shapes.area(q))
+let m: shapes.Shape = q
+println(shapes.area(m))

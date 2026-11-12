@@ -59,26 +59,12 @@ static void destroy(void *context) {
     ((Env *)context)->destroyed++;
 }
 
-/* import("name") from code: loads the module for the code that asks. */
-static LzStatus native_import(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
-    (void)argc;
-    const LzString *name = (const LzString *)argv[0].as.object;
-    LzModule *module = NULL;
-    LzStatus status = lz_module_load(vm, lz_vm_scope(vm), name->data, &module);
-    *result = lz_value_nil();
-    return status;
-}
-
 static void setup(Env *env, Src *sources, size_t count, bool with_resolver) {
     memset(env, 0, sizeof *env);
     lz_vm_init(&env->vm, lz_writer_from_buffer(&env->out), lz_writer_from_buffer(&env->err));
     LZ_CHECK(lz_builtin_install(&env->vm) == LZ_OK);
     env->sources = sources;
     env->source_count = count;
-    LzString *name = lz_vm_intern(&env->vm, "import", 6);
-    LzNative *native = lz_native_new(&env->vm.heap, name, native_import, 1, 1);
-    LZ_CHECK(native != NULL && lz_vm_define_builtin(&env->vm, name, lz_value_object(&native->base)));
-    lz_object_release(&env->vm.heap, &native->base);
     if (with_resolver) {
         LzModuleResolver resolver = {env, resolve, destroy};
         lz_vm_set_resolver(&env->vm, &resolver);
@@ -186,12 +172,14 @@ static void test_loaded_once(void) {
 }
 
 static void test_circular(void) {
-    Src sources[] = {{"a", "import(\"b\")\n"}, {"b", "import(\"a\")\n"}};
+    Src sources[] = {{"a", "import b\n"}, {"b", "import a\n"}};
     Env env;
     setup(&env, sources, 2, true);
     LzModule *module = NULL;
     LZ_CHECK(lz_module_load(&env.vm, NULL, "a", &module) != LZ_OK);
-    LZ_CHECK(strstr(env.vm.error, "circular import: a.lz -> b.lz -> a.lz") != NULL);
+    LZ_CHECK(strstr(env.vm.error, "circular import of 'a'") != NULL);
+    LZ_CHECK(lz_vm_module_failure(&env.vm) != NULL);
+    LZ_CHECK(strstr(lz_vm_module_failure(&env.vm)->next->diagnostics.items[0].extras.note, "a.lz -> b.lz -> a.lz") != NULL);
     LZ_CHECK(env.vm.module_count == 1); /* nothing half loaded stays in the list */
     LZ_CHECK(lz_module_load(&env.vm, NULL, "a", &module) != LZ_OK); /* not cached, tried again */
     LZ_CHECK(env.resolves >= 4);
@@ -200,7 +188,7 @@ static void test_circular(void) {
 
 static void test_nested_load_and_trace(void) {
     Src sources[] = {{"a", "let v = 1\nfn boom(n) {\n    return n / 0\n}\n"},
-                     {"b", "import(\"a\")\nlet z = 0\nlet y = 1 / z\n"}};
+                     {"b", "import a\nlet z = 0\nlet y = 1 / z\n"}};
     Env env;
     setup(&env, sources, 2, true);
     LzModule *a = load(&env, "a");

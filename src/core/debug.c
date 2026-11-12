@@ -166,6 +166,10 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
         size_t next = constant_instruction(chunk, offset, out);
         return next + 1; /* the mode byte */
     }
+    case LZ_OP_IMPORT: {
+        size_t next = constant_instruction(chunk, offset, out);
+        return next + 5; /* the bound name, the name in the module and the mode */
+    }
     case LZ_OP_CLASS_LINK:
     case LZ_OP_EXTEND:
     case LZ_OP_ERROR_CLASS: {

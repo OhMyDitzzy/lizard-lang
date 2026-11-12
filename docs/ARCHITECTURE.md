@@ -522,6 +522,20 @@ next to `constants`. An `extend` block remembers the module that ran its stateme
 and the failing offset carry their own source (`LzTraceEntry.source`, `vm->error_source`), so a
 report can name files from several modules. The chapter [MODULES.md](MODULES.md) has the rest.
 
+### Import
+
+`import` is compiled while the importing file is compiled. The compiler asks `lz_module_prepare` for the
+module, which compiles it (and its imports, recursively) but does not run it, and keeps the result in
+state `COMPILED`. A cycle shows up here as a module that is still being compiled. Names are then
+checked against the module's `LzInterface`, and `util.f` becomes a plain `GET_GLOBAL "util.f"`.
+
+At the place of the import the compiler emits `OP_IMPORT` (module id, bound name, name in the module,
+mode). When it runs, it runs the module once through `vm->module_run`, then copies the module's `pub`
+values into the importing module's globals, as `util.f` for `import util` or as `f` for
+`from util import f`. A copy is enough because an export cannot change. The engines do not know the
+opcode: the graph engine and the JIT hand it to `lz_vm_exec_one` like any instruction they do not
+translate.
+
 ## Not decided yet
 
 `for` (so `range` is only useful with `while` for now), `break`/`continue`, maps and other collections, indexing and slicing strings, narrowing, the error model, and classes. Removing entries from `LzTable`.

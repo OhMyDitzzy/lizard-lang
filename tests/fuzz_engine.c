@@ -45,6 +45,7 @@ typedef struct Gen {
     int objs;          /* b0..b{objs-1}: arrays holding strings and arrays, to exercise reference counting */
     bool dict;         /* d0: a dict of string keys to scalars, holding no array: walking it is safe */
     int serial;        /* unique suffix for loop counters and temporaries */
+    bool imports;      /* the program imports the in-memory module */
     bool safe;         /* keep values small and divisors non-zero, so programs run deep before failing */
 } Gen;
 
@@ -406,6 +407,11 @@ static void gen_program(Gen *g, bool locals, bool safe) {
     g->arrays = (int)below(3);
     g->objs = below(3) == 0 ? 0 : 1 + (int)below(2);
     g->dict = safe && below(2) == 0;
+    bool imports = below(4) == 0; /* LZ_OP_IMPORT, from the in-memory module of run_source */
+    g->imports = imports;
+    if (imports) {
+        emit(g, "import fz_util\n");
+    }
     if (locals) {
         emit(g, "{\n");
     }
@@ -443,6 +449,10 @@ static void gen_program(Gen *g, bool locals, bool safe) {
         emit(g, "let d0 = {\"a\": 1, \"b\": 2}\n");
     }
     gen_body(g, 0, 4 + below(8));
+    if (imports) {
+        emit(g, "println(fz_util.mix(%u, %u), fz_util.Box(%u).get(), fz_util.twice(fz_util.Box(%u)))\n", below(100),
+             below(100), below(100), below(100));
+    }
     emit(g, "println(");
     for (int i = 0; i < vars; i++) {
         emit(g, i == 0 ? "v%d" : ", v%d", i);
@@ -470,6 +480,7 @@ static void fuzz_programs(unsigned count, uint64_t seed) {
     unsigned compiled = 0;
     unsigned failed_run = 0;
     unsigned deep = 0; /* programs that executed at least 200 instructions */
+    unsigned imported = 0; /* programs that ran with an import in them */
     uint64_t instructions = 0;
     uint64_t dispatches = 0;
     Gen *g = malloc(sizeof *g);
@@ -491,6 +502,9 @@ static void fuzz_programs(unsigned count, uint64_t seed) {
         }
         if (ref.compile_status == LZ_OK) {
             compiled++;
+            if (g->imports) {
+                imported++;
+            }
             if (ref.run_status != LZ_OK) {
                 failed_run++;
             }
@@ -517,6 +531,8 @@ static void fuzz_programs(unsigned count, uint64_t seed) {
             "%llu instructions in %llu GE dispatches\n",
             count, compiled, failed_run, deep, (unsigned long long)instructions, (unsigned long long)dispatches);
     LZ_CHECK(compiled * 10 >= count * 8); /* the generator must keep producing valid programs */
+    LZ_CHECK(imported > 0);                /* and some of them reach LZ_OP_IMPORT */
+    printf("fuzz_engine: %u programs imported a module\n", imported);
 }
 
 /* ---------------------------------------------------------------- bytecode */

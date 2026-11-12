@@ -187,8 +187,8 @@ static void test_hoisting(void) {
     run(&program, "error X : IOError\nerror Y : X\n", 0);
     LZ_CHECK(program.compile_status == LZ_OK);
     uint8_t x, y;
-    LZ_CHECK(lz_vm_error_kind_from_name(&program.vm, "X", 1, &x));
-    LZ_CHECK(lz_vm_error_kind_from_name(&program.vm, "Y", 1, &y));
+    LZ_CHECK(lz_vm_error_kind_from_name(&program.vm, NULL, "X", 1, &x));
+    LZ_CHECK(lz_vm_error_kind_from_name(&program.vm, NULL, "Y", 1, &y));
     LZ_CHECK(lz_vm_error_kind_is(&program.vm, y, x));
     LZ_CHECK(lz_vm_error_kind_is(&program.vm, y, LZ_ERROR_IO));
     LZ_CHECK(lz_vm_error_kind_is(&program.vm, y, LZ_ERROR_ERROR));

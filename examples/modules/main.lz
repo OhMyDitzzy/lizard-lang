@@ -1,0 +1,11 @@
+import util
+import tools.format as fmt
+from util import add as plus, LIMIT
+
+println("main starts")
+println(util.add(1, 2))
+println(plus(5, 6) + LIMIT)
+println(fmt.label("sum", fmt.total(3, 4)))
+
+let p = util.Point(3, 4)
+println(p.norm())

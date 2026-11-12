@@ -1,0 +1,7 @@
+error: type mismatch: argument 's' of util.area() expects Shape, got Point
+ --> bad_3.lz:2:11
+  |
+2 | util.area(util.make(1))
+  |           ^^^^^^^^^^^^
+
+error: aborting due to 1 previous error

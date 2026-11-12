@@ -180,6 +180,10 @@ A class name works wherever a type does: `fn f(p: Point)`, `let q: Point`, `pub 
 named too, by the binding of the name when the annotation is compiled; a name bound to something
 that is not a class is `'Foo' is not a type`.
 
+A class of another module is named through the import: `util.Point` after `import util`, or `Point`
+after `from util import Point`. The same goes for traits and error types, in annotations, `is`,
+class heads and `catch`. See [MODULES.md](MODULES.md).
+
 A type names a class by its **identity** (`LzClass.id`, a number that is never reused), not by its
 name. If a class is defined again in a later source, objects of the old class do not match the new
 `A` and the message says so: `expected A, got A (made by an earlier definition of that class)`.
@@ -362,8 +366,9 @@ is not supported yet`).
   `vm->exts` when its statement runs; it is not hoisted. Two blocks cannot add the same name.
 * **Modules.** A block is private to the module that writes it and is seen only by code written
   in that module, whoever calls that code. `pub extend` is an error
-  (`'pub' cannot be used on 'extend'`). Two modules may add the same name to one type. See
-  [MODULES.md](MODULES.md).
+  (`'pub' cannot be used on 'extend'`). Two modules may add the same name to one type. The target
+  may be a class of another module, `extend util.Point { ... }`: the new methods exist only in the
+  file that wrote the block, and `util` itself never sees them. See [MODULES.md](MODULES.md).
 * **Privacy.** `pub` members are visible everywhere; others only inside the same block. The code in
   a block is not "inside the class": it sees only the public members of `self`
   (`'x' is private to Point`, help: `an extension can only use the public members of Point`).

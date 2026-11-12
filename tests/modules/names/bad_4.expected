@@ -1,0 +1,12 @@
+error: 'int' is a builtin, so this import needs another name
+ --> bad_4.lz:1:16
+  |
+1 | import util as int
+  |                ^^^ this name is taken by a builtin
+  |
+help: give the import another name
+  |
+1 | import util as utils
+  |                ~~~~~
+
+error: aborting due to 1 previous error

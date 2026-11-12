@@ -1,0 +1,2 @@
+import util
+util.total([1])

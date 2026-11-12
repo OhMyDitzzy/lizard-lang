@@ -1,0 +1,15 @@
+# A module: its top-level code runs once, the first time it is imported.
+println("util loaded")
+
+pub const LIMIT = 10
+
+pub fn add(a: int, b: int) -> int => a + b
+
+pub class Point {
+    pub x: int
+    pub y: int = 0
+
+    pub fn norm(self) => self.x + self.y
+}
+
+fn hidden() => "not exported"

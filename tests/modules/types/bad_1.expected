@@ -1,0 +1,9 @@
+error: type mismatch: argument 'n' of util.make() expects int, got "a"
+ --> bad_1.lz:2:11
+  |
+2 | util.make("a")
+  |           ^^^
+  |
+  = help: convert the value: int("a")
+
+error: aborting due to 1 previous error

@@ -1,0 +1,7 @@
+error: type mismatch: argument 'x' of f() expects Big, got Base
+ --> bad_3.lz:5:3
+  |
+5 | f(b)
+  |   ^
+
+error: aborting due to 1 previous error

@@ -9,7 +9,14 @@
 /* One import chain can't be longer than this, and a VM can't hold more modules than this. */
 #define LZ_MODULES_MAX 1024
 
-typedef enum { LZ_MODULE_LOADING, LZ_MODULE_READY } LzModuleState;
+/* Compiling a module compiles its imports inside it, so a chain of imports is as deep as the C stack allows. */
+#define LZ_IMPORT_DEPTH_MAX 128
+
+/*
+ * LOADING: being compiled, or main while the program runs. COMPILED: compiled, its code has not run.
+ * RUNNING: its top-level code is running. READY: it has run.
+ */
+typedef enum { LZ_MODULE_LOADING, LZ_MODULE_COMPILED, LZ_MODULE_RUNNING, LZ_MODULE_READY } LzModuleState;
 
 /*
  * A module is one source with a global table of its own. The program the host runs is the module
@@ -68,6 +75,24 @@ const LzModule *lz_vm_scope(const LzVM *vm);
 
 /* A global of the running module, then a builtin. NULL when undefined. */
 const LzValue *lz_vm_scope_lookup(const LzVM *vm, const LzString *name);
+
+/*
+ * Finds and compiles a module without running it, and so compiles the modules it imports. The module
+ * is then COMPILED, and one that is already COMPILED or READY is returned as it is. An import that
+ * leads back to a module still being compiled is a cycle and fails with "circular import: a.lz ->
+ * b.lz -> a.lz". A module that fails to compile is not kept, and its report is added to
+ * lz_vm_module_failure.
+ */
+LzStatus lz_module_prepare(LzVM *vm, const LzModule *importer, const char *name, LzModule **out);
+
+/* Like lz_module_prepare, but the host gives the text. The VM takes the memory in source. */
+LzStatus lz_module_prepare_source(LzVM *vm, LzModuleSource *source, LzModule **out);
+
+/*
+ * Runs the top-level code of a COMPILED module, once. A READY module is left alone. When the code
+ * fails, the module is dropped from the list and the next import compiles it again.
+ */
+LzStatus lz_module_run(LzVM *vm, LzModule *module);
 
 /*
  * Finds, compiles and runs a module once. importer may be NULL (the host loads a root module).

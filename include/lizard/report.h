@@ -33,6 +33,7 @@ typedef struct LzFix {
     const char *insert_text;   /* text inserted at offset, and it may be "" */
     bool insert_line;          /* the text is a whole new line placed before the line of `offset` */
     const char *insert_indent; /* indentation of that new line, or NULL for the same as the line of offset */
+    bool quiet;                /* a plain deletion shows the corrected line and no marker under it */
 } LzFix;
 
 /*

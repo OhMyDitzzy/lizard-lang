@@ -1,0 +1,2 @@
+import util
+let z: int = util.first(["a"])

@@ -612,7 +612,7 @@ LzAssign lz_type_assignable(const LzType *from, const LzType *to) {
             always = false; /* some object, maybe of that class */
             overlap = true;
         } else {
-            always = false; /* stage 2 would need a subclass of to->class_name to overlap here */
+            always = false; /* the compiler knows the hierarchy and decides before this says never */
         }
     }
 

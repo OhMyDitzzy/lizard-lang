@@ -208,6 +208,9 @@ typedef struct ErrorDecl {
     bool has_parent;
     uint32_t parent_offset;
     uint32_t parent_length;
+    bool parent_qualified;     /* `error E : util.Base`: the parent is a member of an imported module */
+    uint32_t parent_ns_offset; /* and the module's name is here, the member above */
+    uint32_t parent_ns_length;
     ErrorProblem problem;
     bool is_pub;          /* declared `pub error` */
     uint32_t decl_offset; /* the `error` keyword, where a `pub ` would go */
@@ -227,6 +230,21 @@ typedef struct TypeRef {
 
 #define LZ_MAX_TYPE_REFS 16
 
+#define LZ_MAX_IMPORTS 256
+#define LZ_MAX_FILE_CLASSES 256 /* classes and traits one file can declare */
+
+/* A name that an `import` or a `from ... import` binds in this file. */
+typedef struct ImportBinding {
+    char bound[48];     /* the name the file uses: the namespace, or a name taken with `from` */
+    char module[256];   /* the module's dotted name, as written */
+    uint32_t offset;    /* where the bound name is in the source */
+    uint32_t length;
+    bool is_namespace;  /* `import util` binds a namespace, `from util import a` binds a value */
+    LzModule *loaded;   /* the module, compiled and kept by the VM */
+    char original[48];  /* for `from`: the name in the module, which `as` may have changed here */
+    const LzIfaceEntry *entry; /* for `from`: what the module exports under that name */
+} ImportBinding;
+
 typedef struct Parser {
     LzVM *vm;
     const LzModule *module; /* the module being compiled, or NULL for main */
@@ -240,6 +258,7 @@ typedef struct Parser {
     LzDiagExtras pending; /* label/note/help/fix for the next error that is recorded */
     bool panic;
     LzStatus fatal;
+    bool silent_failure; /* the file fails without a message of its own: a cycle was said in another module */
     Symbol symbols[LZ_MAX_SYMBOLS];
     size_t symbol_count;
     size_t local_count;
@@ -273,6 +292,9 @@ typedef struct Parser {
     size_t journal_capacity;
     bool in_default;          /* compiling a field default or a constant initialiser */
     size_t class_parent_count; /* parents named in the head of the class being compiled */
+    bool import_limit_told;   /* the file already heard that it has too many imported names */
+    bool iface_mode;          /* reading a type written in another module's interface */
+    size_t iface_alias_base;  /* the aliases from here up are that module's names and type parameters */
     bool is_rhs;              /* parsing the type after `is`: an unknown name is "not a type" */
     bool in_trait;            /* the body being compiled is a trait's */
     bool in_extend;           /* the body being compiled is an `extend` block's */
@@ -280,8 +302,8 @@ typedef struct Parser {
     uint16_t extend_kinds;    /* and the builtin kinds it extends, where 0 means a class */
     uint16_t error_self_kind; /* the body being compiled is of an error class: its kind + 1, else 0 */
     bool last_bodiless;       /* the member function just compiled had no body, which is a trait's requirement */
-    LzString *classes[64];    /* the classes declared so far: valid names in a type */
-    uint64_t class_ids[64];   /* their identities (LzClass.id), parallel to classes */
+    LzString *classes[LZ_MAX_FILE_CLASSES];    /* the classes declared so far: valid names in a type */
+    uint64_t class_ids[LZ_MAX_FILE_CLASSES];   /* their identities (LzClass.id), parallel to classes */
     uint64_t current_class_id; /* identity of the class whose body is being compiled, or 0 */
     size_t class_count;
     /* `pub` and the interface. */
@@ -291,16 +313,25 @@ typedef struct Parser {
     bool track_refs;          /* note the user types named in a type while it is parsed */
     TypeRef refs[LZ_MAX_TYPE_REFS];
     size_t ref_count;
-    bool class_pub[64];       /* by index in `classes` */
-    bool class_trait[64];
-    bool class_told[64];
-    uint32_t class_decl[64];  /* the `class` or `trait` keyword */
-    LzIfaceSig *class_ctor[64]; /* the arguments of the constructor, owned by the parser */
+    bool class_pub[LZ_MAX_FILE_CLASSES];       /* by index in `classes` */
+    uint64_t class_super[LZ_MAX_FILE_CLASSES][8]; /* the ids of the parents and traits in the head */
+    uint8_t class_super_count[LZ_MAX_FILE_CLASSES];
+    bool class_super_open[LZ_MAX_FILE_CLASSES]; /* a parent whose class is not known here */
+    bool class_trait[LZ_MAX_FILE_CLASSES];
+    bool class_told[LZ_MAX_FILE_CLASSES];
+    uint32_t class_decl[LZ_MAX_FILE_CLASSES];  /* the `class` or `trait` keyword */
+    LzIfaceSig *class_ctor[LZ_MAX_FILE_CLASSES]; /* the arguments of the constructor, owned by the parser */
     LzIfaceEntry *class_entry; /* the entry of the `pub` class, trait or error being compiled, or NULL */
     bool class_has_init;      /* the class being compiled writes an `init(self)` */
     LzType thunk_type;        /* the type of the expression compile_thunk just compiled */
     LzIfaceSig *error_own;    /* the constructor arguments of the error class just compiled, own fields only */
+    /* `import`. */
+    ImportBinding imports[LZ_MAX_IMPORTS];
+    size_t import_count;
+    bool body_started;        /* a statement other than an import has been read, so imports are too late */
 } Parser;
+
+static LzAssign type_assignable(const Parser *parser, const LzType *from, const LzType *to);
 
 /*
  * A `while` being compiled, so that `break` and `continue` in its body know where to jump and
@@ -529,6 +560,7 @@ static void diag_fix(Parser *parser, const char *headline, uint32_t offset, uint
     LzDiagExtras *extras = &parser->pending;
     extras->has_fix = true;
     extras->fix_insert_line = false;
+    extras->fix_quiet = false;
     extras->fix_offset = offset;
     extras->fix_delete = delete_length;
     (void)snprintf(extras->fix_headline, sizeof extras->fix_headline, "%s", headline);
@@ -1237,16 +1269,44 @@ static LzToken span_from(const Parser *parser, const LzToken *start) {
     return span;
 }
 
+/*
+ * The two types of a message. When both are the same single class name but not the same class
+ * (`Point` of two modules), they are written with their module so the message can be told apart.
+ */
+static void describe_type_pair(const Parser *parser, const LzType *a, const LzType *b, char *first, size_t first_size,
+                               char *second, size_t second_size) {
+    describe_type(a, first, first_size);
+    describe_type(b, second, second_size);
+    if (strcmp(first, second) == 0 && (a->kinds & LZ_KIND_ERROR) != 0 && (b->kinds & LZ_KIND_ERROR) != 0 &&
+        a->class_id != b->class_id && a->class_id != 0 && b->class_id != 0) {
+        /* The same name for two kinds, which are told apart by their modules. */
+        lz_vm_error_kind_qualified_name(parser->vm, (unsigned)(a->class_id - 1), first, first_size);
+        lz_vm_error_kind_qualified_name(parser->vm, (unsigned)(b->class_id - 1), second, second_size);
+        return;
+    }
+    if (strcmp(first, second) != 0 || (a->kinds & LZ_KIND_INSTANCE) == 0 || (b->kinds & LZ_KIND_INSTANCE) == 0 ||
+        a->class_id == b->class_id || a->class_id == 0 || b->class_id == 0) {
+        return;
+    }
+    const LzClass *left = lz_class_by_id(parser->vm, a->class_id);
+    const LzClass *right = lz_class_by_id(parser->vm, b->class_id);
+    if (left != NULL && right != NULL) {
+        lz_class_qualified_name(left, first, first_size);
+        lz_class_qualified_name(right, second, second_size);
+    }
+}
+
 /* "<prefix><a><middle><b>", with b and its middle part left out when b is NULL. */
 static void error_types(Parser *parser, const LzToken *at, const char *prefix, const LzType *a,
                         const char *middle, const LzType *b) {
     char first[96];
     char second[96];
     char message[256];
-    describe_type(a, first, sizeof first);
     second[0] = '\0';
     if (b != NULL) {
-        describe_type(b, second, sizeof second);
+        describe_type_pair(parser, a, b, first, sizeof first, second, sizeof second);
+    } else {
+        describe_type(a, first, sizeof first);
     }
     (void)snprintf(message, sizeof message, "%s%s%s%s", prefix, first, middle, second);
     error_at(parser, at, message);
@@ -1322,7 +1382,7 @@ static void emit_type_check(Parser *parser, const LzType *to, uint32_t offset) {
  * stack must be the value being tested. */
 static void emit_check_if_needed(Parser *parser, const LzType *from, const LzType *to,
                                  uint32_t offset) {
-    if (lz_type_assignable(from, to) != LZ_ASSIGN_NEVER && check_is_runtime(from, to)) {
+    if (type_assignable(parser, from, to) != LZ_ASSIGN_NEVER && check_is_runtime(from, to)) {
         emit_type_check(parser, to, offset);
     }
 }
@@ -1331,7 +1391,7 @@ static void fn_mismatch_help(Parser *parser, const LzType *expected, const LzTyp
 
 static void check_flow(Parser *parser, const LzType *from, const LzType *to, const LzToken *start,
                        uint32_t offset, LzOpCode check_op, const char *mismatch) {
-    if (lz_type_assignable(from, to) == LZ_ASSIGN_NEVER) {
+    if (type_assignable(parser, from, to) == LZ_ASSIGN_NEVER) {
         LzToken span = span_from(parser, start);
         convert_help(parser, from, to, &span, strncmp(mismatch, "return", 6) == 0);
         fn_mismatch_help(parser, to, from);
@@ -1363,7 +1423,7 @@ static void check_assignment(Parser *parser, const LzType *from, const LzType *t
 /* The compile-time half of a check, for a place that has no value on the stack to test. */
 static void check_static(Parser *parser, const LzType *from, const LzType *to,
                          const LzToken *start) {
-    if (lz_type_assignable(from, to) == LZ_ASSIGN_NEVER) {
+    if (type_assignable(parser, from, to) == LZ_ASSIGN_NEVER) {
         LzToken span = span_from(parser, start);
         convert_help(parser, from, to, &span, false);
         error_types(parser, &span, "type mismatch: expected ", to, ", got ", from);
@@ -1690,6 +1750,18 @@ static LzType literal_type(const LzLiteral *literal) {
 }
 
 static bool parse_type_union(Parser *parser, LzType *out);
+static bool source_word_is(const LzSource *source, const LzToken *token, const char *word);
+static bool imported_type(Parser *parser, const LzToken *token, LzType *out, bool *handled);
+static const LzIfaceEntry *iface_find(const LzModule *module, const char *name);
+static bool imported_head(Parser *parser, const LzToken *first, const LzIfaceEntry **entry, LzString **name,
+                          bool allow_error);
+static bool error_kind_of_token(Parser *parser, const LzToken *token, uint8_t *kind);
+static bool error_kind_of_member(Parser *parser, const LzToken *ns, const LzToken *member, uint8_t *kind);
+static void note_imported_error_class(Parser *parser, const LzIfaceEntry *entry);
+static const LzIfaceEntry *from_import_entry(const Parser *parser, const char *bound);
+static const ImportBinding *find_import_binding(const Parser *parser, const char *name, size_t length);
+static const LzIfaceEntry *iface_find(const LzModule *module, const char *name);
+static void import_missing_name(Parser *parser, const LzToken *member, const char *bound, const LzModule *module);
 
 /* While a `pub` signature is parsed, every user type it names is noted, see check_pub_refs. */
 static void note_type_ref(Parser *parser, const LzToken *token, TypeRefKind kind, size_t index) {
@@ -1715,6 +1787,23 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
         if (builtin_type(name, out)) {
             return true;
         }
+        if (parser->iface_mode) {
+            /* A name in another module's interface: its own names and type parameters, else any. */
+            LzString *written = intern_token(parser, &token);
+            *out = lz_type_of_kinds(LZ_KINDS_ANY);
+            for (size_t i = parser->alias_count; written != NULL && i > parser->iface_alias_base; i--) {
+                if (parser->aliases[i - 1].name == written) {
+                    *out = parser->aliases[i - 1].type;
+                    break;
+                }
+            }
+            return written != NULL;
+        }
+        bool handled = false;
+        bool imported_ok = imported_type(parser, &token, out, &handled);
+        if (handled) {
+            return imported_ok;
+        }
         LzString *id = intern_token(parser, &token);
         if (id == NULL) {
             return false;
@@ -1739,8 +1828,7 @@ static bool parse_type_primary(Parser *parser, LzType *out) {
                 return true;
             }
             uint8_t error_kind;
-            if (lz_vm_error_kind_from_name(parser->vm, parser->source->text + token.offset, token.length,
-                                           &error_kind)) {
+            if (error_kind_of_token(parser, &token, &error_kind)) {
                 note_type_ref(parser, &token, REF_ERROR, 0);
                 *out = lz_type_of_kinds(LZ_KIND_ERROR); /* Error, ValueError, an error of the script... */
                 out->class_id = (uint64_t)error_kind + 1;
@@ -2266,12 +2354,22 @@ static bool head_name_is_trait(const Parser *parser, const LzString *name, bool 
     return false;
 }
 
+/* The same for a head name that an import supplies: the interface knows what it is. */
+static bool head_is_trait_at(const Parser *parser, const LzString *name, const LzIfaceEntry *entry, bool *known) {
+    if (entry != NULL) {
+        *known = true;
+        return lz_interface_entry_kind(entry) == LZ_IFACE_TRAIT;
+    }
+    return head_name_is_trait(parser, name, known);
+}
+
 /*
  * The constructor of a class: the parent's arguments, then its own. Kept for every class, `pub` or
  * not, because a pub child of a private parent still takes the parent's fields. NULL when out of
  * memory.
  */
-static LzIfaceSig *build_constructor(Parser *parser, const LzClass *cls, const LzString *parent) {
+static LzIfaceSig *build_constructor(Parser *parser, const LzClass *cls, const LzString *parent,
+                                     const LzIfaceEntry *parent_entry) {
     LzIfaceSig *sig = lz_iface_sig_new();
     if (sig == NULL) {
         return NULL;
@@ -2280,7 +2378,13 @@ static LzIfaceSig *build_constructor(Parser *parser, const LzClass *cls, const L
     if (parent != NULL && ok) {
         size_t index = find_class_index(parser, parent);
         const LzValue *bound = lz_table_get(parser->globals, parent);
-        if (index != SIZE_MAX) {
+        if (parent_entry != NULL) {
+            const LzIfaceMember *init = lz_interface_entry_member_count(parent_entry) > 0
+                                            ? lz_interface_entry_member(parent_entry, 0) : NULL;
+            if (init != NULL && lz_interface_member_kind(init) == LZ_IFACE_MEMBER_INIT) {
+                ok = add_sig_params(sig, lz_interface_member_sig(init));
+            }
+        } else if (index != SIZE_MAX) {
             ok = parser->class_ctor[index] == NULL || add_sig_params(sig, parser->class_ctor[index]);
         } else if (bound != NULL && lz_value_is_class(bound)) {
             ok = add_class_params(sig, lz_value_as_class(bound));
@@ -3091,6 +3195,8 @@ static const Facts *negate_facts(Parser *parser, const Facts *facts) {
     return out;
 }
 
+static bool import_name_expr(Parser *parser, const LzToken *token, LzString *name, Expr *out);
+
 static Expr variable_at(Parser *parser, const LzToken *token) {
     LzString *name = intern_token(parser, token);
     if (name == NULL) {
@@ -3139,6 +3245,11 @@ static Expr variable_at(Parser *parser, const LzToken *token) {
             }
         }
         return found;
+    }
+
+    Expr imported;
+    if (import_name_expr(parser, token, name, &imported)) {
+        return imported;
     }
 
     if (name->length == 4 && memcmp(name->data, "self", 4) == 0) {
@@ -3733,7 +3844,7 @@ static Expr subscript(Parser *parser, Expr left) {
         if (!key_kind_ok(&first.type)) {
             error_key(parser, &bracket, &first.type);
         } else if ((left.type.kinds & LZ_KIND_DICT) != 0 && left.type.element != NULL &&
-                   lz_type_assignable(&first.type, left.type.element) == LZ_ASSIGN_NEVER) {
+                   type_assignable(parser, &first.type, left.type.element) == LZ_ASSIGN_NEVER) {
             error_types(parser, &bracket, "a dict key of type ", left.type.element,
                         " cannot hold ", &first.type);
         }
@@ -4186,9 +4297,9 @@ static void unify(Parser *parser, Infer *infer, const LzType *param, const LzTyp
         if (!infer->has[k]) {
             infer->bound[k] = seen;
             infer->has[k] = true;
-        } else if (lz_type_assignable(&seen, &infer->bound[k]) == LZ_ASSIGN_ALWAYS) {
+        } else if (type_assignable(parser, &seen, &infer->bound[k]) == LZ_ASSIGN_ALWAYS) {
             /* fits what it already is */
-        } else if (lz_type_assignable(&infer->bound[k], &seen) == LZ_ASSIGN_ALWAYS) {
+        } else if (type_assignable(parser, &infer->bound[k], &seen) == LZ_ASSIGN_ALWAYS) {
             infer->bound[k] = seen; /* int, then number: T is number */
         } else if (!conflict->found) {
             conflict->found = true;
@@ -4275,7 +4386,7 @@ static void fn_mismatch_help(Parser *parser, const LzType *expected, const LzTyp
     for (size_t i = 0; i < want->param_count && i < have->param_count; i++) {
         LzType given = want->params[i] != NULL ? *want->params[i] : lz_type_of_kinds(LZ_KINDS_ANY);
         LzType taken = have->params[i] != NULL ? *have->params[i] : lz_type_of_kinds(LZ_KINDS_ANY);
-        if (lz_type_assignable(&given, &taken) == LZ_ASSIGN_NEVER) {
+        if (type_assignable(parser, &given, &taken) == LZ_ASSIGN_NEVER) {
             char a[96];
             char b[96];
             describe_type(&given, a, sizeof a);
@@ -4318,7 +4429,7 @@ static void check_argument(Parser *parser, const FuncSig *sig, size_t index, con
         substituted = subst_tparams(parser, expected, infer, 0); /* T is what the earlier arguments made it */
         expected = &substituted;
     }
-    if (lz_type_assignable(&arg->type, expected) == LZ_ASSIGN_NEVER) {
+    if (type_assignable(parser, &arg->type, expected) == LZ_ASSIGN_NEVER) {
         LzToken span = span_from(parser, start);
         char prefix[128];
         (void)snprintf(prefix, sizeof prefix, "type mismatch: argument '%s' of %s() expects ", name,
@@ -4386,7 +4497,7 @@ static void check_fn_argument(Parser *parser, const Expr *callee, size_t index, 
         return; /* too many arguments: the arity check tells */
     }
     LzType expected = wanted != NULL ? *wanted : lz_type_of_kinds(LZ_KINDS_ANY);
-    if (lz_type_assignable(&arg->type, &expected) == LZ_ASSIGN_NEVER) {
+    if (type_assignable(parser, &arg->type, &expected) == LZ_ASSIGN_NEVER) {
         LzToken span = span_from(parser, start);
         char shape[160];
         char prefix[96];
@@ -4419,7 +4530,15 @@ static void check_fn_arity(Parser *parser, const Expr *callee, size_t given, con
 
 static Expr call_result(Parser *parser, Expr callee, const Infer *infer) {
     if (callee.native != NULL) {
-        return expr_of(lz_type_of_kinds(callee.native->result_kinds));
+        Expr made = expr_of(lz_type_of_kinds(callee.native->result_kinds));
+        uint8_t made_kind;
+        if (lz_native_error_kind(callee.native, &made_kind)) {
+            /* The call makes an error of one known kind, and the type says which. */
+            const char *kind_name = lz_vm_error_kind_name(parser->vm, made_kind);
+            made.type.class_id = (uint64_t)made_kind + 1;
+            made.type.class_name = lz_vm_intern(parser->vm, kind_name, strlen(kind_name));
+        }
+        return made;
     }
     if (callee.sig != NULL) {
         if (callee.sig->tparam_count > 0) {
@@ -5551,7 +5670,7 @@ static void for_initializer(Parser *parser) {
     } else {
         emit_op_at(parser, LZ_OP_NIL, name_token.offset);
         initializer = expr_of(lz_type_of_kinds(LZ_KIND_NIL));
-        if (annotated && lz_type_assignable(&initializer.type, &declared) == LZ_ASSIGN_NEVER) {
+        if (annotated && type_assignable(parser, &initializer.type, &declared) == LZ_ASSIGN_NEVER) {
             error_types(parser, &name_token, "variable of type ", &declared,
                         " needs an initial value", NULL);
         }
@@ -6414,11 +6533,60 @@ static bool catch_header(Parser *parser, CatchHeader *header) {
     LzLexer ahead = parser->lexer;
     LzToken after = lz_lexer_next(&ahead);
 
+    if (after.type == LZ_TOKEN_DOT && find_import_binding(parser, parser->source->text + first.offset, first.length) != NULL) {
+        /* `catch util.MyError as e`: the kind comes from the interface of the module. */
+        const ImportBinding *binding = find_import_binding(parser, parser->source->text + first.offset, first.length);
+        advance(parser); /* the namespace */
+        advance(parser); /* the dot */
+        if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+            error_at_current(parser, "expected a name after '.'");
+            return false;
+        }
+        LzToken member = parser->current;
+        advance(parser);
+        header->typed = true;
+        header->kind_token = member;
+        header->kind = LZ_ERROR_ERROR;
+        if (binding->is_namespace && binding->loaded != NULL) {
+            char member_name[48];
+            token_text(parser, &member, member_name, sizeof member_name);
+            const LzIfaceEntry *entry = iface_find(binding->loaded, member_name);
+            if (entry == NULL) {
+                import_missing_name(parser, &member, binding->bound, binding->loaded);
+                return false;
+            }
+            if (lz_interface_entry_kind(entry) != LZ_IFACE_ERROR || lz_interface_entry_class_id(entry) == 0) {
+                char message[96];
+                (void)snprintf(message, sizeof message, "'%s' is not an error type", member_name);
+                diag_label(parser, "this is a %s", lz_interface_kind_name(lz_interface_entry_kind(entry)));
+                record(parser, member.offset, member.length, message);
+                parser->panic = true;
+                return false;
+            }
+            header->kind = (uint8_t)(lz_interface_entry_class_id(entry) - 1);
+        } else if (binding->loaded == NULL) {
+            parser->panic = true; /* the import failed and said so */
+            return false;
+        }
+        if (!word_is(parser, &parser->current, "as")) {
+            error_at_current(parser, "expected 'as' after the error type in 'catch'");
+            return false;
+        }
+        advance(parser); /* as */
+        if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+            error_at_current(parser, "expected a name after 'as'");
+            return false;
+        }
+        advance(parser);
+        header->name = parser->previous;
+        header->has_name = !word_is(parser, &header->name, "_");
+        return true;
+    }
+
     if (word_is(parser, &after, "as")) {
         header->typed = true;
         header->kind_token = first;
-        if (!lz_vm_error_kind_from_name(parser->vm, parser->source->text + first.offset, first.length,
-                                        &header->kind)) {
+        if (!error_kind_of_token(parser, &first, &header->kind)) {
             LzSuggester suggester;
             lz_suggester_init(&suggester, parser->source->text + first.offset, first.length);
             size_t kind_count = lz_vm_error_kind_count(parser->vm);
@@ -6442,8 +6610,7 @@ static bool catch_header(Parser *parser, CatchHeader *header) {
     }
 
     uint8_t known;
-    bool is_kind = lz_vm_error_kind_from_name(parser->vm, parser->source->text + first.offset,
-                                              first.length, &known);
+    bool is_kind = error_kind_of_token(parser, &first, &known);
     if (after.type == LZ_TOKEN_LEFT_BRACE) {
         if (is_kind) {
             char message[300];
@@ -6552,11 +6719,17 @@ static void try_statement(Parser *parser) {
             if (ok && header.typed) {
                 for (size_t i = 0; i < seen_count; i++) {
                     if (lz_vm_error_kind_is(parser->vm, header.kind, seen[i])) {
-                        char message[200];
+                        char message[260];
+                        char later[96];
+                        char earlier[96];
+                        (void)snprintf(later, sizeof later, "%s", lz_vm_error_kind_name(parser->vm, header.kind));
+                        (void)snprintf(earlier, sizeof earlier, "%s", lz_vm_error_kind_name(parser->vm, seen[i]));
+                        if (strcmp(later, earlier) == 0 && header.kind != seen[i]) {
+                            lz_vm_error_kind_qualified_name(parser->vm, header.kind, later, sizeof later);
+                            lz_vm_error_kind_qualified_name(parser->vm, seen[i], earlier, sizeof earlier);
+                        }
                         (void)snprintf(message, sizeof message,
-                                       "unreachable catch: '%s' is already caught by '%s' above",
-                                       lz_vm_error_kind_name(parser->vm, header.kind),
-                                       lz_vm_error_kind_name(parser->vm, seen[i]));
+                                       "unreachable catch: '%s' is already caught by '%s' above", later, earlier);
                         error_at(parser, &header.kind_token, message);
                         break;
                     }
@@ -6851,7 +7024,7 @@ static void variable_declaration(Parser *parser, bool is_const) {
         return;
     } else {
         emit_op_at(parser, LZ_OP_NIL, name_token.offset);
-        if (annotated && lz_type_assignable(&initializer.type, &declared) == LZ_ASSIGN_NEVER) {
+        if (annotated && type_assignable(parser, &initializer.type, &declared) == LZ_ASSIGN_NEVER) {
             error_types(parser, &name_token, "variable of type ", &declared,
                         " needs an initial value", NULL);
         }
@@ -6867,7 +7040,7 @@ static void variable_declaration(Parser *parser, bool is_const) {
             lz_chunk_truncate(&parser->vm->heap, parser->chunk, code_mark, constant_mark);
 
             LzType value_type = lz_type_of_value(&value);
-            if (annotated && lz_type_assignable(&value_type, &declared) == LZ_ASSIGN_NEVER) {
+            if (annotated && type_assignable(parser, &value_type, &declared) == LZ_ASSIGN_NEVER) {
                 LzToken span = span_from(parser, &initializer_start);
                 convert_help(parser, &value_type, &declared, &span, false);
                 error_types(parser, &span, "type mismatch: expected ", &declared, ", got ",
@@ -6882,6 +7055,9 @@ static void variable_declaration(Parser *parser, bool is_const) {
                     check_pub_type(parser, &shown, &name_token, name->data, 0);
                 }
                 iface_add_variable(parser, name, &shown);
+                /* The module's own uses are folded, but a module that imports it reads the global. */
+                emit_constant(parser, value);
+                emit_named(parser, LZ_OP_DEFINE_GLOBAL, name, name_token.offset);
             }
             return;
         }
@@ -6947,6 +7123,70 @@ static void store_variable(Parser *parser, LzString *name, const Symbol *symbol,
     }
 }
 
+/*
+ * Was `name` declared at the top of this file as `pub fn`, `pub class`, `pub trait`, `pub error` or
+ * `pub type`? Other modules rely on those staying what they are. `pub const` is left out: it can
+ * never be assigned and says so already.
+ */
+static bool pub_declaration(const Parser *parser, const char *name, uint32_t *offset) {
+    const LzSource *source = parser->source;
+    LzLexer lexer;
+    lz_lexer_init(&lexer, source);
+    bool at_start = true;
+    bool after_pub = false;
+    for (;;) {
+        LzToken token = lz_lexer_next(&lexer);
+        if (token.type == LZ_TOKEN_EOF) {
+            return false;
+        }
+        bool starts = at_start && lexer.nesting == 0;
+        bool is_pub_word = starts && source_word_is(source, &token, "pub");
+        at_start = is_pub_word || token.type == LZ_TOKEN_NEWLINE || token.type == LZ_TOKEN_SEMICOLON ||
+                   (token.type == LZ_TOKEN_RIGHT_BRACE && lexer.nesting == 0);
+        if (is_pub_word) {
+            after_pub = true;
+            continue;
+        }
+        if (!starts) {
+            continue;
+        }
+        bool was_pub = after_pub;
+        after_pub = false;
+        bool declares = token.type == LZ_TOKEN_FN || source_word_is(source, &token, "class") ||
+                        source_word_is(source, &token, "trait") || source_word_is(source, &token, "error") ||
+                        source_word_is(source, &token, "type");
+        if (!declares || !was_pub) {
+            continue;
+        }
+        LzLexer peek = lexer;
+        LzToken named = lz_lexer_next(&peek);
+        if (named.type == LZ_TOKEN_IDENTIFIER && source_word_is(source, &named, name)) {
+            *offset = named.offset;
+            return true;
+        }
+    }
+}
+
+/* `foo = 1` where `foo` is a pub declaration. True when it said so. */
+static bool report_pub_assignment(Parser *parser, const LzToken *name_token, const Symbol *symbol) {
+    if (symbol != NULL && symbol->kind == SYMBOL_LOCAL) {
+        return false;
+    }
+    char name[48];
+    token_text(parser, name_token, name, sizeof name);
+    uint32_t declared;
+    if (!pub_declaration(parser, name, &declared)) {
+        return false;
+    }
+    LzLocation at = lz_source_locate(parser->source, declared);
+    char message[160];
+    (void)snprintf(message, sizeof message, "cannot assign to '%s': it is pub, so other modules rely on it staying the same", name);
+    diag_label(parser, "assigned here");
+    diag_note(parser, "`%s` is declared pub on line %u", name, (unsigned)at.line);
+    record(parser, name_token->offset, name_token->length, message);
+    return true;
+}
+
 /* `name = value`, and the compound forms `name += value` and so on. */
 static void assignment_statement(Parser *parser) {
     advance(parser);
@@ -6968,6 +7208,9 @@ static void assignment_statement(Parser *parser) {
         return;
     }
     bool is_constant = symbol != NULL && (symbol->is_const || symbol->kind == SYMBOL_CONSTANT);
+    if (compound && name != NULL && (symbol == NULL || is_constant) && report_pub_assignment(parser, &name_token, symbol)) {
+        return;
+    }
     if (compound && name != NULL) {
         if (symbol == NULL && lz_module_lookup(parser->vm, parser->globals, name) != NULL) {
             error_with_name(parser, &name_token, "cannot assign to builtin '", "'");
@@ -6997,6 +7240,9 @@ static void assignment_statement(Parser *parser) {
     LzToken value_start = parser->current;
     Expr value = expression(parser);
     if (name == NULL) {
+        return;
+    }
+    if ((symbol == NULL || is_constant) && report_pub_assignment(parser, &name_token, symbol)) {
         return;
     }
 
@@ -7245,7 +7491,7 @@ static void expression_statement(Parser *parser) {
         lz_chunk_truncate(&parser->vm->heap, parser->chunk, target.op_pos,
                           parser->chunk->constant_count);
         Expr value = expression(parser);
-        if (lz_type_assignable(&value.type, &target.type) == LZ_ASSIGN_NEVER) {
+        if (type_assignable(parser, &value.type, &target.type) == LZ_ASSIGN_NEVER) {
             LzToken span = span_from(parser, &value_start);
             convert_help(parser, &value.type, &target.type, &span, false);
             error_types(parser, &span, "type mismatch: expected ", &target.type, ", got ",
@@ -7506,7 +7752,7 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
                 size_t jump = parser->chunk->count - 2;
                 LzToken value_start = parser->current;
                 Expr value = expression(parser);
-                if (lz_type_assignable(&value.type, &declared) == LZ_ASSIGN_NEVER) {
+                if (type_assignable(parser, &value.type, &declared) == LZ_ASSIGN_NEVER) {
                     LzToken span = span_from(parser, &value_start);
                     convert_help(parser, &value.type, &declared, &span, false);
                     error_types(parser, &span, "type mismatch: expected ", &declared, ", got ",
@@ -7609,7 +7855,7 @@ static Expr compile_function(Parser *parser, LzString *name, size_t self, uint32
     LzToken close = parser->previous;
     if (!returns && sig->result_declared) {
         LzType nothing = lz_type_of_kinds(LZ_KIND_NIL);
-        if (lz_type_assignable(&nothing, &sig->result) == LZ_ASSIGN_NEVER) {
+        if (type_assignable(parser, &nothing, &sig->result) == LZ_ASSIGN_NEVER) {
             char type_name[96];
             char example[96];
             char indent[40];
@@ -8300,6 +8546,8 @@ static void class_declaration(Parser *parser) {
     }
     /* `class Dog : Animal, Named`: the names are looked up when the statement runs. */
     LzToken parents[8];
+    const LzIfaceEntry *parent_entries[8]; /* what an imported parent exports, else NULL */
+    LzString *parent_names[8];             /* an imported parent's name as the global is bound, like util.Base */
     size_t parent_count = 0;
     if (match(parser, LZ_TOKEN_COLON)) {
         do {
@@ -8313,6 +8561,21 @@ static void class_declaration(Parser *parser) {
             LzToken parent = parser->previous;
             char parent_text[48];
             token_text(parser, &parent, parent_text, sizeof parent_text);
+            if (parent_count < 8) {
+                parent_entries[parent_count] = NULL;
+                parent_names[parent_count] = NULL;
+            }
+            if (parent_count < 8 && check(parser, LZ_TOKEN_DOT)) {
+                if (!imported_head(parser, &parent, &parent_entries[parent_count], &parent_names[parent_count], false)) {
+                    skip_class_body(parser);
+                    return;
+                }
+            } else if (parent_count < 8 && !builtin_type(parent_text, &ignored)) {
+                parent_entries[parent_count] = from_import_entry(parser, parent_text);
+                if (parent_entries[parent_count] != NULL) {
+                    parent_names[parent_count] = intern_token(parser, &parent);
+                }
+            }
             if (builtin_type(parent_text, &ignored)) {
                 error_at(parser, &parent, "cannot inherit from a builtin type");
                 skip_class_body(parser);
@@ -8322,6 +8585,9 @@ static void class_declaration(Parser *parser) {
                 error_at(parser, &parent, "too many parents");
                 skip_class_body(parser);
                 return;
+            }
+            if (parent_names[parent_count] == NULL) {
+                parent_names[parent_count] = intern_token(parser, &parent);
             }
             parents[parent_count++] = parent;
         } while (match(parser, LZ_TOKEN_COMMA));
@@ -8335,8 +8601,17 @@ static void class_declaration(Parser *parser) {
     if (symbol == NULL) {
         return;
     }
-    if (parser->class_count >= 64) {
-        error_at(parser, &name_token, "too many classes in one file");
+    if (parser->class_count >= LZ_MAX_FILE_CLASSES) {
+        diag_help(parser, "move some of them to another module and import it");
+        error_at(parser, &name_token, "too many classes and traits in one file (limit 256)");
+        parser->panic = false; /* the body is skipped here, so no second error comes of it */
+        while (!check(parser, LZ_TOKEN_LEFT_BRACE) && !check(parser, LZ_TOKEN_EOF) && !check(parser, LZ_TOKEN_NEWLINE)) {
+            advance(parser);
+        }
+        if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+            skip_class_body(parser);
+        }
+        parser->panic = true;
         return;
     }
     parser->vm->has_classes = true;
@@ -8358,15 +8633,37 @@ static void class_declaration(Parser *parser) {
     parser->class_decl[class_index] = class_token.offset;
     parser->class_ctor[class_index] = NULL;
     parser->classes[parser->class_count++] = name;
+    parser->class_super_count[class_index] = 0;
+    parser->class_super_open[class_index] = false;
+    for (size_t i = 0; i < parent_count; i++) {
+        uint64_t super_id = 0;
+        if (parent_entries[i] != NULL) {
+            super_id = lz_interface_entry_class_id(parent_entries[i]);
+        } else {
+            for (size_t j = 0; j < class_index; j++) {
+                if (parser->classes[j] == parent_names[i]) {
+                    super_id = parser->class_ids[j];
+                }
+            }
+        }
+        if (super_id != 0) {
+            parser->class_super[class_index][parser->class_super_count[class_index]++] = super_id;
+        } else {
+            parser->class_super_open[class_index] = true; /* a class of an earlier source, or not declared yet */
+        }
+    }
     const LzString *parent_class = NULL; /* the parent class in the head, as opposed to a trait */
     LzIfaceEntry *entry = NULL;
     if (is_pub && compiling_clean(parser)) {
         entry = lz_iface_add_entry(parser->iface, is_trait ? LZ_IFACE_TRAIT : LZ_IFACE_CLASS, name->data);
+        if (entry != NULL) {
+            lz_iface_entry_set_class_id(entry, cls->id);
+        }
         bool ok = entry != NULL;
         for (size_t i = 0; i < parent_count && ok; i++) {
-            LzString *head = intern_token(parser, &parents[i]);
+            LzString *head = parent_names[i];
             bool known = false;
-            bool head_is_trait = is_trait || (head != NULL && head_name_is_trait(parser, head, &known));
+            bool head_is_trait = is_trait || (head != NULL && head_is_trait_at(parser, head, parent_entries[i], &known));
             if (head == NULL) {
                 ok = false;
             } else if (!is_trait && !head_is_trait && i == 0) {
@@ -8384,9 +8681,9 @@ static void class_declaration(Parser *parser) {
         }
     }
     if (parent_count > 0 && !is_trait) {
-        LzString *head = intern_token(parser, &parents[0]);
+        LzString *head = parent_names[0];
         bool known = false;
-        if (head != NULL && !head_name_is_trait(parser, head, &known) && known) {
+        if (head != NULL && !head_is_trait_at(parser, head, parent_entries[0], &known) && known) {
             parent_class = head;
         } else if (head != NULL && !known) {
             parent_class = head; /* not found: the first one is the parent unless it turns out to be a trait */
@@ -8434,7 +8731,7 @@ static void class_declaration(Parser *parser) {
     }
     lz_class_seal(cls);
     if (!is_trait) {
-        LzIfaceSig *ctor = build_constructor(parser, cls, parent_class);
+        LzIfaceSig *ctor = build_constructor(parser, cls, parent_class, parent_count > 0 ? parent_entries[0] : NULL);
         if (ctor == NULL) {
             iface_oom(parser);
         } else {
@@ -8459,8 +8756,12 @@ static void class_declaration(Parser *parser) {
     emit_named(parser, LZ_OP_DEFINE_GLOBAL, name, name_token.offset);
     for (size_t i = 0; i < parent_count && parser->fatal == LZ_OK; i++) {
         LzToken parent = parents[i];
-        (void)variable_at(parser, &parent);
-        LzString *parent_name = intern_token(parser, &parent);
+        LzString *parent_name = parent_names[i];
+        if (parent_entries[i] != NULL) {
+            emit_named(parser, LZ_OP_GET_GLOBAL, parent_name, parent.offset);
+        } else {
+            (void)variable_at(parser, &parent);
+        }
         if (parent_name == NULL) {
             return;
         }
@@ -8480,6 +8781,13 @@ static void class_declaration(Parser *parser) {
  * hidden class, see src/core/extend.c, and the statement that registers it runs at its place in
  * the file, so the names it adds exist from there on.
  */
+/* `extend util.Point {`: the word after `extend` is an imported namespace, then a name and the body. */
+static bool extend_names_import(const Parser *parser) {
+    LzToken name = peek_token(parser, 1);
+    return find_import_binding(parser, parser->source->text + name.offset, name.length) != NULL &&
+           peek_token(parser, 3).type == LZ_TOKEN_IDENTIFIER && peek_token(parser, 4).type == LZ_TOKEN_LEFT_BRACE;
+}
+
 static void extend_declaration(Parser *parser) {
     LzToken extend_token = parser->current;
     advance(parser); /* extend */
@@ -8500,7 +8808,20 @@ static void extend_declaration(Parser *parser) {
         skip_class_body(parser);
         return;
     }
-    if (strcmp(text, "string") == 0) {
+    LzString *qualified = NULL; /* the name the global has here, for `extend util.Point` */
+    if (check(parser, LZ_TOKEN_DOT) && find_import_binding(parser, text, strlen(text)) != NULL) {
+        const LzIfaceEntry *entry = NULL;
+        if (!imported_head(parser, &target, &entry, &qualified, true)) {
+            skip_class_body(parser);
+            return;
+        }
+        if (qualified == NULL) {
+            error_at(parser, &target, "expected a class after 'extend'");
+            skip_class_body(parser);
+            return;
+        }
+        is_class = true;
+    } else if (strcmp(text, "string") == 0) {
         kinds = LZ_KIND_STRING;
     } else if (strcmp(text, "int") == 0) {
         kinds = LZ_KIND_INT;
@@ -8526,7 +8847,7 @@ static void extend_declaration(Parser *parser) {
         }
         is_class = true;
     }
-    LzString *name = intern_token(parser, &target);
+    LzString *name = qualified != NULL ? qualified : intern_token(parser, &target);
     if (name == NULL) {
         return;
     }
@@ -8779,6 +9100,10 @@ static bool top_name_used(const Parser *parser, const TopName *names, size_t cou
     return false;
 }
 
+static bool error_kind_of_name(Parser *parser, const char *text, size_t length, uint8_t *kind) {
+    return lz_vm_error_kind_from_name(parser->vm, parser->module, text, length, kind);
+}
+
 /*
  * Declares the kind of one declaration in the VM, and remembers what went wrong in
  * decl->problem. A kind with an unknown parent is still declared, under Error, so the mistake is
@@ -8790,7 +9115,7 @@ static void declare_error_kind(Parser *parser, ErrorDecl *decl, bool collides) {
     LzVM *vm = parser->vm;
     uint8_t existing;
     decl->problem = ERROR_DECL_OK;
-    if (lz_vm_error_kind_from_name(vm, text + decl->name_offset, decl->name_length, &existing)) {
+    if (lz_vm_error_kind_from_name(vm, parser->module, text + decl->name_offset, decl->name_length, &existing)) {
         decl->problem = ERROR_DECL_DUPLICATE;
         return;
     }
@@ -8804,13 +9129,14 @@ static void declare_error_kind(Parser *parser, ErrorDecl *decl, bool collides) {
         return;
     }
     uint8_t parent = LZ_ERROR_ERROR;
-    if (decl->has_parent &&
-        !lz_vm_error_kind_from_name(vm, text + decl->parent_offset, decl->parent_length, &parent)) {
+    /* A parent of another module is known only when the import is compiled, and is set then. */
+    if (decl->has_parent && !decl->parent_qualified &&
+        !error_kind_of_name(parser, text + decl->parent_offset, decl->parent_length, &parent)) {
         parent = LZ_ERROR_ERROR;
         decl->problem = ERROR_DECL_UNKNOWN_PARENT;
     }
     uint8_t kind;
-    LzStatus status = lz_vm_error_declare(vm, name, parent, &kind);
+    LzStatus status = lz_vm_error_declare(vm, parser->module, name, parent, &kind);
     if (status == LZ_ERR_RUNTIME) {
         decl->problem = ERROR_DECL_LIMIT; /* vm->error says how many */
     } else if (status != LZ_OK) {
@@ -8898,6 +9224,16 @@ static void prescan_errors(Parser *parser) {
                     decl.has_parent = true;
                     decl.parent_offset = (uint32_t)parent.offset;
                     decl.parent_length = (uint32_t)parent.length;
+                    LzLexer again = peek;
+                    LzToken dot = lz_lexer_next(&again);
+                    LzToken member = lz_lexer_next(&again);
+                    if (dot.type == LZ_TOKEN_DOT && member.type == LZ_TOKEN_IDENTIFIER) {
+                        decl.parent_qualified = true;
+                        decl.parent_ns_offset = decl.parent_offset;
+                        decl.parent_ns_length = decl.parent_length;
+                        decl.parent_offset = (uint32_t)member.offset;
+                        decl.parent_length = (uint32_t)member.length;
+                    }
                 }
             }
             if (found_count == found_capacity) {
@@ -9012,7 +9348,7 @@ static void error_class_body(Parser *parser, const LzToken *name_token, uint8_t 
     }
     lz_class_seal(cls);
     lz_iface_sig_free(parser->error_own);
-    parser->error_own = build_constructor(parser, cls, NULL);
+    parser->error_own = build_constructor(parser, cls, NULL, NULL);
     if (parser->error_own == NULL) {
         iface_oom(parser);
     }
@@ -9109,8 +9445,11 @@ static void error_declaration(Parser *parser) {
     advance(parser); /* the name */
     LzToken name_token = parser->previous;
     LzToken parent_token;
+    LzToken parent_ns;
     memset(&parent_token, 0, sizeof parent_token);
+    memset(&parent_ns, 0, sizeof parent_ns);
     bool has_parent = false;
+    bool parent_qualified = false;
     LzToken traits[8];
     size_t trait_count = 0;
     if (match(parser, LZ_TOKEN_COLON)) {
@@ -9121,6 +9460,17 @@ static void error_declaration(Parser *parser) {
         advance(parser);
         parent_token = parser->previous;
         has_parent = true;
+        if (check(parser, LZ_TOKEN_DOT)) {
+            advance(parser); /* the dot */
+            if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+                error_at_current(parser, "expected a name after '.'");
+                return;
+            }
+            advance(parser);
+            parent_ns = parent_token;
+            parent_token = parser->previous;
+            parent_qualified = true;
+        }
         /* `error E : Parent, T1, T2`: the first is the error parent, the rest are traits. */
         while (match(parser, LZ_TOKEN_COMMA)) {
             skip_newlines(parser);
@@ -9160,11 +9510,36 @@ static void error_declaration(Parser *parser) {
         late.has_parent = has_parent;
         late.parent_offset = (uint32_t)parent_token.offset;
         late.parent_length = (uint32_t)parent_token.length;
+        late.parent_qualified = parent_qualified;
+        late.parent_ns_offset = (uint32_t)parent_ns.offset;
+        late.parent_ns_length = (uint32_t)parent_ns.length;
         declare_error_kind(parser, &late, false);
         decl = &late;
     }
 
-    switch (decl->problem) {
+    ErrorProblem problem = decl->problem;
+    bool parent_imported = has_parent && !parent_qualified &&
+                           find_import_binding(parser, parser->source->text + parent_token.offset, parent_token.length) != NULL;
+    if (has_parent && (parent_qualified || (problem == ERROR_DECL_UNKNOWN_PARENT && parent_imported)) &&
+        (problem == ERROR_DECL_OK || problem == ERROR_DECL_UNKNOWN_PARENT)) {
+        /* The parent comes from an import, which the prescan could not see, so it is set now. */
+        uint8_t parent_kind_found;
+        uint8_t own_kind;
+        bool found = parent_qualified ? error_kind_of_member(parser, &parent_ns, &parent_token, &parent_kind_found)
+                                      : error_kind_of_token(parser, &parent_token, &parent_kind_found);
+        if (parent_qualified && !found) {
+            if (check(parser, LZ_TOKEN_LEFT_BRACE)) {
+                skip_class_body(parser);
+            }
+            return;
+        }
+        if (found && error_kind_of_name(parser, parser->source->text + name_token.offset, name_token.length,
+                                        &own_kind)) {
+            lz_vm_error_kind_set_parent(parser->vm, own_kind, parent_kind_found);
+            problem = ERROR_DECL_OK;
+        }
+    }
+    switch (problem) {
     case ERROR_DECL_OK:
         break;
     case ERROR_DECL_DUPLICATE:
@@ -9236,10 +9611,22 @@ static void error_declaration(Parser *parser) {
         char text[48];
         token_text(parser, &name_token, text, sizeof text);
         entry = lz_iface_add_entry(parser->iface, LZ_IFACE_ERROR, text);
+        uint8_t declared_kind;
+        if (entry != NULL && lz_vm_error_kind_from_name(parser->vm, parser->module, parser->source->text + name_token.offset,
+                                                        name_token.length, &declared_kind)) {
+            lz_iface_entry_set_class_id(entry, (uint64_t)declared_kind + 1);
+        }
         bool ok = entry != NULL && lz_iface_add_member(entry, LZ_IFACE_MEMBER_INIT, "init") != NULL;
         if (ok) {
             if (has_parent) {
                 token_text(parser, &parent_token, text, sizeof text);
+                if (parent_qualified) {
+                    char ns_text[24];
+                    token_text(parser, &parent_ns, ns_text, sizeof ns_text);
+                    char member_text[48];
+                    (void)snprintf(member_text, sizeof member_text, "%s", text);
+                    (void)snprintf(text, sizeof text, "%.20s.%.26s", ns_text, member_text);
+                }
             } else {
                 (void)snprintf(text, sizeof text, "Error");
             }
@@ -9260,7 +9647,7 @@ static void error_declaration(Parser *parser) {
     parser->class_has_init = false;
     uint8_t kind = 0;
     uint8_t parent_kind = LZ_ERROR_ERROR;
-    bool known = lz_vm_error_kind_from_name(parser->vm, parser->source->text + name_token.offset,
+    bool known = lz_vm_error_kind_from_name(parser->vm, parser->module, parser->source->text + name_token.offset,
                                             name_token.length, &kind);
     if (known) {
         (void)lz_vm_error_kind_parent(parser->vm, kind, &parent_kind);
@@ -9572,10 +9959,22 @@ static void pub_prefix(Parser *parser) {
         if (target.type == LZ_TOKEN_IDENTIFIER || target.type == LZ_TOKEN_NIL) {
             token_text(parser, &target, target_name, sizeof target_name);
         }
+        if (peek_token(parser, 2).type == LZ_TOKEN_DOT && peek_token(parser, 3).type == LZ_TOKEN_IDENTIFIER) {
+            LzToken member = peek_token(parser, 3);
+            size_t used = strlen(target_name);
+            token_text(parser, &member, target_name + used + 1, sizeof target_name - used - 1);
+            target_name[used] = '.';
+        }
         diag_label(parser, "an extension stays inside the module that writes it");
         diag_note(parser, "other modules never see it, so it cannot change how they use %s", target_name);
-        diag_help(parser, "remove `pub`, or share the behavior with a `pub fn` that takes the value");
-        pub_removal_fix(parser, &pub, "remove `pub`, or share the behavior with a `pub fn` that takes the value");
+        pub_removal_fix(parser, &pub, "remove `pub`, the extension is for this module only");
+        parser->pending.fix_quiet = true;
+        char example[200];
+        (void)snprintf(example, sizeof example,
+                       "to share the behavior, write a `pub fn` that takes the value, like `pub fn describe(value: %s) => ...`",
+                       target_name);
+        diag_help(parser, "%s", example);
+        parser->pending.keep_help = true;
         record(parser, pub.offset, pub.length, "'pub' cannot be used on 'extend'");
     } else if (word_is(parser, &word, "import")) {
         diag_label(parser, "`import` brings names in; it does not declare one to share");
@@ -9594,6 +9993,1001 @@ static void pub_prefix(Parser *parser) {
     }
 }
 
+/* Imports */
+
+/* `import` starts an import when a name follows, or when nothing does (a lone `import` is no expression). */
+static bool at_import_statement(const Parser *parser) {
+    if (parser->current.type != LZ_TOKEN_IDENTIFIER || !word_is(parser, &parser->current, "import")) {
+        return false;
+    }
+    LzToken after = peek_token(parser, 1);
+    if (after.type == LZ_TOKEN_NEWLINE || after.type == LZ_TOKEN_EOF || after.type == LZ_TOKEN_SEMICOLON) {
+        return true;
+    }
+    return after.type == LZ_TOKEN_IDENTIFIER && !word_is(parser, &after, "is");
+}
+
+/* `from a.b import ...`, or a `from a.b` that stops short, which an expression never does. */
+static bool at_from_statement(const Parser *parser) {
+    if (parser->current.type != LZ_TOKEN_IDENTIFIER || !word_is(parser, &parser->current, "from")) {
+        return false;
+    }
+    LzToken first = peek_token(parser, 1);
+    if (first.type != LZ_TOKEN_IDENTIFIER) {
+        return false;
+    }
+    if (word_is(parser, &first, "import")) {
+        return true; /* `from import x` has no module name */
+    }
+    int last = 1;
+    while (peek_token(parser, last + 1).type == LZ_TOKEN_DOT && peek_token(parser, last + 2).type == LZ_TOKEN_IDENTIFIER) {
+        last += 2;
+    }
+    LzToken after = peek_token(parser, last + 1);
+    return word_is(parser, &after, "import") || after.type == LZ_TOKEN_NEWLINE || after.type == LZ_TOKEN_EOF ||
+           after.type == LZ_TOKEN_SEMICOLON || after.type == LZ_TOKEN_DOT;
+}
+
+static bool source_word_is(const LzSource *source, const LzToken *token, const char *word) {
+    return token->type == LZ_TOKEN_IDENTIFIER && token->length == strlen(word) &&
+           memcmp(source->text + token->offset, word, token->length) == 0;
+}
+
+/* Where a top-level declaration of `name` is written in this source, if there is one. */
+static bool source_declares(const LzSource *source, const char *name, uint32_t *offset) {
+    LzLexer lexer;
+    lz_lexer_init(&lexer, source);
+    bool at_start = true;
+    for (;;) {
+        LzToken token = lz_lexer_next(&lexer);
+        if (token.type == LZ_TOKEN_EOF) {
+            return false;
+        }
+        bool starts = at_start && lexer.nesting == 0;
+        bool is_pub_word = starts && source_word_is(source, &token, "pub");
+        at_start = is_pub_word || token.type == LZ_TOKEN_NEWLINE || token.type == LZ_TOKEN_SEMICOLON ||
+                   (token.type == LZ_TOKEN_RIGHT_BRACE && lexer.nesting == 0);
+        if (!starts || is_pub_word) {
+            continue;
+        }
+        bool declares = token.type == LZ_TOKEN_FN || token.type == LZ_TOKEN_LET || token.type == LZ_TOKEN_CONST ||
+                        source_word_is(source, &token, "class") || source_word_is(source, &token, "trait") ||
+                        source_word_is(source, &token, "error") || source_word_is(source, &token, "type");
+        if (!declares) {
+            continue;
+        }
+        LzLexer peek = lexer;
+        LzToken named = lz_lexer_next(&peek);
+        if (named.type == LZ_TOKEN_IDENTIFIER && source_word_is(source, &named, name)) {
+            *offset = named.offset;
+            return true;
+        }
+    }
+}
+
+static bool find_top_declaration(const Parser *parser, const char *name, uint32_t *offset) {
+    return source_declares(parser->source, name, offset);
+}
+
+/* Is this `import` or `from` allowed here? If not, it says so and the line is skipped. */
+static bool import_placement_ok(Parser *parser, const LzToken *keyword, bool is_from) {
+    const char *label = NULL;
+    if (parser->fs->function != NULL) {
+        label = "this is inside a function";
+    } else if (parser->scope_depth != 0) {
+        label = "this is inside a block";
+    } else if (parser->body_started) {
+        label = "other code comes before this";
+    }
+    if (label == NULL) {
+        return true;
+    }
+    diag_label(parser, "%s", label);
+    diag_help(parser, "move this import to the top of the file, above any other code");
+    record(parser, keyword->offset, keyword->length,
+           is_from ? "`from ... import` can only be used at the top of a file"
+                   : "`import` can only be used at the top of a file");
+    parser->panic = true;
+    return false;
+}
+
+/* Reads `a.b.c` into out. Returns false after reporting what is wrong. */
+static bool import_module_name(Parser *parser, const LzToken *word, char *out, size_t size, LzToken *last) {
+    if (!check(parser, LZ_TOKEN_IDENTIFIER) || word_is(parser, &parser->current, "import")) {
+        char before[16];
+        token_text(parser, word, before, sizeof before);
+        char message[64];
+        (void)snprintf(message, sizeof message, "expected a module name after '%s'", before);
+        diag_label(parser, "a module name goes here, like `%s util`", strcmp(before, "from") == 0 ? "from" : "import");
+        error_at(parser, word, message);
+        return false;
+    }
+    size_t used = 0;
+    out[0] = '\0';
+    for (;;) {
+        LzToken part = parser->current;
+        advance(parser);
+        *last = part;
+        size_t length = part.length < size - used - 1 ? part.length : size - used - 1;
+        memcpy(out + used, parser->source->text + part.offset, length);
+        used += length;
+        out[used] = '\0';
+        if (!check(parser, LZ_TOKEN_DOT)) {
+            return true;
+        }
+        advance(parser);
+        if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+            diag_label(parser, "a name must follow this `.`");
+            error_at_previous(parser, "expected a name after '.' in the module name");
+            return false;
+        }
+        if (used + 1 < size) {
+            out[used++] = '.';
+            out[used] = '\0';
+        }
+    }
+}
+
+/*
+ * Finds and compiles the module of an import, without running it. On failure it reports at the
+ * module's name and returns NULL.
+ */
+static LzModule *import_prepare(Parser *parser, const LzToken *first, const LzToken *last, const char *name) {
+    LzModule *module = NULL;
+    LzVM *vm = parser->vm;
+    vm->error[0] = '\0';
+    vm->last_failure = NULL;
+    LzStatus status = lz_module_prepare(vm, parser->module, name, &module);
+    if (status == LZ_OK) {
+        return module;
+    }
+    if (status == LZ_ERR_MEMORY || status == LZ_ERR_HEAP_LIMIT) {
+        fail(parser, status);
+        return NULL;
+    }
+    uint32_t offset = first->offset;
+    uint32_t length = last->offset + last->length - first->offset;
+    char message[256];
+    const LzModuleFailure *failed = vm->last_failure;
+    if (strncmp(vm->error, "circular import:", 16) == 0) {
+        /* The one error of the cycle, at the import that closes it, with the way round in the note. */
+        char closing[96];
+        (void)snprintf(closing, sizeof closing, "circular import of '%s'", name);
+        diag_label(parser, "this import leads back to a module that is waiting for it");
+        diag_note(parser, "the chain is %s", vm->error + 17);
+        diag_help(parser, "a module cannot import another module that imports it, directly or not");
+        vm->import_cycle = true;
+        record(parser, offset, length, closing);
+    } else if (status == LZ_ERR_COMPILE && failed != NULL && failed->cycle) {
+        /* Said already where the cycle closes. This file fails too, without a second error. */
+        parser->silent_failure = true;
+        vm->import_cycle = true;
+    } else if (status == LZ_ERR_COMPILE && failed != NULL && failed->diagnostics.count > 0) {
+        const LzModuleFailure *failure = failed;
+        const LzDiagnostic *item = &failure->diagnostics.items[0];
+        LzLocation at = lz_source_locate(&failure->source, item->offset);
+        (void)snprintf(message, sizeof message, "module '%s' has errors", name);
+        diag_label(parser, "this module does not compile");
+        diag_note(parser, "first error: %s:%u: %s", failure->source.name, (unsigned)at.line, item->message);
+        record(parser, offset, length, message);
+    } else {
+        if (strncmp(vm->error, "cannot find module", 18) == 0) {
+            diag_label(parser, "no module with this name");
+        }
+        (void)snprintf(message, sizeof message, "%s", vm->error);
+        record(parser, offset, length, message);
+    }
+    return NULL;
+}
+
+/* Records a bound name, or reports that it clashes with another name of the file. */
+static ImportBinding *import_bind(Parser *parser, const LzToken *at, const char *module, bool is_namespace,
+                                  LzModule *loaded) {
+    ImportBinding binding;
+    memset(&binding, 0, sizeof binding);
+    token_text(parser, at, binding.bound, sizeof binding.bound);
+    (void)snprintf(binding.module, sizeof binding.module, "%s", module);
+    binding.offset = at->offset;
+    binding.length = at->length;
+    binding.is_namespace = is_namespace;
+    binding.loaded = loaded;
+
+    for (size_t i = 0; i < parser->import_count; i++) {
+        if (strcmp(parser->imports[i].bound, binding.bound) == 0) {
+            LzLocation was = lz_source_locate(parser->source, parser->imports[i].offset);
+            diag_label(parser, "`%s` is already taken by the import on line %u", binding.bound, (unsigned)was.line);
+            diag_help(parser, "give one of them another name with `as`");
+            char message[96];
+            (void)snprintf(message, sizeof message, "`%s` is imported twice", binding.bound);
+            record(parser, at->offset, at->length, message);
+            return NULL;
+        }
+    }
+    if (is_namespace) {
+        LzType ignored;
+        LzString *interned = lz_vm_intern(parser->vm, binding.bound, strlen(binding.bound));
+        if (builtin_type(binding.bound, &ignored) ||
+            (interned != NULL && lz_table_get(&parser->vm->builtins, interned) != NULL)) {
+            /* The namespace would hide the builtin in this file, and `string(5)` would fail oddly. */
+            const char *tail = strrchr(module, '.');
+            tail = tail != NULL ? tail + 1 : module;
+            char other[64];
+            size_t tail_length = strlen(tail);
+            (void)snprintf(other, sizeof other, strcmp(tail + tail_length - 1, "s") == 0 ? "%.40s_mod" : "%.40ss", tail);
+            char fix_text[80];
+            size_t back = at->offset;
+            while (back > 0 && parser->source->text[back - 1] == ' ') {
+                back--;
+            }
+            bool written_as = back >= 2 && parser->source->text[back - 1] == 's' && parser->source->text[back - 2] == 'a';
+            diag_label(parser, "this name is taken by a builtin");
+            if (written_as) {
+                diag_fix(parser, "give the import another name", at->offset, at->length, other);
+            } else {
+                (void)snprintf(fix_text, sizeof fix_text, " as %s", other);
+                diag_fix(parser, "give the import another name", at->offset + at->length, 0, fix_text);
+            }
+            diag_help(parser, "import it as `%s`", other);
+            char message[96];
+            (void)snprintf(message, sizeof message, "'%s' is a builtin, so this import needs another name", binding.bound);
+            record(parser, at->offset, at->length, message);
+            return NULL;
+        }
+    }
+    uint32_t declared;
+    if (find_top_declaration(parser, binding.bound, &declared)) {
+        LzLocation where = lz_source_locate(parser->source, declared);
+        diag_label(parser, "this import binds `%s`", binding.bound);
+        diag_note(parser, "`%s` is also declared on line %u of this file", binding.bound, (unsigned)where.line);
+        diag_help(parser, "give the import another name with `as`");
+        char message[96];
+        (void)snprintf(message, sizeof message, "`%s` is already declared in this file", binding.bound);
+        record(parser, at->offset, at->length, message);
+        return NULL;
+    }
+    if (parser->import_count >= LZ_MAX_IMPORTS) {
+        if (parser->import_limit_told) {
+            return NULL; /* one report is enough */
+        }
+        parser->import_limit_told = true;
+        diag_label(parser, "this is name number %d", LZ_MAX_IMPORTS + 1);
+        diag_help(parser, "import a module as a namespace instead of naming many of its members");
+        record(parser, at->offset, at->length, "too many imported names in one file");
+        return NULL;
+    }
+    parser->imports[parser->import_count] = binding;
+    return &parser->imports[parser->import_count++];
+}
+
+/* After a name: an optional `as other`. Returns the token that names the binding. */
+static LzToken import_alias(Parser *parser, LzToken name, bool *ok) {
+    *ok = true;
+    if (!check(parser, LZ_TOKEN_IDENTIFIER) || !word_is(parser, &parser->current, "as")) {
+        return name;
+    }
+    LzToken as_word = parser->current;
+    advance(parser);
+    if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+        diag_label(parser, "write the new name after `as`");
+        error_at(parser, &as_word, "expected a name after 'as'");
+        *ok = false;
+        return name;
+    }
+    LzToken alias = parser->current;
+    advance(parser);
+    return alias;
+}
+
+
+/* What an import offers */
+
+static const LzIfaceEntry *iface_find(const LzModule *module, const char *name) {
+    const LzInterface *iface = module != NULL && module->chunk != NULL ? lz_interface_of(module->chunk) : NULL;
+    for (size_t i = 0; iface != NULL && i < lz_interface_count(iface); i++) {
+        const LzIfaceEntry *entry = lz_interface_entry(iface, i);
+        if (strcmp(lz_interface_entry_name(entry), name) == 0) {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+/* The names a module exports, for "did you mean" and for the hint on a module used as a value. */
+static void iface_offer(const LzModule *module, LzSuggester *suggester) {
+    const LzInterface *iface = module != NULL && module->chunk != NULL ? lz_interface_of(module->chunk) : NULL;
+    for (size_t i = 0; iface != NULL && i < lz_interface_count(iface); i++) {
+        lz_suggester_offer(suggester, lz_interface_entry_name(lz_interface_entry(iface, i)));
+    }
+}
+
+/*
+ * Whether a value of class `from` could be accepted where class `to` is wanted: it is that class,
+ * or it has it among its parents and traits. A class whose parents are not known here counts as
+ * maybe, so valid code is never turned down because of a link only the running program has.
+ */
+static bool class_may_be(const Parser *parser, uint64_t from, uint64_t to, int depth) {
+    if (from == to || depth > 16) {
+        return true;
+    }
+    for (size_t i = 0; i < parser->class_count; i++) {
+        if (parser->class_ids[i] == from) {
+            for (size_t k = 0; k < parser->class_super_count[i]; k++) {
+                if (class_may_be(parser, parser->class_super[i][k], to, depth + 1)) {
+                    return true;
+                }
+            }
+            return parser->class_super_open[i];
+        }
+    }
+    for (const LzModule *module = parser->vm->modules; module != NULL; module = module->next) {
+        const LzInterface *iface = module->chunk != NULL ? lz_interface_of(module->chunk) : NULL;
+        for (size_t i = 0; iface != NULL && i < lz_interface_count(iface); i++) {
+            const LzIfaceEntry *entry = lz_interface_entry(iface, i);
+            LzIfaceKind kind = lz_interface_entry_kind(entry);
+            if ((kind != LZ_IFACE_CLASS && kind != LZ_IFACE_TRAIT) || lz_interface_entry_class_id(entry) != from) {
+                continue;
+            }
+            size_t heads = lz_interface_entry_trait_count(entry);
+            for (size_t k = 0; k <= heads; k++) {
+                const char *text = k == 0 ? lz_interface_entry_parent(entry) : lz_interface_entry_trait(entry, k - 1);
+                if (text == NULL) {
+                    continue;
+                }
+                const LzIfaceEntry *super = strchr(text, '.') == NULL ? iface_find(module, text) : NULL;
+                if (super == NULL || lz_interface_entry_class_id(super) == 0 ||
+                    class_may_be(parser, lz_interface_entry_class_id(super), to, depth + 1)) {
+                    return true; /* the head is another module's name or not exported, so not known */
+                }
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+/* lz_type_assignable, with the classes of the program known: a subclass fits its parent, and a class its trait. */
+static LzAssign type_assignable(const Parser *parser, const LzType *from, const LzType *to) {
+    LzAssign verdict = lz_type_assignable(from, to);
+    if (verdict == LZ_ASSIGN_NEVER && (from->kinds & LZ_KIND_INSTANCE) != 0 && (to->kinds & LZ_KIND_INSTANCE) != 0 &&
+        from->class_id != 0 && to->class_id != 0 && class_may_be(parser, from->class_id, to->class_id, 0)) {
+        return LZ_ASSIGN_MAYBE;
+    }
+    return verdict;
+}
+
+/*
+ * A type as the interface writes it, read in the context of the module that wrote it (see
+ * iface_scope_enter): its classes, traits, errors and aliases are types, and so are the type
+ * parameters of the signature. A name that is none of them makes that part `any`, not the whole
+ * type, which is always safe because the call is still checked when it runs.
+ */
+static LzType iface_type(Parser *parser, const char *text) {
+    LzType any = lz_type_of_kinds(LZ_KINDS_ANY);
+    if (text == NULL) {
+        return any;
+    }
+    LzSource written;
+    lz_source_from_string(&written, "<interface>", text);
+    LzLexer saved_lexer = parser->lexer;
+    LzToken saved_current = parser->current;
+    LzToken saved_previous = parser->previous;
+    const LzSource *saved_source = parser->source;
+    bool saved_panic = parser->panic;
+    bool saved_track = parser->track_refs;
+    int saved_depth = parser->bracket_depth;
+    size_t saved_count = parser->diagnostics->count;
+    LzDiagExtras saved_pending = parser->pending;
+    parser->source = &written;
+    parser->track_refs = false;
+    parser->panic = false;
+    lz_lexer_init(&parser->lexer, &written);
+    advance(parser);
+    LzType parsed = any;
+    bool ok = parse_type_union(parser, &parsed) &&
+              (check(parser, LZ_TOKEN_EOF) || check(parser, LZ_TOKEN_NEWLINE)) && !parser->panic &&
+              parser->diagnostics->count == saved_count;
+    parser->lexer = saved_lexer;
+    parser->current = saved_current;
+    parser->previous = saved_previous;
+    parser->source = saved_source;
+    parser->panic = saved_panic;
+    parser->track_refs = saved_track;
+    parser->bracket_depth = saved_depth;
+    parser->diagnostics->count = saved_count;
+    parser->pending = saved_pending;
+    return ok ? parsed : any;
+}
+
+typedef struct IfaceScope {
+    size_t alias_count;
+    size_t alias_base;
+    bool mode;
+} IfaceScope;
+
+static bool iface_push_name(Parser *parser, const char *name, const LzType *type) {
+    LzString *interned = lz_vm_intern(parser->vm, name, strlen(name));
+    if (interned == NULL || parser->alias_count + 8 >= LZ_MAX_ALIASES) {
+        return false;
+    }
+    Alias *alias = &parser->aliases[parser->alias_count++];
+    alias->name = interned;
+    alias->depth = parser->scope_depth;
+    alias->type = *type;
+    alias->is_pub = true;
+    alias->decl_offset = 0;
+    alias->told = true;
+    return true;
+}
+
+/*
+ * Makes the names of `owner` (the module that wrote the interface text) readable as types, and the
+ * type parameters of `sig` when it is generic. Leave with iface_scope_leave.
+ */
+static IfaceScope iface_scope_enter(Parser *parser, const LzModule *owner, const LzIfaceSig *sig) {
+    IfaceScope saved = {parser->alias_count, parser->iface_alias_base, parser->iface_mode};
+    parser->iface_alias_base = parser->alias_count;
+    parser->iface_mode = true;
+    const LzInterface *iface = owner != NULL && owner->chunk != NULL ? lz_interface_of(owner->chunk) : NULL;
+    size_t count = iface != NULL ? lz_interface_count(iface) : 0;
+    for (size_t i = 0; i < count; i++) {
+        const LzIfaceEntry *entry = lz_interface_entry(iface, i);
+        LzIfaceKind kind = lz_interface_entry_kind(entry);
+        uint64_t id = lz_interface_entry_class_id(entry);
+        const char *name = lz_interface_entry_name(entry);
+        LzType type = lz_type_of_kinds(LZ_KINDS_ANY);
+        if ((kind == LZ_IFACE_CLASS || kind == LZ_IFACE_TRAIT) && id != 0) {
+            type = lz_type_of_kinds(LZ_KIND_INSTANCE);
+            type.class_name = lz_vm_intern(parser->vm, name, strlen(name));
+            type.class_id = id;
+        } else if (kind == LZ_IFACE_ERROR && id != 0) {
+            type = lz_type_of_kinds(LZ_KIND_ERROR);
+            type.class_name = lz_vm_intern(parser->vm, name, strlen(name));
+            type.class_id = id;
+        } else if (kind != LZ_IFACE_TYPE) {
+            continue;
+        }
+        (void)iface_push_name(parser, name, &type);
+    }
+    /* Aliases are read from their target text, once for each level they could be chained. */
+    for (size_t round = 0; round < 4; round++) {
+        for (size_t i = 0; i < count; i++) {
+            const LzIfaceEntry *entry = lz_interface_entry(iface, i);
+            if (lz_interface_entry_kind(entry) != LZ_IFACE_TYPE) {
+                continue;
+            }
+            LzString *name = lz_vm_intern(parser->vm, lz_interface_entry_name(entry), strlen(lz_interface_entry_name(entry)));
+            LzType target = iface_type(parser, lz_interface_entry_type(entry));
+            for (size_t k = parser->alias_count; k > parser->iface_alias_base; k--) {
+                if (parser->aliases[k - 1].name == name) {
+                    parser->aliases[k - 1].type = target;
+                    break;
+                }
+            }
+        }
+    }
+    for (size_t k = 0; sig != NULL && k < lz_interface_sig_type_param_count(sig); k++) {
+        const char *name = lz_interface_sig_type_param_name(sig, k);
+        LzType marker = lz_type_of_kinds(LZ_KINDS_ANY);
+        marker.tparam = lz_vm_intern(parser->vm, name, strlen(name));
+        (void)iface_push_name(parser, name, &marker);
+    }
+    return saved;
+}
+
+static void iface_scope_leave(Parser *parser, IfaceScope saved) {
+    parser->alias_count = saved.alias_count;
+    parser->iface_alias_base = saved.alias_base;
+    parser->iface_mode = saved.mode;
+}
+
+static FuncSig *sig_from_iface(Parser *parser, LzString *name, const LzIfaceSig *from, const LzModule *owner) {
+    FuncSig *sig = new_sig(parser, name);
+    if (sig == NULL || from == NULL) {
+        return sig;
+    }
+    IfaceScope scope = iface_scope_enter(parser, owner, from);
+    for (size_t k = 0; k < lz_interface_sig_type_param_count(from) && sig->tparam_count < LZ_MAX_TPARAMS; k++) {
+        const char *tp = lz_interface_sig_type_param_name(from, k);
+        sig->tparams[sig->tparam_count++] = lz_vm_intern(parser->vm, tp, strlen(tp));
+    }
+    size_t count = lz_interface_sig_param_count(from);
+    size_t used = 0;
+    size_t required = 0;
+    for (size_t i = 0; i < count && used < LZ_MAX_PARAMS; i++) {
+        const char *param = lz_interface_sig_param_name(from, i);
+        LzString *param_name = lz_vm_intern(parser->vm, param, strlen(param));
+        LzType type = iface_type(parser, lz_interface_sig_param_type(from, i));
+        if (lz_interface_sig_param_is_rest(from, i)) {
+            sig->names[used] = param_name;
+            sig->rest_item = type;
+            sig->has_rest = true;
+            break;
+        }
+        sig->names[used] = param_name;
+        sig->types[used] = type;
+        used++;
+        if (!lz_interface_sig_param_has_default(from, i)) {
+            required = used;
+        }
+    }
+    sig->param_count = (uint16_t)used;
+    sig->required = (uint16_t)required;
+    if (lz_interface_sig_result_declared(from)) {
+        sig->result = iface_type(parser, lz_interface_sig_result(from));
+        sig->result_declared = true;
+    }
+    sig->generic_result = sig->result;
+    iface_scope_leave(parser, scope);
+    return sig;
+}
+
+/*
+ * An error of another module that takes fields. The module has not run when this file is compiled,
+ * so the class of the kind does not exist yet, but the interface says the constructor takes more
+ * than the message. The file is compiled as if the class were here.
+ */
+static void note_imported_error_class(Parser *parser, const LzIfaceEntry *entry) {
+    uint64_t id = lz_interface_entry_class_id(entry);
+    const LzIfaceMember *init = lz_interface_entry_member_count(entry) > 0 ? lz_interface_entry_member(entry, 0) : NULL;
+    const LzIfaceSig *sig = init != NULL ? lz_interface_member_sig(init) : NULL;
+    if (id != 0 && sig != NULL && lz_interface_sig_param_count(sig) > 1) {
+        unsigned kind = (unsigned)(id - 1);
+        parser->error_class_kinds[kind / 64] |= (uint64_t)1 << (kind % 64);
+    }
+}
+
+/* The use of a name of a module: emits the read and says what is known about the value. */
+static Expr import_entry_expr(Parser *parser, const LzToken *at, const LzIfaceEntry *entry, const LzModule *loaded,
+                              const char *global) {
+    LzString *stored = lz_vm_intern(parser->vm, global, strlen(global));
+    if (stored == NULL) {
+        fail(parser, LZ_ERR_MEMORY);
+        return any_expr();
+    }
+    emit_named(parser, LZ_OP_GET_GLOBAL, stored, at->offset);
+    Expr result = any_expr();
+    switch (lz_interface_entry_kind(entry)) {
+    case LZ_IFACE_FN: {
+        FuncSig *sig = sig_from_iface(parser, stored, lz_interface_entry_sig(entry), loaded);
+        if (sig != NULL) {
+            result = expr_of(fn_type_of_sig(parser, sig));
+            result.sig = sig;
+        }
+        break;
+    }
+    case LZ_IFACE_CONST: {
+        IfaceScope scope = iface_scope_enter(parser, loaded, NULL);
+        result = expr_of(iface_type(parser, lz_interface_entry_type(entry)));
+        iface_scope_leave(parser, scope);
+        break;
+    }
+    case LZ_IFACE_ERROR: {
+        /* The constructor lives in the globals of the module that declared the kind, and the import copies it. */
+        const char *own = lz_interface_entry_name(entry);
+        LzString *own_name = lz_vm_intern(parser->vm, own, strlen(own));
+        note_imported_error_class(parser, entry);
+        const LzValue *defined = loaded != NULL && own_name != NULL ? lz_module_get(loaded, own_name) : NULL;
+        if (defined != NULL && defined->type == LZ_VAL_OBJECT && defined->as.object->type == LZ_OBJ_NATIVE) {
+            result.type = lz_type_of_kinds(LZ_KIND_FUNCTION);
+            result.native = (const LzNative *)defined->as.object;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    return result;
+}
+
+static const ImportBinding *find_import_binding(const Parser *parser, const char *name, size_t length) {
+    for (size_t i = 0; i < parser->import_count; i++) {
+        if (strlen(parser->imports[i].bound) == length && memcmp(parser->imports[i].bound, name, length) == 0) {
+            return &parser->imports[i];
+        }
+    }
+    return NULL;
+}
+
+/* What `from util import Point` made of a bare name, or NULL when the name is not such an import. */
+static const LzIfaceEntry *from_import_entry(const Parser *parser, const char *bound) {
+    const ImportBinding *binding = find_import_binding(parser, bound, strlen(bound));
+    if (binding == NULL || binding->is_namespace || binding->entry == NULL) {
+        return NULL;
+    }
+    LzIfaceKind kind = lz_interface_entry_kind(binding->entry);
+    return kind == LZ_IFACE_CLASS || kind == LZ_IFACE_TRAIT ? binding->entry : NULL;
+}
+
+/*
+ * The kind a name in the file stands for: an error imported with `from util import NotFound`, an
+ * error the file declares, or a built-in one.
+ */
+static bool error_kind_of_token(Parser *parser, const LzToken *token, uint8_t *kind) {
+    const char *text = parser->source->text + token->offset;
+    const ImportBinding *binding = find_import_binding(parser, text, token->length);
+    if (binding != NULL) {
+        if (binding->is_namespace || binding->entry == NULL) {
+            return false;
+        }
+        uint64_t id = lz_interface_entry_class_id(binding->entry);
+        if (lz_interface_entry_kind(binding->entry) != LZ_IFACE_ERROR || id == 0) {
+            return false;
+        }
+        *kind = (uint8_t)(id - 1);
+        note_imported_error_class(parser, binding->entry);
+        return true;
+    }
+    return lz_vm_error_kind_from_name(parser->vm, parser->module, text, token->length, kind);
+}
+
+/* `util.NotFound` named as an error kind. Tells what is wrong and returns false when it isn't one. */
+static bool error_kind_of_member(Parser *parser, const LzToken *ns, const LzToken *member, uint8_t *kind) {
+    const ImportBinding *binding = find_import_binding(parser, parser->source->text + ns->offset, ns->length);
+    if (binding == NULL || !binding->is_namespace) {
+        error_with_name(parser, ns, "'", "' is not an imported module");
+        return false;
+    }
+    if (binding->loaded == NULL) {
+        parser->panic = true; /* the import itself failed and said so */
+        return false;
+    }
+    char member_name[48];
+    token_text(parser, member, member_name, sizeof member_name);
+    const LzIfaceEntry *entry = iface_find(binding->loaded, member_name);
+    if (entry == NULL) {
+        import_missing_name(parser, member, binding->bound, binding->loaded);
+        return false;
+    }
+    if (lz_interface_entry_kind(entry) != LZ_IFACE_ERROR || lz_interface_entry_class_id(entry) == 0) {
+        char message[96];
+        (void)snprintf(message, sizeof message, "'%s' is not an error type", member_name);
+        diag_label(parser, "this is a %s", lz_interface_kind_name(lz_interface_entry_kind(entry)));
+        record(parser, member->offset, member->length, message);
+        parser->panic = true;
+        return false;
+    }
+    *kind = (uint8_t)(lz_interface_entry_class_id(entry) - 1);
+    note_imported_error_class(parser, entry);
+    return true;
+}
+
+/*
+ * `util.Base` in the head of a class. When `first` names a namespace, the dot and the member are
+ * read and the entry and the global's name come back. Anything else is left alone, for the
+ * ordinary error. False means an error was reported.
+ */
+static bool imported_head(Parser *parser, const LzToken *first, const LzIfaceEntry **entry, LzString **name,
+                          bool allow_error) {
+    const ImportBinding *binding = find_import_binding(parser, parser->source->text + first->offset, first->length);
+    if (binding == NULL || !binding->is_namespace) {
+        return true;
+    }
+    advance(parser); /* the dot */
+    if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+        error_at_current(parser, "expected a name after '.'");
+        return false;
+    }
+    LzToken member = parser->current;
+    advance(parser);
+    if (binding->loaded == NULL) {
+        return false; /* the import itself failed and said so */
+    }
+    char member_name[48];
+    token_text(parser, &member, member_name, sizeof member_name);
+    const LzIfaceEntry *found = iface_find(binding->loaded, member_name);
+    if (found == NULL) {
+        import_missing_name(parser, &member, binding->bound, binding->loaded);
+        return false;
+    }
+    LzIfaceKind kind = lz_interface_entry_kind(found);
+    if (kind != LZ_IFACE_CLASS && kind != LZ_IFACE_TRAIT && !(allow_error && kind == LZ_IFACE_ERROR)) {
+        char message[96];
+        (void)snprintf(message, sizeof message, allow_error ? "'%s' is not a type that can be extended"
+                                                            : "'%s' is not a class or a trait",
+                       member_name);
+        diag_label(parser, "this is a %s", lz_interface_kind_name(kind));
+        record(parser, member.offset, member.length, message);
+        parser->panic = true;
+        return false;
+    }
+    char global[128];
+    (void)snprintf(global, sizeof global, "%s.%s", binding->bound, member_name);
+    *name = lz_vm_intern(parser->vm, global, strlen(global));
+    *entry = found;
+    if (*name == NULL) {
+        fail(parser, LZ_ERR_MEMORY);
+        return false;
+    }
+    return true;
+}
+
+/*
+ * A type named through an import: `util.Point`, or `Point` after `from util import Point`. The
+ * class does not exist in this file, but its identity was reserved when the module compiled and
+ * is in the interface, so the type is made from that.
+ */
+static bool imported_type(Parser *parser, const LzToken *token, LzType *out, bool *handled) {
+    const ImportBinding *binding = NULL;
+    for (size_t i = 0; i < parser->import_count; i++) {
+        const char *bound = parser->imports[i].bound;
+        if (strlen(bound) == token->length && memcmp(bound, parser->source->text + token->offset, token->length) == 0) {
+            binding = &parser->imports[i];
+            break;
+        }
+    }
+    if (binding == NULL) {
+        return true;
+    }
+    *handled = true;
+    const LzIfaceEntry *entry = binding->entry;
+    char member_name[48];
+    LzToken member = *token;
+    if (binding->is_namespace) {
+        if (!check(parser, LZ_TOKEN_DOT)) {
+            char message[96];
+            (void)snprintf(message, sizeof message, "'%s' is a module, not a type", binding->bound);
+            diag_label(parser, "a module is not a type");
+            diag_help(parser, "name a type of the module, like `%s.Name`", binding->bound);
+            record(parser, token->offset, token->length, message);
+            parser->panic = true;
+            return false;
+        }
+        advance(parser);
+        if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+            error_at_current(parser, "expected a name after '.'");
+            return false;
+        }
+        member = parser->current;
+        advance(parser);
+        if (binding->loaded == NULL) {
+            return true; /* the import itself failed and said so */
+        }
+        token_text(parser, &member, member_name, sizeof member_name);
+        entry = iface_find(binding->loaded, member_name);
+        if (entry == NULL) {
+            import_missing_name(parser, &member, binding->bound, binding->loaded);
+            return false;
+        }
+    } else {
+        if (entry == NULL) {
+            return true; /* the import failed and said so */
+        }
+        (void)snprintf(member_name, sizeof member_name, "%s", binding->original);
+    }
+    LzIfaceKind kind = lz_interface_entry_kind(entry);
+    uint64_t id = lz_interface_entry_class_id(entry);
+    if (kind == LZ_IFACE_CLASS || kind == LZ_IFACE_TRAIT) {
+        LzString *name = lz_vm_intern(parser->vm, member_name, strlen(member_name));
+        if (name == NULL) {
+            fail(parser, LZ_ERR_MEMORY);
+            return false;
+        }
+        *out = lz_type_of_kinds(LZ_KIND_INSTANCE);
+        out->class_name = name;
+        out->class_id = id;
+        return true;
+    }
+    if (kind == LZ_IFACE_ERROR) {
+        const char *kind_name = id > 0 ? lz_vm_error_kind_name(parser->vm, (unsigned)(id - 1)) : member_name;
+        *out = lz_type_of_kinds(LZ_KIND_ERROR);
+        out->class_id = id;
+        out->class_name = lz_vm_intern(parser->vm, kind_name, strlen(kind_name));
+        return true;
+    }
+    if (kind == LZ_IFACE_TYPE) {
+        /* An alias of another module is read from its target, in the names of that module. */
+        IfaceScope scope = iface_scope_enter(parser, binding->loaded, NULL);
+        *out = iface_type(parser, lz_interface_entry_type(entry));
+        iface_scope_leave(parser, scope);
+        return true;
+    }
+    char message[96];
+    (void)snprintf(message, sizeof message, "'%s' is not a type", member_name);
+    diag_label(parser, "this is a %s, not a type", lz_interface_kind_name(kind));
+    record(parser, member.offset, member.length, message);
+    parser->panic = true;
+    return false;
+}
+
+/* `util.x` was named but is not there, or is not `pub`. */
+static void import_missing_name(Parser *parser, const LzToken *member, const char *bound, const LzModule *module) {
+    char name[48];
+    token_text(parser, member, name, sizeof name);
+    uint32_t declared;
+    if (source_declares(&module->source, name, &declared)) {
+        char message[160];
+        (void)snprintf(message, sizeof message, "cannot use '%s' from module '%s'", name, bound);
+        diag_label(parser, "this name is private to %s", module->source.name);
+        diag_note(parser, "`%s` exists in %s but is not `pub`", name, bound);
+        record(parser, member->offset, member->length, message);
+        parser->panic = true;
+        return;
+    }
+    LzSuggester suggester;
+    lz_suggester_init(&suggester, name, strlen(name));
+    iface_offer(module, &suggester);
+    char before[160];
+    (void)snprintf(before, sizeof before, "module '%s' has no name '", bound);
+    error_with_name_suggest(parser, member, before, "'", "not exported by this module", &suggester.found);
+}
+
+static bool import_name_expr(Parser *parser, const LzToken *token, LzString *name, Expr *out) {
+    const ImportBinding *binding = NULL;
+    for (size_t i = 0; i < parser->import_count; i++) {
+        if (strlen(parser->imports[i].bound) == name->length &&
+            memcmp(parser->imports[i].bound, name->data, name->length) == 0) {
+            binding = &parser->imports[i];
+            break;
+        }
+    }
+    if (binding == NULL) {
+        return false;
+    }
+    if (!binding->is_namespace) {
+        *out = binding->entry != NULL ? import_entry_expr(parser, token, binding->entry, binding->loaded, binding->bound) : any_expr();
+        if (binding->entry == NULL) {
+            emit_named(parser, LZ_OP_GET_GLOBAL, name, token->offset);
+        }
+        return true;
+    }
+    if (!check(parser, LZ_TOKEN_DOT)) {
+        char names[120];
+        size_t used = 0;
+        names[0] = '\0';
+        const LzInterface *iface = binding->loaded != NULL && binding->loaded->chunk != NULL
+                                       ? lz_interface_of(binding->loaded->chunk) : NULL;
+        for (size_t i = 0; iface != NULL && i < lz_interface_count(iface) && i < 4; i++) {
+            used += (size_t)snprintf(names + used, sizeof names - used, "%s%s.%s", i == 0 ? "" : ", ", binding->bound,
+                                     lz_interface_entry_name(lz_interface_entry(iface, i)));
+        }
+        char message[96];
+        (void)snprintf(message, sizeof message, "`%s` is a module, use `%s.name`", binding->bound, binding->bound);
+        diag_label(parser, "a module is not a value");
+        if (names[0] != '\0') {
+            diag_help(parser, "it exports: %s", names);
+        }
+        record(parser, token->offset, token->length, message);
+        parser->panic = true;
+        *out = any_expr();
+        return true;
+    }
+    advance(parser); /* the dot */
+    if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+        error_at_current(parser, "expected a name after '.'");
+        *out = any_expr();
+        return true;
+    }
+    LzToken member = parser->current;
+    advance(parser);
+    if (binding->loaded == NULL) {
+        *out = any_expr(); /* the import itself failed and said so */
+        return true;
+    }
+    char member_name[48];
+    token_text(parser, &member, member_name, sizeof member_name);
+    const LzIfaceEntry *entry = iface_find(binding->loaded, member_name);
+    if (entry == NULL) {
+        import_missing_name(parser, &member, binding->bound, binding->loaded);
+        *out = any_expr();
+        return true;
+    }
+    if (token_is_assign(parser->current.type)) {
+        diag_label(parser, "assigned here");
+        record(parser, member.offset, member.length, "a module's names cannot be changed from outside");
+        parser->panic = true;
+        *out = any_expr();
+        return true;
+    }
+    char global[128];
+    (void)snprintf(global, sizeof global, "%s.%s", binding->bound, member_name);
+    *out = import_entry_expr(parser, &member, entry, binding->loaded, global);
+    return true;
+}
+
+/* The instruction that runs the module and copies its exports, at the place of the import. */
+static void emit_import(Parser *parser, const LzModule *module, const char *bound, const char *original, uint8_t mode,
+                        uint32_t offset) {
+    if (module == NULL) {
+        return;
+    }
+    LzString *id = lz_vm_intern(parser->vm, module->id, strlen(module->id));
+    LzString *bound_name = lz_vm_intern(parser->vm, bound, strlen(bound));
+    LzString *original_name = lz_vm_intern(parser->vm, original, strlen(original));
+    if (id == NULL || bound_name == NULL || original_name == NULL) {
+        fail(parser, LZ_ERR_MEMORY);
+        return;
+    }
+    uint16_t a = add_constant(parser, lz_value_object(&id->base), true);
+    uint16_t b = add_constant(parser, lz_value_object(&bound_name->base), true);
+    uint16_t c = add_constant(parser, lz_value_object(&original_name->base), true);
+    emit_op_at(parser, LZ_OP_IMPORT, offset);
+    emit_u16_at(parser, a, offset);
+    emit_u16_at(parser, b, offset);
+    emit_u16_at(parser, c, offset);
+    emit_byte_at(parser, mode, offset);
+}
+
+static void import_statement(Parser *parser) {
+    LzToken keyword = parser->current;
+    advance(parser);
+    if (!import_placement_ok(parser, &keyword, false)) {
+        return;
+    }
+    char module[256];
+    LzToken first = parser->current;
+    LzToken last;
+    if (!import_module_name(parser, &keyword, module, sizeof module, &last)) {
+        return;
+    }
+    bool ok;
+    LzToken bound = import_alias(parser, last, &ok);
+    if (!ok) {
+        return;
+    }
+    LzModule *loaded = import_prepare(parser, &first, &last, module);
+    ImportBinding *added = import_bind(parser, &bound, module, true, loaded);
+    if (added != NULL) {
+        emit_import(parser, loaded, added->bound, "", 0, keyword.offset);
+    }
+    end_statement(parser);
+}
+
+static void from_statement(Parser *parser) {
+    LzToken keyword = parser->current;
+    advance(parser);
+    if (!import_placement_ok(parser, &keyword, true)) {
+        return;
+    }
+    char module[256];
+    LzToken first = parser->current;
+    LzToken last;
+    if (!import_module_name(parser, &keyword, module, sizeof module, &last)) {
+        return;
+    }
+    if (!check(parser, LZ_TOKEN_IDENTIFIER) || !word_is(parser, &parser->current, "import")) {
+        diag_label(parser, "`import` and the names to take come next");
+        diag_help(parser, "write `from %s import name`", module);
+        error_at_previous(parser, "expected 'import' after the module name");
+        return;
+    }
+    LzToken import_word = parser->current;
+    advance(parser);
+    LzModule *loaded = import_prepare(parser, &first, &last, module);
+    for (;;) {
+        if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
+            diag_label(parser, "a name to take from `%s` goes here", module);
+            diag_help(parser, "write `from %s import name`", module);
+            error_at(parser, &import_word, "expected a name after 'import'");
+            return;
+        }
+        LzToken name = parser->current;
+        advance(parser);
+        bool ok;
+        LzToken bound = import_alias(parser, name, &ok);
+        if (!ok) {
+            return;
+        }
+        char original[48];
+        token_text(parser, &name, original, sizeof original);
+        const LzIfaceEntry *entry = loaded != NULL ? iface_find(loaded, original) : NULL;
+        if (loaded != NULL && entry == NULL) {
+            import_missing_name(parser, &name, module, loaded);
+            return;
+        }
+        ImportBinding *added = import_bind(parser, &bound, module, false, loaded);
+        if (added != NULL) {
+            memcpy(added->original, original, sizeof original);
+            added->entry = entry;
+            emit_import(parser, loaded, added->bound, original, 1, keyword.offset);
+        }
+        if (!match(parser, LZ_TOKEN_COMMA)) {
+            break;
+        }
+        import_word = parser->previous;
+    }
+    end_statement(parser);
+}
+
 static void declaration(Parser *parser) {
     if (parser->fatal != LZ_OK) {
         return;
@@ -9608,6 +11002,19 @@ static void declaration(Parser *parser) {
     uint32_t start_offset = parser->current.offset;
     LzTokenType start_type = parser->current.type;
     parser->terminated = false;
+
+    bool import_start = at_import_statement(parser) || at_from_statement(parser);
+    if (import_start && !parser->panic) {
+        if (word_is(parser, &parser->current, "from")) {
+            from_statement(parser);
+        } else {
+            import_statement(parser);
+        }
+        goto finished;
+    }
+    if (!import_start && at_top_level(parser)) {
+        parser->body_started = true;
+    }
 
     switch (parser->current.type) {
     case LZ_TOKEN_FN:
@@ -9674,7 +11081,8 @@ static void declaration(Parser *parser) {
             class_declaration(parser);
         } else if (word_is(parser, &parser->current, "extend") &&
                    (next_token_type(parser) == LZ_TOKEN_IDENTIFIER || next_token_type(parser) == LZ_TOKEN_NIL) &&
-                   peek_token(parser, 2).type != LZ_TOKEN_EQUAL && peek_token(parser, 2).type != LZ_TOKEN_DOT &&
+                   peek_token(parser, 2).type != LZ_TOKEN_EQUAL &&
+                   (peek_token(parser, 2).type != LZ_TOKEN_DOT || extend_names_import(parser)) &&
                    peek_token(parser, 2).type != LZ_TOKEN_LEFT_PAREN) {
             extend_declaration(parser);
         } else if (at_error_declaration(parser)) {
@@ -9694,6 +11102,7 @@ static void declaration(Parser *parser) {
         break;
     }
 
+finished:
     parser->pub_open = false;
     if (parser->panic) {
         synchronize(parser);
@@ -9729,6 +11138,13 @@ static void prescan_classes(Parser *parser) {
             LzLexer peek = lexer;
             LzToken name = lz_lexer_next(&peek);
             LzToken after = lz_lexer_next(&peek);
+            if (name.type == LZ_TOKEN_IDENTIFIER && after.type == LZ_TOKEN_DOT) {
+                LzToken member = lz_lexer_next(&peek);
+                after = lz_lexer_next(&peek);
+                if (member.type != LZ_TOKEN_IDENTIFIER) {
+                    after.type = LZ_TOKEN_EOF;
+                }
+            }
             if ((name.type == LZ_TOKEN_IDENTIFIER || name.type == LZ_TOKEN_NIL) && (after.type == LZ_TOKEN_LEFT_BRACE || after.type == LZ_TOKEN_LEFT_BRACKET)) {
                 parser->vm->has_classes = true;
                 return;
@@ -9776,7 +11192,7 @@ static LzStatus compile_into(Parser *parser) {
     if (parser->fatal != LZ_OK) {
         return parser->fatal;
     }
-    return parser->diagnostics->count > 0 ? LZ_ERR_COMPILE : LZ_OK;
+    return parser->diagnostics->count > 0 || parser->silent_failure ? LZ_ERR_COMPILE : LZ_OK;
 }
 
 LzStatus lz_compile_module(LzVM *vm, LzModule *module, const LzSource *source, LzChunk *chunk,
@@ -9800,7 +11216,12 @@ LzStatus lz_compile_module(LzVM *vm, LzModule *module, const LzSource *source, L
     parser->no_in_depth = -1;
     lz_lexer_init(&parser->lexer, source);
 
+    if (vm->compiling == 0) {
+        lz_module_failure_free(vm); /* a compile that is not an import starts over */
+    }
+    vm->compiling++;
     LzStatus status = compile_into(parser);
+    vm->compiling--;
     if (status == LZ_ERR_MEMORY || status == LZ_ERR_HEAP_LIMIT) {
         if (vm->error[0] == '\0') {
             (void)lz_vm_out_of_memory(vm);
@@ -9859,6 +11280,13 @@ const LzNameHint *lz_diagnostics_find_hint(const LzDiagnostics *diagnostics, uin
 
 void lz_diagnostics_report(const LzDiagnostics *diagnostics, const LzSource *source, bool color,
                            const LzWriter *out) {
+    lz_diagnostics_report_body(diagnostics, source, color, out);
+    lz_report_write_summary(diagnostics->count + diagnostics->dropped, diagnostics->dropped, color,
+                            out);
+}
+
+void lz_diagnostics_report_body(const LzDiagnostics *diagnostics, const LzSource *source, bool color,
+                                const LzWriter *out) {
     for (size_t i = 0; i < diagnostics->count; i++) {
         const LzDiagnostic *item = &diagnostics->items[i];
         LzReport report = {0};
@@ -9881,6 +11309,7 @@ void lz_diagnostics_report(const LzDiagnostics *diagnostics, const LzSource *sou
             fix.delete_length = extras->fix_delete;
             fix.insert_text = extras->fix_text;
             fix.insert_line = extras->fix_insert_line;
+            fix.quiet = extras->fix_quiet;
             fix.insert_indent = extras->fix_has_indent ? extras->fix_indent : NULL;
             report.fix = &fix;
             if (extras->keep_help && extras->help[0] != '\0') {
@@ -9891,6 +11320,4 @@ void lz_diagnostics_report(const LzDiagnostics *diagnostics, const LzSource *sou
         }
         lz_report_write(source, &report, color, out);
     }
-    lz_report_write_summary(diagnostics->count + diagnostics->dropped, diagnostics->dropped, color,
-                            out);
 }

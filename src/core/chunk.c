@@ -324,6 +324,8 @@ const char *lz_opcode_name(uint8_t opcode) {
         return "OP_CLASS_LINK";
     case LZ_OP_EXTEND:
         return "OP_EXTEND";
+    case LZ_OP_IMPORT:
+        return "OP_IMPORT";
     case LZ_OP_ERROR_CLASS:
         return "OP_ERROR_CLASS";
     case LZ_OP_SUPER:
@@ -418,6 +420,8 @@ size_t lz_opcode_length(uint8_t opcode) {
     case LZ_OP_EXTEND:
     case LZ_OP_ERROR_CLASS:
         return 6;
+    case LZ_OP_IMPORT:
+        return 8;
     case LZ_OP_SUPER:
         return 4;
     case LZ_OP_IS:

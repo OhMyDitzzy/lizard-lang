@@ -1,0 +1,5 @@
+class A { pub x: int }
+class B { pub x: int }
+fn f(a: A) => a.x
+let b: B = B(1)
+f(b)

@@ -16,6 +16,8 @@ LzIfaceEntry *lz_iface_add_entry(LzInterface *iface, LzIfaceKind kind, const cha
 bool lz_iface_entry_set_type(LzIfaceEntry *entry, const char *type);
 /* Takes the signature, which is freed with the entry. */
 void lz_iface_entry_set_sig(LzIfaceEntry *entry, LzIfaceSig *sig);
+/* The identity the compiler reserved for a class, trait or error (kind + 1). */
+void lz_iface_entry_set_class_id(LzIfaceEntry *entry, uint64_t id);
 bool lz_iface_entry_set_parent(LzIfaceEntry *entry, const char *parent);
 bool lz_iface_entry_add_trait(LzIfaceEntry *entry, const char *trait);
 LzIfaceMember *lz_iface_add_member(LzIfaceEntry *entry, LzIfaceMemberKind kind, const char *name);

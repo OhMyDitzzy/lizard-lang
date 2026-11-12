@@ -3,6 +3,7 @@
 #include "lizard/arith.h"
 #include "lizard/array.h"
 #include "lizard/class.h"
+#include "lizard/interface.h"
 #include "lizard/link.h"
 #include "lizard/compare.h"
 #include "lizard/dict.h"
@@ -96,8 +97,46 @@ static LzStatus type_mismatch(LzVM *vm, const LzType *type, const LzValue *value
     LzWriter expected_out = lz_writer_from_buffer(&expected);
     LzWriter actual_out = lz_writer_from_buffer(&actual);
 
-    lz_type_describe(type, &expected_out);
-    if (lz_value_is_array(value) || lz_value_is_dict(value)) {
+    bool error_pair = (type->kinds & LZ_KIND_ERROR) != 0 && (type->kinds & LZ_KIND_INSTANCE) == 0 &&
+                      type->class_id != 0 && type->literal_count == 0 && lz_value_is_error(value);
+    const LzClass *wanted_class = (type->kinds & LZ_KIND_INSTANCE) != 0 && type->class_id != 0 && type->literal_count == 0
+                                      ? lz_class_by_id(vm, type->class_id) : NULL;
+    bool same_name_other_class = wanted_class != NULL && lz_value_is_instance(value) &&
+                                 lz_value_as_instance(value)->cls != wanted_class &&
+                                 lz_value_as_instance(value)->cls->name == wanted_class->name;
+    if (same_name_other_class) {
+        /* Two different classes called alike, so each is written with its module. */
+        char left[160];
+        char right[160];
+        lz_class_qualified_name(wanted_class, left, sizeof left);
+        lz_class_qualified_name(lz_value_as_instance(value)->cls, right, sizeof right);
+        (void)lz_writer_write_cstr(&expected_out, left);
+        (void)lz_writer_write_cstr(&actual_out, right);
+        if (strcmp(left, right) == 0) {
+            /* Not told apart by the module either, so it was defined again and this object is from before. */
+            (void)lz_writer_write_cstr(&actual_out, " (made by an earlier definition of that class)");
+        }
+    } else if (error_pair) {
+        /* An error of another kind: its kind is named, and with its module when the two share a name. */
+        unsigned want = (unsigned)(type->class_id - 1);
+        unsigned have = ((const LzError *)value->as.object)->kind;
+        char left[160];
+        char right[160];
+        if (strcmp(lz_vm_error_kind_name(vm, want), lz_vm_error_kind_name(vm, have)) == 0) {
+            lz_vm_error_kind_qualified_name(vm, want, left, sizeof left);
+            lz_vm_error_kind_qualified_name(vm, have, right, sizeof right);
+        } else {
+            (void)snprintf(left, sizeof left, "%s", lz_vm_error_kind_name(vm, want));
+            (void)snprintf(right, sizeof right, "%s", lz_vm_error_kind_name(vm, have));
+        }
+        (void)lz_writer_write_cstr(&expected_out, left);
+        (void)lz_writer_write_cstr(&actual_out, right);
+    } else {
+        lz_type_describe(type, &expected_out);
+    }
+    if (same_name_other_class || error_pair) {
+        /* already written */
+    } else if (lz_value_is_array(value) || lz_value_is_dict(value)) {
         LzType shown = lz_type_of_value(value);
         lz_type_describe(&shown, &actual_out);
     } else if (type->literal_count > 0) {
@@ -974,7 +1013,7 @@ static LzStatus error_class_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     (*ip)++; /* reserved */
     uint8_t kind;
     uint8_t parent;
-    if (!lz_vm_error_kind_from_name(vm, name->data, name->length, &kind) ||
+    if (!lz_vm_error_kind_from_name(vm, chunk->module, name->data, name->length, &kind) ||
         !lz_vm_error_kind_parent(vm, kind, &parent)) {
         return malformed(vm, "unknown error kind");
     }
@@ -1010,6 +1049,74 @@ static LzStatus extend_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "'%s' is not a type that can be extended", target_name->data);
     }
     return lz_vm_extend_register(vm, ext, target);
+}
+
+/* Stores one export of a module in the globals of the module that imports it. */
+static LzStatus import_store(LzVM *vm, LzTable *dest, const char *name, LzValue value) {
+    LzString *key = lz_vm_intern(vm, name, strlen(name));
+    if (key == NULL) {
+        return lz_vm_out_of_memory(vm);
+    }
+    return lz_table_set(&vm->heap, dest, key, value) ? LZ_OK : lz_vm_out_of_memory(vm);
+}
+
+/* `import m` and `from m import a`: runs the module once, then copies what it exports. */
+static LzStatus import_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
+    LzString *id = NULL;
+    LzString *bound = NULL;
+    LzString *original = NULL;
+    LzStatus status = read_name(vm, chunk, ip, &id);
+    if (status == LZ_OK) {
+        status = read_name(vm, chunk, ip, &bound);
+    }
+    if (status == LZ_OK) {
+        status = read_name(vm, chunk, ip, &original);
+    }
+    if (status != LZ_OK) {
+        return status;
+    }
+    if (*ip >= chunk->count) {
+        return malformed(vm, "truncated operand");
+    }
+    uint8_t mode = chunk->code[(*ip)++];
+    LzModule *module = vm->modules;
+    while (module != NULL && (module->id == NULL || strcmp(module->id, id->data) != 0)) {
+        module = module->next;
+    }
+    if (module == NULL || vm->module_run == NULL) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "module '%s' is not loaded", id->data);
+    }
+    status = vm->module_run(vm, module);
+    if (status != LZ_OK) {
+        return status;
+    }
+    const LzInterface *iface = lz_interface_of(module->chunk);
+    LzTable *dest = lz_chunk_globals(vm, chunk);
+    for (size_t i = 0; iface != NULL && i < lz_interface_count(iface); i++) {
+        const LzIfaceEntry *entry = lz_interface_entry(iface, i);
+        const char *name = lz_interface_entry_name(entry);
+        if (mode == 1 && strcmp(name, original->data) != 0) {
+            continue;
+        }
+        LzString *key = lz_vm_intern(vm, name, strlen(name));
+        if (key == NULL) {
+            return lz_vm_out_of_memory(vm);
+        }
+        const LzValue *value = lz_table_get(&module->globals, key);
+        if (value == NULL) {
+            continue; /* a type alias has no value */
+        }
+        if (mode == 1) {
+            return import_store(vm, dest, bound->data, *value);
+        }
+        char stored[160];
+        (void)snprintf(stored, sizeof stored, "%s.%s", bound->data, name);
+        status = import_store(vm, dest, stored, *value);
+        if (status != LZ_OK) {
+            return status;
+        }
+    }
+    return LZ_OK;
 }
 
 /* The head `class A : B, C` after the name is bound, with `B` on the stack. */
@@ -1941,6 +2048,9 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         break;
     case LZ_OP_ERROR_CLASS:
         status = error_class_op(vm, chunk, &ip);
+        break;
+    case LZ_OP_IMPORT:
+        status = import_op(vm, chunk, &ip);
         break;
     case LZ_OP_SUPER:
         status = super_op(vm, chunk, &ip);

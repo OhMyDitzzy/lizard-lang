@@ -128,11 +128,17 @@ static void unlink_module(LzVM *vm, LzModule *module) {
     }
 }
 
-LzStatus lz_module_load_source(LzVM *vm, LzModuleSource *source, LzModule **out) {
+/* Is this module waiting on the way to the one that asks for it? */
+static bool in_progress(const LzModule *module) {
+    return module->state == LZ_MODULE_LOADING || module->state == LZ_MODULE_RUNNING;
+}
+
+LzStatus lz_module_prepare_source(LzVM *vm, LzModuleSource *source, LzModule **out) {
+    vm->module_run = lz_module_run;
     LzModule *known = source->id != NULL ? find_module(vm, source->id) : NULL;
     if (known != NULL) {
         LzStatus status = LZ_OK;
-        if (known->state == LZ_MODULE_LOADING) {
+        if (in_progress(known)) {
             status = circular_error(vm, known);
         } else if (out != NULL) {
             *out = known;
@@ -144,9 +150,23 @@ LzStatus lz_module_load_source(LzVM *vm, LzModuleSource *source, LzModule **out)
         source_discard(source);
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "the module source is incomplete");
     }
+    vm->last_failure = NULL;
+    for (const LzModuleFailure *seen = vm->module_failure; seen != NULL; seen = seen->next) {
+        if (seen->id != NULL && source->id != NULL && strcmp(seen->id, source->id) == 0) {
+            /* It failed already in this compile and said so, so it is not compiled and reported again. */
+            vm->last_failure = seen;
+            source_discard(source);
+            vm->import_cycle = seen->cycle;
+            return lz_vm_set_error(vm, LZ_ERR_COMPILE, "cannot load module: it failed to compile above");
+        }
+    }
     if (vm->module_count >= LZ_MODULES_MAX) {
         source_discard(source);
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "too many modules (limit is %d)", LZ_MODULES_MAX);
+    }
+    if (vm->compiling >= LZ_IMPORT_DEPTH_MAX) {
+        source_discard(source);
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "imports are nested too deeply (limit is %d)", LZ_IMPORT_DEPTH_MAX);
     }
 
     LzModule *module = mod_calloc(sizeof *module);
@@ -176,7 +196,6 @@ LzStatus lz_module_load_source(LzVM *vm, LzModuleSource *source, LzModule **out)
         lz_module_discard(module);
         return lz_vm_out_of_memory(vm);
     }
-    module->next = vm->modules;
     /* Append, so main stays first. */
     LzModule **tail = &vm->modules;
     while (*tail != NULL) {
@@ -186,8 +205,23 @@ LzStatus lz_module_load_source(LzVM *vm, LzModuleSource *source, LzModule **out)
     *tail = module;
     vm->module_count++;
 
+    bool outer_cycle = vm->import_cycle;
+    vm->import_cycle = false;
     LzStatus status = lz_compile_module(vm, module, &module->source, chunk, &failure->diagnostics);
+    vm->loading_count--;
     if (status != LZ_OK) {
+        size_t id_length = strlen(module->id) + 1;
+        failure->id = malloc(id_length);
+        if (failure->id != NULL) {
+            memcpy(failure->id, module->id, id_length);
+        }
+        bool only_cycle = vm->import_cycle;
+        for (size_t i = 0; i < failure->diagnostics.count && only_cycle; i++) {
+            only_cycle = strncmp(failure->diagnostics.items[i].message, "circular import", 15) == 0;
+        }
+        failure->cycle = only_cycle;
+        vm->import_cycle = only_cycle;
+        vm->last_failure = failure;
         if (status == LZ_ERR_COMPILE && failure->diagnostics.count > 0) {
             const LzDiagnostic *first = &failure->diagnostics.items[0];
             LzLocation at = lz_source_locate(&module->source, first->offset);
@@ -200,51 +234,95 @@ LzStatus lz_module_load_source(LzVM *vm, LzModuleSource *source, LzModule **out)
         module->source.text = NULL;
         module->source.owned = false;
         unlink_module(vm, module);
-        vm->loading_count--;
         lz_chunk_free(&vm->heap, chunk);
         lz_table_free(&vm->heap, &module->globals);
+        lz_vm_error_scope_drop(vm, module); /* its kinds stay counted but no name finds them */
         lz_module_discard(module);
-        lz_module_failure_free(vm);
+        failure->next = vm->module_failure; /* what this module imports, and that failed, stays behind it */
         vm->module_failure = failure;
         return status;
     }
     free(failure);
-
-    status = run_module_code(vm, chunk);
-    vm->loading_count--;
-    if (status != LZ_OK) {
-        /* What the code made may live on in other places, so the module's memory stays until the VM ends. */
-        unlink_module(vm, module);
-        lz_chunk_free(&vm->heap, chunk);
-        lz_chunk_init(chunk);
-        lz_table_free(&vm->heap, &module->globals);
-        module->state = LZ_MODULE_READY;
-        module->next = vm->retired;
-        vm->retired = module;
-        return status;
-    }
-    module->state = LZ_MODULE_READY;
+    vm->import_cycle = outer_cycle;
+    module->state = LZ_MODULE_COMPILED;
     if (out != NULL) {
         *out = module;
     }
     return LZ_OK;
 }
 
-LzStatus lz_module_load(LzVM *vm, const LzModule *importer, const char *name, LzModule **out) {
+LzStatus lz_module_run(LzVM *vm, LzModule *module) {
+    if (module->state == LZ_MODULE_READY) {
+        return LZ_OK;
+    }
+    if (module->state != LZ_MODULE_COMPILED) {
+        return circular_error(vm, module);
+    }
+    if (!loading_push(vm, module)) {
+        return lz_vm_out_of_memory(vm);
+    }
+    module->state = LZ_MODULE_RUNNING;
+    LzStatus status = run_module_code(vm, module->chunk);
+    vm->loading_count--;
+    module->state = LZ_MODULE_READY;
+    if (status != LZ_OK) {
+        /* What the code made may live on in other places, so the module's memory stays until the VM ends. */
+        unlink_module(vm, module);
+        lz_chunk_free(&vm->heap, module->chunk);
+        lz_chunk_init(module->chunk);
+        lz_table_free(&vm->heap, &module->globals);
+        lz_vm_error_scope_drop(vm, module);
+        module->next = vm->retired;
+        vm->retired = module;
+    }
+    return status;
+}
+
+LzStatus lz_module_load_source(LzVM *vm, LzModuleSource *source, LzModule **out) {
+    LzModule *module = NULL;
+    LzStatus status = lz_module_prepare_source(vm, source, &module);
+    if (status != LZ_OK) {
+        return status;
+    }
+    status = lz_module_run(vm, module);
+    if (status == LZ_OK && out != NULL) {
+        *out = module;
+    }
+    return status;
+}
+
+static LzStatus resolve_source(LzVM *vm, const LzModule *importer, const char *name, LzModuleSource *source) {
     if (vm->resolver.resolve == NULL) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "modules are not available here");
     }
-    LzModuleSource source;
-    memset(&source, 0, sizeof source);
-    LzStatus status = vm->resolver.resolve(vm->resolver.context, vm, importer, name, &source);
+    memset(source, 0, sizeof *source);
+    LzStatus status = vm->resolver.resolve(vm->resolver.context, vm, importer, name, source);
     if (status != LZ_OK) {
-        source_discard(&source);
+        source_discard(source);
         if (vm->error[0] == '\0') {
             (void)lz_vm_set_error(vm, status, "cannot find module '%s'", name);
         }
+    }
+    return status;
+}
+
+LzStatus lz_module_prepare(LzVM *vm, const LzModule *importer, const char *name, LzModule **out) {
+    LzModuleSource source;
+    LzStatus status = resolve_source(vm, importer, name, &source);
+    return status != LZ_OK ? status : lz_module_prepare_source(vm, &source, out);
+}
+
+LzStatus lz_module_load(LzVM *vm, const LzModule *importer, const char *name, LzModule **out) {
+    LzModule *module = NULL;
+    LzStatus status = lz_module_prepare(vm, importer, name, &module);
+    if (status != LZ_OK) {
         return status;
     }
-    return lz_module_load_source(vm, &source, out);
+    status = lz_module_run(vm, module);
+    if (status == LZ_OK && out != NULL) {
+        *out = module;
+    }
+    return status;
 }
 
 bool lz_module_set_main(LzVM *vm, const char *id, const char *name) {
@@ -267,4 +345,17 @@ bool lz_module_set_main(LzVM *vm, const char *id, const char *name) {
     main->source.name = name_copy;
     main->state = LZ_MODULE_LOADING; /* main is running until the program ends */
     return true;
+}
+
+static size_t failures_report(const LzModuleFailure *failure, bool color, const LzWriter *out) {
+    if (failure == NULL) {
+        return 0;
+    }
+    size_t before = failures_report(failure->next, color, out);
+    lz_diagnostics_report_body(&failure->diagnostics, &failure->source, color, out);
+    return before + failure->diagnostics.count + failure->diagnostics.dropped;
+}
+
+size_t lz_vm_module_failures_report(const LzVM *vm, bool color, const LzWriter *out) {
+    return failures_report(vm->module_failure, color, out);
 }

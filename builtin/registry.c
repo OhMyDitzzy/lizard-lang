@@ -93,7 +93,7 @@ LzStatus lz_builtin_install(LzVM *vm) {
                                   : LZ_LINKS_NONE;
         uint8_t error_kind;
         if (builtin->fn == lz_error_type_native &&
-            lz_vm_error_kind_from_name(vm, builtin->name, strlen(builtin->name), &error_kind)) {
+            lz_vm_error_kind_from_name(vm, NULL, builtin->name, strlen(builtin->name), &error_kind)) {
             native->data = (const void *)(uintptr_t)error_kind; /* the kind this function makes */
         }
         bool defined = lz_vm_define_builtin(vm, name, lz_value_object(&native->base));
