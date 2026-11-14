@@ -42,37 +42,18 @@ static LzStatus division_by_zero(LzVM *vm) {
 }
 
 static LzStatus integer_floor_divide(LzVM *vm, int64_t a, int64_t b, LzValue *result) {
-    if (b == 0) {
-        return division_by_zero(vm);
-    }
-    if (b == -1) {
-        if (a == INT64_MIN) {
-            return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "integer overflow");
-        }
-        *result = lz_value_int(-a);
-        return LZ_OK;
-    }
-
-    int64_t quotient = a / b;
-    if (a % b != 0 && ((a < 0) != (b < 0))) {
-        quotient--;
+    int64_t quotient;
+    if (!lz_int_floor_divide(a, b, &quotient)) {
+        return b == 0 ? division_by_zero(vm) : lz_vm_set_error(vm, LZ_ERR_RUNTIME, "integer overflow");
     }
     *result = lz_value_int(quotient);
     return LZ_OK;
 }
 
 static LzStatus integer_modulo(LzVM *vm, int64_t a, int64_t b, LzValue *result) {
-    if (b == 0) {
+    int64_t remainder;
+    if (!lz_int_modulo(a, b, &remainder)) {
         return division_by_zero(vm);
-    }
-    if (b == -1) {
-        *result = lz_value_int(0);
-        return LZ_OK;
-    }
-
-    int64_t remainder = a % b;
-    if (remainder != 0 && ((remainder < 0) != (b < 0))) {
-        remainder += b;
     }
     *result = lz_value_int(remainder);
     return LZ_OK;
@@ -149,6 +130,11 @@ static LzStatus float_arith(LzVM *vm, LzOpCode op, double a, double b, LzValue *
     case LZ_OP_MODULO: {
         if (b == 0.0) {
             return division_by_zero(vm);
+        }
+        double whole;
+        if (op == LZ_OP_MODULO && lz_float_modulo_whole(a, b, &whole)) {
+            *result = lz_value_float(whole);
+            return LZ_OK;
         }
         double floor_div;
         double mod;

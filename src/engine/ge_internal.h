@@ -45,6 +45,18 @@ typedef struct GeIns {
     uint32_t hint_a; /* inline caches: slot in the globals table last seen for each operand */
     uint32_t hint_b;
     uint32_t hint_c;
+    /*
+     * Inline cache of GET_FIELD, GET_FIELD_W, GET_FIELD_KEEP, SET_FIELD and METHOD_LOOKUP: the id
+     * of the class last seen on this instruction and the member it resolved to. A hit means the
+     * instance's class is that very class (ids are never reused, so a class made again or at a
+     * reused address misses), and then the lookup, the visibility checks of the code that owns the
+     * instruction and the kind of the member were all settled when the entry was filled. A class
+     * never gains or loses members once an instance of it exists (members are added while the
+     * class is being defined), and the member lives in the members array of a class its
+     * instances keep alive, so the pointer cannot dangle. 0 means empty.
+     */
+    uint64_t ic_class;
+    const struct LzMember *ic_member;
 } GeIns;
 
 struct GeJit;

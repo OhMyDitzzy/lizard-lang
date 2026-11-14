@@ -85,30 +85,105 @@ static inline bool lz_multiply_overflows(int64_t a, int64_t b, int64_t *out) {
 #endif
 
 /*
- * The common case of + - * with nothing to report: two ints that do not overflow, or two numbers
- * of which one is a float, which is computed in doubles as lz_arith_binary does. Returns false
- * and leaves *out alone for anything else, and the caller then takes the general path, which also
- * produces every error message.
+ * Integer '//' and '%' with the sign rules of the language, shared by lz_arith_binary and the
+ * interpreter fast path. False for a zero divisor, and for INT64_MIN // -1, which overflows.
+ */
+static inline bool lz_int_floor_divide(int64_t a, int64_t b, int64_t *out) {
+    if (b == 0) {
+        return false;
+    }
+    if (b == -1) {
+        if (a == INT64_MIN) {
+            return false;
+        }
+        *out = -a;
+        return true;
+    }
+    int64_t quotient = a / b;
+    if (a % b != 0 && ((a < 0) != (b < 0))) {
+        quotient--;
+    }
+    *out = quotient;
+    return true;
+}
+
+static inline bool lz_int_modulo(int64_t a, int64_t b, int64_t *out) {
+    if (b == 0) {
+        return false;
+    }
+    if (b == -1) {
+        *out = 0;
+        return true;
+    }
+    int64_t remainder = a % b;
+    if (remainder != 0 && ((remainder < 0) != (b < 0))) {
+        remainder += b;
+    }
+    *out = remainder;
+    return true;
+}
+
+/*
+ * x % y for whole-number floats and a positive divisor, which is what `n / 2` leaves behind. The
+ * remainder is exact in integers and equals what fmod plus the sign fix-up gives, without the libm
+ * call. False for anything else (fractions, NaN, infinities, a divisor <= 0, magnitudes above
+ * 2^53), and the caller then takes the general path.
+ */
+static inline bool lz_float_modulo_whole(double x, double y, double *out) {
+    const double limit = 9007199254740992.0;
+    if (y > 0.0 && y <= limit && x >= -limit && x <= limit) {
+        int64_t xi = (int64_t)x;
+        int64_t yi = (int64_t)y;
+        if ((double)xi == x && (double)yi == y) {
+            int64_t m = xi % yi;
+            if (m < 0) {
+                m += yi;
+            }
+            *out = (double)m;
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * The common case of the six arithmetic operators with nothing to report: two ints that do not
+ * overflow and have a nonzero divisor, or two numbers of which one is a float, computed in
+ * doubles as lz_arith_binary does (float '//' and '%' only for whole numbers, see above).
+ * Returns false and leaves *out alone for anything else, and the caller then takes the general
+ * path, which also produces every error message.
  */
 static inline bool lz_arith_fast(LzOpCode op, const LzValue *left, const LzValue *right,
                                  LzValue *out) {
     if (left->type == LZ_VAL_INT && right->type == LZ_VAL_INT) {
         int64_t result;
-        bool overflow;
+        bool failed;
         switch (op) {
         case LZ_OP_ADD:
-            overflow = lz_add_overflows(left->as.integer, right->as.integer, &result);
+            failed = lz_add_overflows(left->as.integer, right->as.integer, &result);
             break;
         case LZ_OP_SUBTRACT:
-            overflow = lz_subtract_overflows(left->as.integer, right->as.integer, &result);
+            failed = lz_subtract_overflows(left->as.integer, right->as.integer, &result);
             break;
         case LZ_OP_MULTIPLY:
-            overflow = lz_multiply_overflows(left->as.integer, right->as.integer, &result);
+            failed = lz_multiply_overflows(left->as.integer, right->as.integer, &result);
             break;
+        case LZ_OP_FLOOR_DIVIDE:
+            failed = !lz_int_floor_divide(left->as.integer, right->as.integer, &result);
+            break;
+        case LZ_OP_MODULO:
+            failed = !lz_int_modulo(left->as.integer, right->as.integer, &result);
+            break;
+        case LZ_OP_DIVIDE:
+            if (right->as.integer == 0) {
+                return false;
+            }
+            *out = lz_value_float((double)left->as.integer / (double)right->as.integer);
+            return true;
         default:
             return false;
         }
-        if (overflow) {
+        if (failed) {
             return false;
         }
         *out = lz_value_int(result);
@@ -128,6 +203,20 @@ static inline bool lz_arith_fast(LzOpCode op, const LzValue *left, const LzValue
         case LZ_OP_MULTIPLY:
             *out = lz_value_float(x * y);
             return true;
+        case LZ_OP_DIVIDE:
+            if (y == 0.0) {
+                return false;
+            }
+            *out = lz_value_float(x / y);
+            return true;
+        case LZ_OP_MODULO: {
+            double r;
+            if (!lz_float_modulo_whole(x, y, &r)) {
+                return false;
+            }
+            *out = lz_value_float(r);
+            return true;
+        }
         default:
             return false;
         }

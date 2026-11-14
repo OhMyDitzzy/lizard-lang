@@ -121,6 +121,21 @@ LzStatus lz_array_concat(LzVM *vm, const LzArray *a, const LzArray *b, LzValue *
 /* container[index] = value, fully checked. */
 LzStatus lz_array_set(LzVM *vm, LzArray *array, const LzValue *index, const LzValue *value);
 
+/*
+ * What lz_array_set does once the position is known and lz_array_check_store has passed: the new
+ * value takes the slot and the old one is released. Shared with the interpreter's inline
+ * SET_INDEX, so the holder bookkeeping has one definition.
+ */
+static inline void lz_array_store_at(LzHeap *heap, LzArray *array, size_t position,
+                                     const LzValue *value) {
+    LzValue old = array->items[position];
+    lz_array_drop_holder(&old);
+    lz_value_retain(value);
+    array->items[position] = *value;
+    lz_array_note_store(array, value);
+    lz_value_release(heap, &old);
+}
+
 /* Shallow copy keeping the element type. */
 LzStatus lz_array_copy(LzVM *vm, const LzArray *array, LzValue *result);
 

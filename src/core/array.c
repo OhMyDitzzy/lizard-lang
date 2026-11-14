@@ -449,12 +449,7 @@ LzStatus lz_array_set(LzVM *vm, LzArray *array, const LzValue *index, const LzVa
     if (status != LZ_OK) {
         return status;
     }
-    LzValue old = array->items[position];
-    lz_array_drop_holder(&old);
-    lz_value_retain(value);
-    array->items[position] = *value;
-    lz_array_note_store(array, value);
-    lz_value_release(&vm->heap, &old);
+    lz_array_store_at(&vm->heap, array, position, value);
     return LZ_OK;
 }
 

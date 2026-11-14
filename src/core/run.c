@@ -1621,6 +1621,37 @@ static inline bool number_pair_test(const LzValue *left, const LzValue *right, b
     return false;
 }
 
+/*
+ * The ordering and equality of two numbers that are not both ints or both floats, which is what
+ * lz_compare_order and equal_leaf conclude for them, without leaving the instruction. False when
+ * either operand is not a number.
+ */
+static inline bool number_mixed_test(const LzValue *left, const LzValue *right, bool *result,
+                                     LzOpCode op) {
+    if ((left->type != LZ_VAL_INT && left->type != LZ_VAL_FLOAT) ||
+        (right->type != LZ_VAL_INT && right->type != LZ_VAL_FLOAT)) {
+        return false;
+    }
+    LzOrder order = lz_number_order(left, right);
+    switch (op) {
+    case LZ_OP_LESS:
+        *result = order == LZ_ORDER_LESS;
+        return true;
+    case LZ_OP_GREATER:
+        *result = order == LZ_ORDER_GREATER;
+        return true;
+    case LZ_OP_LESS_EQUAL:
+        *result = order == LZ_ORDER_LESS || order == LZ_ORDER_EQUAL;
+        return true;
+    case LZ_OP_GREATER_EQUAL:
+        *result = order == LZ_ORDER_GREATER || order == LZ_ORDER_EQUAL;
+        return true;
+    default:
+        *result = order == LZ_ORDER_EQUAL;
+        return true;
+    }
+}
+
 static LzStatus binary_op(LzVM *vm, LzOpCode op) {
     if (vm->stack_count < 2) {
         return malformed(vm, "stack underflow");
@@ -1730,6 +1761,21 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
     uint8_t opcode = chunk->code[ip++];
     switch (opcode) {
     case LZ_OP_CONSTANT: {
+        /*
+         * The operand is decoded here with both checks done once. Anything off (a cut-off operand,
+         * an index out of range, a full stack) leaves ip alone and takes the general path, which
+         * reports it.
+         */
+        if (ip + 2 <= chunk->count && vm->stack_count < LZ_STACK_MAX) {
+            size_t index = (size_t)((chunk->code[ip] << 8) | chunk->code[ip + 1]);
+            if (index < chunk->constant_count) {
+                LzValue value = chunk->constants[index];
+                lz_value_retain(&value);
+                vm->stack[vm->stack_count++] = value;
+                ip += 2;
+                break;
+            }
+        }
         const LzValue *constant = NULL;
         status = read_constant(vm, chunk, &ip, &constant);
         if (status == LZ_OK) {
@@ -1869,21 +1915,27 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
             vm->stack[--vm->stack_count - 1] = lz_value_bool(fast);                                \
             break;                                                                                 \
         }                                                                                          \
+        if (vm->stack_count >= 2 &&                                                                \
+            number_mixed_test(&vm->stack[vm->stack_count - 2], &vm->stack[vm->stack_count - 1],   \
+                              &fast, OPC)) {                                                       \
+            vm->stack[--vm->stack_count - 1] = lz_value_bool(fast);                                \
+            break;                                                                                 \
+        }                                                                                          \
         status = binary_op(vm, (LzOpCode)opcode);                                                  \
         break;                                                                                     \
     }
     ARITH_FAST_CASE(LZ_OP_ADD)
     ARITH_FAST_CASE(LZ_OP_SUBTRACT)
     ARITH_FAST_CASE(LZ_OP_MULTIPLY)
+    ARITH_FAST_CASE(LZ_OP_DIVIDE)
+    ARITH_FAST_CASE(LZ_OP_FLOOR_DIVIDE)
+    ARITH_FAST_CASE(LZ_OP_MODULO)
     COMPARE_FAST_CASE(LZ_OP_LESS, <)
     COMPARE_FAST_CASE(LZ_OP_GREATER, >)
     COMPARE_FAST_CASE(LZ_OP_LESS_EQUAL, <=)
     COMPARE_FAST_CASE(LZ_OP_GREATER_EQUAL, >=)
 #undef ARITH_FAST_CASE
 #undef COMPARE_FAST_CASE
-    case LZ_OP_DIVIDE:
-    case LZ_OP_FLOOR_DIVIDE:
-    case LZ_OP_MODULO:
     case LZ_OP_BIT_AND:
     case LZ_OP_BIT_OR:
     case LZ_OP_BIT_XOR:
@@ -1987,13 +2039,36 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
             vm->stack[--vm->stack_count - 1] = lz_value_bool(same);
             break;
         }
+        if (vm->stack_count >= 2 &&
+            number_mixed_test(&vm->stack[vm->stack_count - 2], &vm->stack[vm->stack_count - 1], &same,
+                              LZ_OP_EQUAL)) {
+            vm->stack[--vm->stack_count - 1] = lz_value_bool(same);
+            break;
+        }
         status = equal(vm);
         break;
     }
     case LZ_OP_NOT:
+        if (vm->stack_count >= 1 && vm->stack[vm->stack_count - 1].type != LZ_VAL_OBJECT) {
+            /* Nothing to release, so the answer replaces the operand in place. */
+            LzValue *top = &vm->stack[vm->stack_count - 1];
+            *top = lz_value_bool(!lz_value_is_truthy(top));
+            break;
+        }
         status = not_op(vm);
         break;
     case LZ_OP_NEGATE:
+        if (vm->stack_count >= 1) {
+            LzValue *top = &vm->stack[vm->stack_count - 1];
+            if (top->type == LZ_VAL_INT && top->as.integer != INT64_MIN) {
+                top->as.integer = -top->as.integer;
+                break;
+            }
+            if (top->type == LZ_VAL_FLOAT) {
+                top->as.number = -top->as.number;
+                break;
+            }
+        }
         status = negate(vm);
         break;
     case LZ_OP_BIT_NOT:
@@ -2151,9 +2226,49 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         status = array_push(vm);
         break;
     case LZ_OP_INDEX:
+        if (vm->stack_count >= 2) {
+            /* An array and an int in range, which is all of index_op that matters here. */
+            LzValue *container = &vm->stack[vm->stack_count - 2];
+            const LzValue *index = &vm->stack[vm->stack_count - 1];
+            if (lz_value_is_array(container) && index->type == LZ_VAL_INT) {
+                const LzArray *array = lz_value_as_array(container);
+                int64_t wanted = index->as.integer;
+                int64_t resolved = wanted < 0 ? wanted + (int64_t)array->count : wanted;
+                if (resolved >= 0 && resolved < (int64_t)array->count) {
+                    LzValue item = array->items[resolved];
+                    lz_value_retain(&item); /* keep it alive across the release, which may free the array */
+                    LzValue holder = *container;
+                    *container = item;
+                    vm->stack_count--; /* the index is an int, so there's nothing to release */
+                    lz_value_release(&vm->heap, &holder);
+                    break;
+                }
+            }
+        }
         status = index_op(vm);
         break;
     case LZ_OP_SET_INDEX:
+        if (vm->stack_count >= 3) {
+            LzValue *container = &vm->stack[vm->stack_count - 3];
+            const LzValue *index = &vm->stack[vm->stack_count - 2];
+            if (lz_value_is_array(container) && index->type == LZ_VAL_INT) {
+                LzArray *array = lz_value_as_array(container);
+                int64_t wanted = index->as.integer;
+                int64_t resolved = wanted < 0 ? wanted + (int64_t)array->count : wanted;
+                if (resolved >= 0 && resolved < (int64_t)array->count) {
+                    /* The same checks lz_array_set makes, in the same order, then its store. */
+                    status = lz_array_check_store(vm, array, &vm->stack[vm->stack_count - 1]);
+                    if (status != LZ_OK) {
+                        break;
+                    }
+                    lz_array_store_at(&vm->heap, array, (size_t)resolved, &vm->stack[vm->stack_count - 1]);
+                    pop(vm);
+                    pop(vm);
+                    pop(vm);
+                    break;
+                }
+            }
+        }
         status = set_index_op(vm);
         break;
     case LZ_OP_INDEX_KEEP:

@@ -1,10 +1,13 @@
 #include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "ge_internal.h"
 #include "ge_jit.h"
 #include "lizard/arith.h"
 #include "lizard/array.h"
+#include "lizard/class.h"
+#include "lizard/dict.h"
 #include "lizard/module.h"
 #include "lizard/native.h"
 
@@ -448,6 +451,87 @@ GE_INLINE bool array_position(const LzValue *container, const LzValue *index, Lz
 }
 
 /*
+ * Does a nil, bool, int, float or string fit a type that lists its kind? That is all
+ * lz_type_matches would conclude for these values, and what the reference's check_value accepts
+ * without more ado. Anything else (an object, a type of literals only, a miss) is the
+ * reference's, which also writes every message.
+ */
+GE_INLINE bool lz_value_is_text(const LzValue *value) {
+    return value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_STRING;
+}
+
+GE_INLINE bool kind_accepted(const LzType *type, const LzValue *value) {
+    uint16_t kind;
+    switch (value->type) {
+    case LZ_VAL_NIL:
+        kind = LZ_KIND_NIL;
+        break;
+    case LZ_VAL_BOOL:
+        kind = LZ_KIND_BOOL;
+        break;
+    case LZ_VAL_INT:
+        kind = LZ_KIND_INT;
+        break;
+    case LZ_VAL_FLOAT:
+        kind = LZ_KIND_FLOAT;
+        break;
+    default:
+        kind = value->as.object->type == LZ_OBJ_STRING ? LZ_KIND_STRING : 0;
+        break;
+    }
+    return (kind & type->kinds) != 0;
+}
+
+/*
+ * Fills the inline cache of a member instruction for the class of `instance`, when the member is
+ * one the fast paths treat: a plain field (not a link) for what is 0 (read) or 1 (write), a
+ * method for 2. The name is looked up with the reference's own lookup, and the checks that depend
+ * only on the class and on the code that owns the instruction (visibility, `pub read`) are made
+ * here once. Anything else leaves the cache empty, and the reference reports it.
+ */
+static bool const_is_string(const LzChunk *chunk, size_t index) {
+    return index < chunk->constant_count && chunk->constants[index].type == LZ_VAL_OBJECT &&
+           chunk->constants[index].as.object->type == LZ_OBJ_STRING;
+}
+
+static void ic_fill(LzVM *vm, GeIns *ins, const LzInstance *instance, const LzString *name, int what) {
+    const LzClass *cls = instance->cls;
+    LzFound hit;
+    if (!lz_class_lookup(cls, name, &hit)) {
+        return;
+    }
+    const LzMember *member = hit.member;
+    /* A hit from an `extend` block is not in the chain and may be shadowed later: not cached. */
+    bool in_chain = false;
+    for (const LzClass *c = cls; c != NULL && !in_chain; c = c->parent) {
+        in_chain = c == hit.declared_in && member >= c->members && member < c->members + c->member_count;
+    }
+    if (!in_chain) {
+        return;
+    }
+    const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
+    uint64_t owner = frame->closure != NULL ? frame->closure->function->owner_id : 0;
+    bool sees = lz_class_sees(vm, owner, hit.declared_in);
+    if (member->vis == LZ_VIS_PRIVATE && !sees) {
+        return;
+    }
+    if (what == 2) {
+        if (member->kind != LZ_MEMBER_METHOD || strcmp(name->data, "init") == 0) {
+            return;
+        }
+    } else {
+        if (member->kind != LZ_MEMBER_FIELD || member->is_link) {
+            return;
+        }
+        if (what == 1 && member->vis == LZ_VIS_PUB_READ && !sees) {
+            return;
+        }
+    }
+    ins->ic_class = cls->id;
+    ins->ic_member = member;
+}
+
+/*
  * The translated program of a function, made on its first call and kept on the function object,
  * so it lives exactly as long as the function does. NULL when the function's code can't be
  * translated, and the caller then hands that call to the reference interpreter.
@@ -660,7 +744,37 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
         pc++;                                                                                      \
         break;                                                                                     \
     }
-            ARITH_CASE(LZ_OP_ADD)
+        case LZ_OP_ADD: {
+            TICK(1);
+            LzValue out = GE_NIL_INIT;
+            if (GE_UNLIKELY(sp < 2 || !arith(LZ_OP_ADD, &stack[sp - 2], &stack[sp - 1], &out))) {
+                if (sp >= 2 && lz_value_is_text(&stack[sp - 2]) && lz_value_is_text(&stack[sp - 1])) {
+                    /*
+                     * Two strings: the reference's own concatenation, which charges the fuel for
+                     * the copy and reports a heap that is full. Nothing changes on a failure.
+                     */
+                    SYNC_OUT();
+                    status = lz_arith_binary(vm, LZ_OP_ADD, &stack[sp - 2], &stack[sp - 1], &out);
+                    SYNC_IN();
+                    if (status != LZ_OK) {
+                        goto fail;
+                    }
+                    LzValue left = stack[sp - 2];
+                    LzValue right = stack[sp - 1];
+                    stack[sp - 2] = out;
+                    sp--;
+                    drop(vm, &right);
+                    drop(vm, &left);
+                    pc++;
+                    break;
+                }
+                goto run_plain;
+            }
+            stack[sp - 2] = out;
+            sp--;
+            pc++;
+            break;
+        }
             ARITH_CASE(LZ_OP_SUBTRACT)
             ARITH_CASE(LZ_OP_MULTIPLY)
             ARITH_CASE(LZ_OP_DIVIDE)
@@ -744,6 +858,28 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             LzArray *array = NULL;
             size_t position = 0;
             if (GE_UNLIKELY(sp < 2 || !array_position(&stack[sp - 2], &stack[sp - 1], &array, &position))) {
+                /*
+                 * A dict with an int or string key that is there. The lookup is the dict's own
+                 * (hash and key comparison included). A missing key is the reference's, which
+                 * words the error.
+                 */
+                if (sp >= 2 && lz_value_is_dict(&stack[sp - 2]) &&
+                    (stack[sp - 1].type == LZ_VAL_INT ||
+                     (stack[sp - 1].type == LZ_VAL_OBJECT && stack[sp - 1].as.object->type == LZ_OBJ_STRING))) {
+                    const LzValue *stored = lz_dict_get(lz_value_as_dict(&stack[sp - 2]), &stack[sp - 1]);
+                    if (stored != NULL) {
+                        LzValue found = *stored;
+                        grab(&found); /* keep it alive across the releases, which may free the dict */
+                        LzValue key = stack[sp - 1];
+                        LzValue holder = stack[sp - 2];
+                        stack[sp - 2] = found;
+                        sp--;
+                        drop(vm, &key);
+                        drop(vm, &holder);
+                        pc++;
+                        break;
+                    }
+                }
                 goto run_plain;
             }
             LzValue item = array->items[position];
@@ -760,6 +896,23 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             LzArray *array = NULL;
             size_t position = 0;
             if (GE_UNLIKELY(sp < 3 || !array_position(&stack[sp - 3], &stack[sp - 2], &array, &position))) {
+                if (sp >= 3 && lz_value_is_dict(&stack[sp - 3])) {
+                    /* The reference's own store, which checks the key, the types, cycles and fuel. */
+                    SYNC_OUT();
+                    status = lz_dict_set(vm, lz_value_as_dict(&stack[sp - 3]), &stack[sp - 2], &stack[sp - 1]);
+                    SYNC_IN();
+                    if (status != LZ_OK) {
+                        goto fail;
+                    }
+                    LzValue value = stack[--sp];
+                    LzValue key = stack[--sp];
+                    LzValue holder = stack[--sp];
+                    drop(vm, &value);
+                    drop(vm, &key);
+                    drop(vm, &holder);
+                    pc++;
+                    break;
+                }
                 goto run_plain;
             }
             const LzValue *value = &stack[sp - 1];
@@ -1090,7 +1243,185 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             break;
         }
 
+        case LZ_OP_GET_FIELD_W:
+        case LZ_OP_SET_FIELD:
+        case LZ_OP_METHOD_LOOKUP:
         case GE_OP_DELEGATE:
+            /*
+             * Instructions that stay marked for the reference (the JIT keys on that mark) but
+             * that the interpreter can finish itself when every check passes. Each case checks
+             * before it charges or changes anything, and anything else is plain_tick.
+             */
+            switch (ins->plain) {
+            case LZ_OP_CHECK_TYPE:
+            case LZ_OP_CHECK_RETURN:
+                if (GE_UNLIKELY(sp == 0 || ins->a >= chunk->type_count ||
+                                !kind_accepted(&chunk->types[ins->a], &stack[sp - 1]))) {
+                    goto plain_tick;
+                }
+                TICK(1);
+                pc++;
+                continue;
+            case LZ_OP_CHECK_PARAM:
+                if (GE_UNLIKELY(base + ins->a >= sp || ins->b >= chunk->type_count ||
+                                !kind_accepted(&chunk->types[ins->b], &stack[base + ins->a]))) {
+                    goto plain_tick;
+                }
+                TICK(1);
+                pc++;
+                continue;
+            case LZ_OP_SWAP: {
+                if (GE_UNLIKELY(sp < 2)) {
+                    goto plain_tick;
+                }
+                TICK(1);
+                LzValue top = stack[sp - 1];
+                stack[sp - 1] = stack[sp - 2];
+                stack[sp - 2] = top;
+                pc++;
+                continue;
+            }
+            case LZ_OP_GET_UPVALUE: {
+                const LzClosure *owner = vm->frames[vm->frame_count - 1].closure;
+                if (GE_UNLIKELY(owner == NULL || ins->a >= owner->upvalue_count || sp >= LZ_STACK_MAX)) {
+                    goto plain_tick;
+                }
+                TICK(1);
+                LzValue value = *owner->upvalues[ins->a]->location;
+                grab(&value);
+                stack[sp++] = value;
+                pc++;
+                continue;
+            }
+            case LZ_OP_SET_UPVALUE: {
+                /*
+                 * Only a value that cannot close a reference cycle. An object goes to the
+                 * reference, where the cycle collector is told about the store.
+                 */
+                const LzClosure *owner = vm->frames[vm->frame_count - 1].closure;
+                if (GE_UNLIKELY(sp == 0 || owner == NULL || ins->a >= owner->upvalue_count ||
+                                stack[sp - 1].type == LZ_VAL_OBJECT)) {
+                    goto plain_tick;
+                }
+                TICK(1);
+                LzValue *location = owner->upvalues[ins->a]->location;
+                LzValue old = *location;
+                *location = stack[--sp];
+                drop(vm, &old);
+                pc++;
+                continue;
+            }
+            case LZ_OP_CLOSURE: {
+                if (GE_UNLIKELY(ins->a >= chunk->constant_count ||
+                                chunk->constants[ins->a].type != LZ_VAL_OBJECT ||
+                                chunk->constants[ins->a].as.object->type != LZ_OBJ_FUNCTION)) {
+                    goto plain_tick;
+                }
+                TICK(1);
+                SYNC_OUT();
+                status = lz_vm_make_closure(vm, (LzFunction *)chunk->constants[ins->a].as.object);
+                SYNC_IN();
+                if (status != LZ_OK) {
+                    goto fail;
+                }
+                pc++;
+                continue;
+            }
+            case LZ_OP_GET_FIELD:
+            case LZ_OP_GET_FIELD_W:
+            case LZ_OP_GET_FIELD_KEEP: {
+                if (GE_UNLIKELY(sp == 0 || !lz_value_is_instance(&stack[sp - 1]))) {
+                    goto plain_tick;
+                }
+                LzInstance *object = lz_value_as_instance(&stack[sp - 1]);
+                if (GE_UNLIKELY(object->cls->id != ins->ic_class)) {
+                    if (const_is_string(chunk, ins->a)) {
+                        ic_fill(vm, ins, object, (const LzString *)chunk->constants[ins->a].as.object,
+                                ins->plain == LZ_OP_GET_FIELD ? 0 : 1);
+                    }
+                    if (object->cls->id != ins->ic_class) {
+                        goto plain_tick;
+                    }
+                }
+                const LzMember *member = ins->ic_member;
+                bool keep = ins->plain == LZ_OP_GET_FIELD_KEEP;
+                if (GE_UNLIKELY(((object->unset >> member->slot) & 1u) != 0 || (keep && sp >= LZ_STACK_MAX))) {
+                    goto plain_tick;
+                }
+                TICK(1);
+                LzValue field = object->fields[member->slot];
+                grab(&field);
+                if (keep) {
+                    stack[sp++] = field;
+                } else {
+                    LzValue holder = stack[sp - 1];
+                    stack[sp - 1] = field;
+                    drop(vm, &holder);
+                }
+                pc++;
+                continue;
+            }
+            case LZ_OP_SET_FIELD: {
+                if (GE_UNLIKELY(sp < 2 || !lz_value_is_instance(&stack[sp - 2]))) {
+                    goto plain_tick;
+                }
+                LzInstance *object = lz_value_as_instance(&stack[sp - 2]);
+                if (GE_UNLIKELY(object->cls->id != ins->ic_class)) {
+                    if (const_is_string(chunk, ins->a)) {
+                        ic_fill(vm, ins, object, (const LzString *)chunk->constants[ins->a].as.object, 1);
+                    }
+                    if (object->cls->id != ins->ic_class) {
+                        goto plain_tick;
+                    }
+                }
+                /*
+                 * Only a value that the declared type accepts by kind and that holds no container
+                 * (nil, bool, int, float, string), so there is no cycle check and no fuel to
+                 * charge. The rest is the reference's.
+                 */
+                const LzMember *member = ins->ic_member;
+                if (GE_UNLIKELY(!kind_accepted(&member->type, &stack[sp - 1]))) {
+                    goto plain_tick;
+                }
+                TICK(1);
+                LzValue old = object->fields[member->slot];
+                lz_drop_container_holder(&old);
+                object->fields[member->slot] = stack[sp - 1];
+                object->unset &= ~((uint64_t)1 << member->slot);
+                drop(vm, &old);
+                LzValue holder = stack[sp - 2];
+                sp -= 2;
+                drop(vm, &holder);
+                pc++;
+                continue;
+            }
+            case LZ_OP_METHOD_LOOKUP: {
+                if (GE_UNLIKELY(sp < 2 || !lz_value_is_instance(&stack[sp - 2]))) {
+                    goto plain_tick;
+                }
+                const LzInstance *object = lz_value_as_instance(&stack[sp - 2]);
+                if (GE_UNLIKELY(object->cls->id != ins->ic_class)) {
+                    /* Three bytes: the name constant and the mode. The translator's operands do not cover them. */
+                    size_t name_index = ((size_t)chunk->code[ins->offset + 1] << 8) | chunk->code[ins->offset + 2];
+                    if (const_is_string(chunk, name_index)) {
+                        ic_fill(vm, ins, object, (const LzString *)chunk->constants[name_index].as.object, 2);
+                    }
+                    if (object->cls->id != ins->ic_class) {
+                        goto plain_tick;
+                    }
+                }
+                TICK(1);
+                LzValue callee = ins->ic_member->value;
+                grab(&callee);
+                LzValue fallback = stack[sp - 1];
+                stack[sp - 1] = callee;
+                drop(vm, &fallback);
+                pc++;
+                continue;
+            }
+            default:
+                goto plain_tick;
+            }
         default:
             goto plain_tick;
         }

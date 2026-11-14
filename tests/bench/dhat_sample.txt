@@ -1,0 +1,9 @@
+==4242== DHAT, a dynamic heap analysis tool
+==4242== Copyright (C) 2010-2023, and GNU GPL'd, by Mozilla Foundation
+==4242== Command: ./lizard --engine=ref fib.lz
+==4242== 
+==4242== Total:     1,234,567 bytes in 8,910 blocks
+==4242== At t-gmax: 65,536 bytes in 120 blocks
+==4242== At t-end:  4,096 bytes in 3 blocks
+==4242== Reads:     9,999 bytes
+==4242== Writes:    8,888 bytes

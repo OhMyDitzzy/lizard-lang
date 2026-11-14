@@ -33,6 +33,11 @@ bash "$src/bench/profile.sh" --parse "$here/bench/annotate_old.txt" >"$tmp/old.t
 printf 'no totals here\n' >"$tmp/junk.txt"
 bash "$src/bench/profile.sh" --parse "$tmp/junk.txt" >/dev/null 2>&1 && bad "profile --parse accepted junk"
 
+# dhat summary
+bash "$src/bench/profile.sh" --parse-dhat "$here/bench/dhat_sample.txt" >"$tmp/dhat.txt"
+[ "$(cat "$tmp/dhat.txt")" = "$(printf '8910\t1234567\t65536\t120')" ] || bad "profile --parse-dhat of dhat_sample.txt"
+bash "$src/bench/profile.sh" --parse-dhat "$tmp/junk.txt" >/dev/null 2>&1 && bad "profile --parse-dhat accepted junk"
+
 # compare: a file against itself is all noise and 0%
 d=$here/bench/data
 bash "$src/bench/compare.sh" "$d/time-head.tsv" "$d/time-head.tsv" >"$tmp/self.md"
@@ -49,10 +54,12 @@ grep -q 'Geometric mean of time, ref' "$tmp/time.md" || bad "compare time: no ge
 
 # report
 bash "$src/bench/report.sh" "$d" "$tmp/report.md" || bad "report.sh failed"
-for h in '## Metadata' '## Smoke test' '## Time' '## Instructions (Ir)' '## Peak memory' '## Top functions (head)' '## Warnings'; do
+for h in '## Metadata' '## Smoke test' '## Time' '## Instructions (Ir)' '## Allocations' '## Peak memory' '## Top functions (head)' '## Warnings'; do
     grep -q "^$h" "$tmp/report.md" || bad "report: missing heading $h"
 done
 grep -q 'OUTPUT DIFFERS' "$tmp/report.md" || bad "report: OUTPUT DIFFERS not in the warnings"
+grep -q '| sieve | 5000 | 4000 | -20.0% | 900000 | 800000 | -11.1% |' "$tmp/report.md" || bad "report: allocations comparison"
+grep -q 'allocate most bytes' "$tmp/report.md" || bad "report: allocations top list"
 grep -q 'jit skipped' "$tmp/report.md" || bad "report: the JIT warning is missing"
 grep -q 'Functions whose share of Ir changed most' "$tmp/report.md" || bad "report: no function changes"
 [ "$(wc -c <"$tmp/report.md")" -lt 200000 ] || bad "report: over 200 KB"

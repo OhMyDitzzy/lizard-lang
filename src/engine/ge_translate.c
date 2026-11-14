@@ -336,6 +336,7 @@ bool ge_translate(const LzChunk *chunk, GeProgram *program) {
         case LZ_OP_THROW:
         case LZ_OP_ERROR_IS:
         case LZ_OP_GET_FIELD:
+        case LZ_OP_GET_FIELD_KEEP: /* 71 is GE_OP_INDEX1 as a raw op, so it has to be marked */
             in->op = GE_OP_DELEGATE;
             break;
         default:

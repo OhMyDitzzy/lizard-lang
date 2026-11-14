@@ -1,0 +1,3 @@
+benchmark	blocks	bytes	gmax_bytes	gmax_blocks
+fib	1000	80000	4096	10
+sieve	4000	800000	70000	40

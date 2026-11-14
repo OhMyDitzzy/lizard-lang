@@ -124,6 +124,41 @@ functions_section() {
     done
 }
 
+# allocations: base against head from allocations.tsv, then the five that allocate most
+allocations_section() {
+    local head=$DATA/head/allocations.tsv base=$DATA/base/allocations.tsv
+    if [ ! -s "$head" ]; then
+        echo "Not collected (profile=false)."
+        return
+    fi
+    echo "Allocations of the reference engine at a small size, counted by dhat. Blocks and bytes are totals over the run, peak is what was alive at the most (t-gmax)."
+    echo
+    if [ -s "$base" ]; then
+        echo "| benchmark | blocks base | blocks head | change | bytes base | bytes head | change | peak bytes base | peak bytes head | change | peak blocks base | peak blocks head |"
+        echo "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+        awk -F'\t' '
+            function pct(a, b) { return (a ~ /^[0-9]+$/ && b ~ /^[0-9]+$/ && a > 0) ? sprintf("%+.1f%%", (b - a) * 100 / a) : "-" }
+            FNR == 1 { next }
+            FNR == NR { bb[$1] = $2; by[$1] = $3; bp[$1] = $4; bk[$1] = $5; next }
+            {
+                n = $1
+                if (!(n in bb)) { bb[n] = "-"; by[n] = "-"; bp[n] = "-"; bk[n] = "-" }
+                printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", n, bb[n], $2, pct(bb[n], $2), by[n], $3, pct(by[n], $3), bp[n], $4, pct(bp[n], $4), bk[n], $5
+            }' "$base" "$head"
+    else
+        echo "| benchmark | blocks | bytes | peak bytes | peak blocks |"
+        echo "| --- | ---: | ---: | ---: | ---: |"
+        awk -F'\t' 'NR > 1 { printf "| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5 }' "$head"
+    fi
+    echo
+    echo "The five benchmarks that allocate most bytes (head):"
+    echo
+    echo "| benchmark | bytes | blocks | peak bytes | peak blocks |"
+    echo "| --- | ---: | ---: | ---: | ---: |"
+    awk -F'\t' 'NR > 1 && $3 ~ /^[0-9]+$/ { print $3 "\t" $1 "\t" $2 "\t" $4 "\t" $5 }' "$head" | sort -t"$(printf '\t')" -k1,1nr |
+        head -n 5 | awk -F'\t' '{ printf "| %s | %s | %s | %s | %s |\n", $2, $1, $3, $4, $5 }'
+}
+
 warnings_section() {
     local n=0 w
     emit() { echo "- $*"; n=$((n + 1)); }
@@ -191,6 +226,10 @@ build() {
     else
         echo "Not collected (profile=false)."
     fi
+    echo
+    echo "## Allocations"
+    echo
+    allocations_section
     echo
     echo "## Peak memory"
     echo

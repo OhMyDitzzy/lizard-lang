@@ -10,6 +10,9 @@
 #   out-dir/instructions.tsv           benchmark engine ir      (total Ir of the program)
 #   out-dir/profile/<name>.<engine>.txt  the top 15 functions: first line `# total_ir N`, then
 #                                      `percent<TAB>ir<TAB>function`
+#   out-dir/allocations.tsv            benchmark blocks bytes gmax_bytes gmax_blocks (ref only, from
+#                                      valgrind --tool=dhat: total blocks and bytes allocated, and
+#                                      the bytes and blocks alive at the peak, t-gmax)
 #   out-dir/warnings.txt               what was left out and why
 #
 # Environment: SCALE (default 20) divides the size line of every script, ONLY lists names,
@@ -18,7 +21,8 @@
 # told to watch for self-modifying code, so Ir would not be comparable with the interpreters.
 #
 # --parse reads the text of callgrind_annotate and prints the same normalized form, which is how
-# the parser is tested without valgrind (tests/bench_scripts_check.sh).
+# the parser is tested without valgrind (tests/bench_scripts_check.sh). --parse-dhat does the same
+# for the summary dhat prints on stderr and prints `blocks bytes gmax_bytes gmax_blocks`.
 #
 # Needs bash, awk and valgrind (valgrind only when it measures).
 
@@ -54,6 +58,29 @@ parse_annotate() {
             for (i = 1; i <= count; i++) print line[i]
         }'
 }
+
+# parse_dhat: the stderr of valgrind --tool=dhat on stdin -> `blocks bytes gmax_bytes gmax_blocks`
+parse_dhat() {
+    awk '
+        function num(s) { gsub(/,/, "", s); return s + 0 }
+        { sub(/^==[0-9]+== /, "") }
+        /^Total:[ \t]+[0-9,]+ bytes in [0-9,]+ blocks/ && total == "" {
+            bytes = num($2); blocks = num($5); total = 1
+        }
+        /^At t-gmax:[ \t]+[0-9,]+ bytes in [0-9,]+ blocks/ && peak == "" {
+            gbytes = num($3); gblocks = num($6); peak = 1
+        }
+        END {
+            if (total == "" || peak == "") exit 1
+            printf "%d\t%d\t%d\t%d\n", blocks, bytes, gbytes, gblocks
+        }'
+}
+
+if [ "${1:-}" = "--parse-dhat" ]; then
+    [ -r "${2:-}" ] || { echo "usage: profile.sh --parse-dhat FILE" >&2; exit 2; }
+    parse_dhat <"$2"
+    exit $?
+fi
 
 if [ "${1:-}" = "--parse" ]; then
     [ -r "${2:-}" ] || { echo "usage: profile.sh --parse FILE" >&2; exit 2; }
@@ -142,6 +169,31 @@ for file in "$HERE"/*.lz; do
         say "$(printf '%-18s %-4s Ir %s' "$name" "$e" "$total")"
     done
 done
+
+# Allocations: how much the reference engine allocates, to judge the memory management. The
+# JIT and ge allocate the same objects, so ref alone says enough. dhat prints its summary to
+# stderr, so there is no -q here.
+have_ref=no
+for e in "${engines[@]}"; do [ "$e" = ref ] && have_ref=yes; done
+if [ "$have_ref" = yes ]; then
+    printf 'benchmark\tblocks\tbytes\tgmax_bytes\tgmax_blocks\n' >"$OUTDIR/allocations.tsv"
+    for file in "$HERE"/*.lz; do
+        name=$(basename "$file" .lz)
+        wanted "$name" || continue
+        [ -s "$TMP/$name.lz" ] || continue
+        valgrind --tool=dhat --dhat-out-file="$TMP/dhat.out" \
+            "$LIZARD" --engine=ref "$TMP/$name.lz" >/dev/null 2>"$TMP/dhat.err"
+        rc=$?
+        if [ "$rc" -ne 0 ] || ! parse_dhat <"$TMP/dhat.err" >"$TMP/dhat.txt"; then
+            warn "$name allocations skipped: dhat run failed (exit $rc)"
+            printf '%s\t-\t-\t-\t-\n' "$name" >>"$OUTDIR/allocations.tsv"
+            bad=1
+            continue
+        fi
+        printf '%s\t%s\n' "$name" "$(cat "$TMP/dhat.txt")" >>"$OUTDIR/allocations.tsv"
+        say "$(printf '%-18s dhat %s' "$name" "$(awk -F'\t' '{ printf "%s blocks, %s bytes, peak %s bytes in %s blocks", $1, $2, $3, $4 }' "$TMP/dhat.txt")")"
+    done
+fi
 
 [ "$bad" -eq 0 ] || exit 3
 exit 0
