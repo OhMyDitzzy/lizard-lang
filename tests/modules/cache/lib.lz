@@ -1,0 +1,22 @@
+# A class that main extends. The sites in this file are cached while main adds a method, and they must
+# not see it, since an extension is visible only in the module that wrote it.
+pub class Item {
+    pub n: int = 1
+    pub read count: int = 0
+    pub fn name(self) => "item" + string(self.n)
+    pub fn tick(self) {
+        self.count = self.count + 1
+    }
+}
+
+pub fn name_of(x) => x.name()
+
+pub fn n_of(x) => x.n
+
+pub fn try_label(x) {
+    try {
+        return x.label()
+    } catch Error as e {
+        return "error: " + e.message
+    }
+}

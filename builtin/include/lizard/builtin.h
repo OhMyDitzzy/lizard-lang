@@ -11,6 +11,7 @@ typedef struct LzBuiltin {
     int min_args;
     int max_args;
     uint16_t result_kinds;
+    uint8_t flags; /* LZ_NATIVE_*, which of them a call may use to skip lz_vm_call; 0 when unsure */
 } LzBuiltin;
 
 const LzBuiltin *lz_builtin_lookup(const char *name);

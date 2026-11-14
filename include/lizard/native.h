@@ -18,6 +18,16 @@ typedef LzStatus (*LzNativeFn)(LzVM *vm, int argc, const LzValue *argv, LzValue 
 
 enum { LZ_LINKS_NONE = 0, LZ_LINKS_ITEMS = 1, LZ_LINKS_ANY = 2 };
 
+/*
+ * What the engines may do with a native, set by whoever makes it (the builtin table) and never
+ * guessed from a name. 0 is a native that is called the long way, through lz_vm_call.
+ */
+enum {
+    LZ_NATIVE_LEAF = 1,         /* runs no user code and calls back into the VM never, whatever the arguments */
+    LZ_NATIVE_LEAF_SCALARS = 2, /* the same while every argument is nil, a bool, a number or a string (print, string) */
+    LZ_NATIVE_LEN = 4           /* is len, which lz_native_call_fast answers itself for an array and a string */
+};
+
 typedef struct LzNative {
     LzObject base;
     LzString *name;
@@ -28,6 +38,7 @@ typedef struct LzNative {
     uint8_t takes_links;   /* link cells among the arguments. LZ_LINKS_NONE means lz_native_call refuses them, LZ_LINKS_ITEMS
 checks only argv[0] because the builtin stores the others, as push and insert do, and
 LZ_LINKS_ANY allows any */
+    uint8_t flags;         /* LZ_NATIVE_*, see lizard/native_fast.h */
     const void *data;      /* private to whoever made the native, and a method dispatcher keeps its group here */
 } LzNative;
 

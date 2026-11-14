@@ -7,6 +7,7 @@
 #include "lizard/array.h"
 #include "lizard/class.h"
 #include "lizard/dict.h"
+#include "lizard/native_fast.h"
 
 static const char *kind_of(const LzValue *value) {
     return lz_value_kind_name(value);
@@ -62,19 +63,13 @@ LzStatus lz_builtin_len(LzVM *vm, int argc, const LzValue *argv, LzValue *result
         return LZ_OK;
     }
     if (is_string(&argv[0])) {
-        /* Length in characters (UTF-8 code points): bytes that are not continuation bytes. */
+        /* Length in characters (UTF-8 code points). */
         const LzString *text = (const LzString *)argv[0].as.object;
         LzStatus charged = lz_vm_charge_fuel(vm, text->length / 64);
         if (charged != LZ_OK) {
             return charged;
         }
-        int64_t length = 0;
-        for (size_t i = 0; i < text->length; i++) {
-            if (((unsigned char)text->data[i] & 0xC0) != 0x80) {
-                length++;
-            }
-        }
-        *result = lz_value_int(length);
+        *result = lz_value_int(lz_utf8_length(text->data, text->length));
         return LZ_OK;
     }
     return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "len(): expected an array or string, got %s",

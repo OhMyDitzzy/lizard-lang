@@ -1,0 +1,15 @@
+import lib
+
+fn poke(x, v) {
+  x.count = v
+}
+
+let it = lib.Item()
+let i = 0
+while i < 20 {
+  it.tick()
+  i += 1
+}
+println(it.count)
+poke(it, 5)
+println("unreachable")

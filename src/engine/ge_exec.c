@@ -10,6 +10,7 @@
 #include "lizard/dict.h"
 #include "lizard/module.h"
 #include "lizard/native.h"
+#include "lizard/native_fast.h"
 
 /*
  * The Gecko Engine executor.
@@ -532,6 +533,28 @@ static void ic_fill(LzVM *vm, GeIns *ins, const LzInstance *instance, const LzSt
 }
 
 /*
+ * The class of the instance is not the cached one: tries to fill the cache for it. False when the
+ * site gave up on its cache or the member is not one the cache takes, and the caller then hands
+ * the instruction to the reference.
+ */
+static bool ic_miss(LzVM *vm, GeIns *ins, const LzInstance *instance, const LzString *name, int what) {
+    if (ins->ic_stuck != 0) {
+        return false;
+    }
+    if (ins->ic_run < IC_MIN_RUN) {
+        if (++ins->ic_bad >= IC_BAD_MAX) {
+            ins->ic_stuck = 1;
+            return false;
+        }
+    } else {
+        ins->ic_bad = 0;
+    }
+    ins->ic_run = 0;
+    ic_fill(vm, ins, instance, name, what);
+    return instance->cls->id == ins->ic_class;
+}
+
+/*
  * The translated program of a function, made on its first call and kept on the function object,
  * so it lives exactly as long as the function does. NULL when the function's code can't be
  * translated, and the caller then hands that call to the reference interpreter.
@@ -1018,11 +1041,20 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
              * replaces the callee and its arguments. On failure nothing is popped.
              */
             LzValue result = GE_NIL_INIT;
-            SYNC_OUT();
-            vm->native_call_offset = ins->offset;
-            status = lz_native_call(vm, (const LzNative *)callee_object, (int)argc, &stack[sp - argc], &result);
-            if (status != LZ_OK) {
-                goto fail;
+            const LzNative *native = (const LzNative *)callee_object;
+            const LzValue *args = &stack[sp - argc];
+            if ((native->flags & LZ_NATIVE_LEN) != 0 && argc == 1 && lz_value_is_array(args)) {
+                /* len of an array can't fail and touches nothing, so there is nothing to sync. */
+                result = lz_value_int((int64_t)lz_value_as_array(args)->count);
+            } else {
+                SYNC_OUT();
+                vm->native_call_offset = ins->offset;
+                status = lz_native_is_leaf(native, (int)argc, args)
+                             ? lz_native_call_fast(vm, native, (int)argc, args, &result)
+                             : lz_native_call(vm, native, (int)argc, args, &result);
+                if (status != LZ_OK) {
+                    goto fail;
+                }
             }
             for (size_t i = 0; i < argc + 1; i++) {
                 sp--;
@@ -1335,14 +1367,13 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 }
                 LzInstance *object = lz_value_as_instance(&stack[sp - 1]);
                 if (GE_UNLIKELY(object->cls->id != ins->ic_class)) {
-                    if (const_is_string(chunk, ins->a)) {
-                        ic_fill(vm, ins, object, (const LzString *)chunk->constants[ins->a].as.object,
-                                ins->plain == LZ_OP_GET_FIELD ? 0 : 1);
-                    }
-                    if (object->cls->id != ins->ic_class) {
+                    if (ins->ic_stuck != 0 || !const_is_string(chunk, ins->a) ||
+                        !ic_miss(vm, ins, object, (const LzString *)chunk->constants[ins->a].as.object,
+                                 ins->plain == LZ_OP_GET_FIELD ? 0 : 1)) {
                         goto plain_tick;
                     }
                 }
+                ins->ic_run++;
                 const LzMember *member = ins->ic_member;
                 bool keep = ins->plain == LZ_OP_GET_FIELD_KEEP;
                 if (GE_UNLIKELY(((object->unset >> member->slot) & 1u) != 0 || (keep && sp >= LZ_STACK_MAX))) {
@@ -1367,13 +1398,12 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 }
                 LzInstance *object = lz_value_as_instance(&stack[sp - 2]);
                 if (GE_UNLIKELY(object->cls->id != ins->ic_class)) {
-                    if (const_is_string(chunk, ins->a)) {
-                        ic_fill(vm, ins, object, (const LzString *)chunk->constants[ins->a].as.object, 1);
-                    }
-                    if (object->cls->id != ins->ic_class) {
+                    if (ins->ic_stuck != 0 || !const_is_string(chunk, ins->a) ||
+                        !ic_miss(vm, ins, object, (const LzString *)chunk->constants[ins->a].as.object, 1)) {
                         goto plain_tick;
                     }
                 }
+                ins->ic_run++;
                 /*
                  * Only a value that the declared type accepts by kind and that holds no container
                  * (nil, bool, int, float, string), so there is no cycle check and no fuel to
@@ -1401,15 +1431,17 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 }
                 const LzInstance *object = lz_value_as_instance(&stack[sp - 2]);
                 if (GE_UNLIKELY(object->cls->id != ins->ic_class)) {
+                    if (ins->ic_stuck != 0) {
+                        goto plain_tick;
+                    }
                     /* Three bytes: the name constant and the mode. The translator's operands do not cover them. */
                     size_t name_index = ((size_t)chunk->code[ins->offset + 1] << 8) | chunk->code[ins->offset + 2];
-                    if (const_is_string(chunk, name_index)) {
-                        ic_fill(vm, ins, object, (const LzString *)chunk->constants[name_index].as.object, 2);
-                    }
-                    if (object->cls->id != ins->ic_class) {
+                    if (!const_is_string(chunk, name_index) ||
+                        !ic_miss(vm, ins, object, (const LzString *)chunk->constants[name_index].as.object, 2)) {
                         goto plain_tick;
                     }
                 }
+                ins->ic_run++;
                 TICK(1);
                 LzValue callee = ins->ic_member->value;
                 grab(&callee);

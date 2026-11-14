@@ -1,0 +1,12 @@
+20
+error: 'count' is read-only outside Item
+ --> bad_write.lz:4:5
+  |
+4 |   x.count = v
+  |     ^^^^^
+  |
+  = help: change it inside a method such as name()
+  = stack trace: innermost call first
+      at poke (bad_write.lz:4:5)
+      at <script> (bad_write.lz:14:5)
+

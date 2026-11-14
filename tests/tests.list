@@ -46,6 +46,7 @@ fuzz_lexer fuzz_lexer plain - -
 test_argparse test_argparse utils - test.lz
 test_print test_print plain - -
 test_engine test_engine engine - -
+test_ic test_ic engine - -
 fuzz_engine fuzz_engine engine - -
 test_jit test_jit engine - -
 test_skink_engines test_skink_engines engine - -
@@ -76,6 +77,7 @@ test_compiler_ge test_compiler_ge ge - -
 fuzz_run_ge fuzz_run_ge ge - -
 fuzz_compile_ge fuzz_compile_ge ge - -
 test_engine_jit test_engine none LZ_JIT=eager -
+test_ic_jit test_ic none LZ_JIT=eager -
 fuzz_engine_jit fuzz_engine none LZ_JIT=eager -
 test_bits_ge_jit test_bits_ge none LZ_JIT=eager -
 test_run_ge_jit test_run_ge none LZ_JIT=eager -

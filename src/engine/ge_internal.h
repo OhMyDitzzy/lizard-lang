@@ -57,7 +57,20 @@ typedef struct GeIns {
      */
     uint64_t ic_class;
     const struct LzMember *ic_member;
+    /*
+     * Health of that cache. ic_run counts the hits since the last miss. A miss that follows a
+     * run shorter than IC_MIN_RUN is a bad one, IC_BAD_MAX bad ones in a row mark the site stuck
+     * (polymorphic, or a member the cache never takes such as a link field), and a stuck site
+     * goes straight to the reference without looking the name up again. A longer run clears the
+     * count. A class that is already cached still hits on a stuck site.
+     */
+    uint32_t ic_run;
+    uint8_t ic_bad;
+    uint8_t ic_stuck;
 } GeIns;
+
+#define IC_MIN_RUN 4u
+#define IC_BAD_MAX 8u
 
 struct GeJit;
 

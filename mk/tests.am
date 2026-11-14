@@ -46,6 +46,7 @@ check_PROGRAMS = \
 	test_argparse \
 	test_print \
 	test_engine \
+	test_ic \
 	fuzz_engine \
 	test_jit \
 	test_skink_engines \
@@ -79,6 +80,7 @@ check_PROGRAMS = \
 
 check_SCRIPTS = \
 	test_engine_jit \
+	test_ic_jit \
 	fuzz_engine_jit \
 	test_bits_ge_jit \
 	test_run_ge_jit \
@@ -154,6 +156,7 @@ TESTS = \
 	test_argparse \
 	test_print \
 	test_engine \
+	test_ic \
 	fuzz_engine \
 	test_jit \
 	test_skink_engines \
@@ -184,6 +187,7 @@ TESTS = \
 	fuzz_run_ge \
 	fuzz_compile_ge \
 	test_engine_jit \
+	test_ic_jit \
 	fuzz_engine_jit \
 	test_bits_ge_jit \
 	test_run_ge_jit \
@@ -303,6 +307,8 @@ test_print_SOURCES = tests/test_print.c
 test_print_LDADD = $(LZ_LDADD_PLAIN)
 test_engine_SOURCES = tests/test_engine.c
 test_engine_LDADD = $(LZ_LDADD_ENGINE)
+test_ic_SOURCES = tests/test_ic.c
+test_ic_LDADD = $(LZ_LDADD_ENGINE)
 fuzz_engine_SOURCES = tests/fuzz_engine.c
 fuzz_engine_LDADD = $(LZ_LDADD_ENGINE)
 test_jit_SOURCES = tests/test_jit.c
@@ -393,6 +399,8 @@ test_typesys_LDADD = $(LZ_LDADD_PLAIN)
 # Tests that are not programs of their own (variants, scripts) are stubs: the file only has
 # to exist; tests/run-test.sh looks the test up in tests/tests.list by its name.
 test_engine_jit:
+	@$(lz_make_stub)
+test_ic_jit:
 	@$(lz_make_stub)
 fuzz_engine_jit:
 	@$(lz_make_stub)

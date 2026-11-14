@@ -9,6 +9,7 @@
 #include "lizard/dict.h"
 #include "lizard/error.h"
 #include "lizard/native.h"
+#include "lizard/native_fast.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -1865,6 +1866,24 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         if (!frames_ok && vm->stack_count > argc && lz_value_is_closure(&vm->stack[vm->stack_count - argc - 1])) {
             status = malformed(vm, "a single step cannot enter a function");
             break;
+        }
+        if (vm->stack_count > argc) {
+            /* A native that runs no user code is called from here, as lz_vm_call would, minus its checks. */
+            const LzValue *callee = &vm->stack[vm->stack_count - argc - 1];
+            if (callee->type == LZ_VAL_OBJECT && callee->as.object->type == LZ_OBJ_NATIVE &&
+                lz_native_is_leaf((const LzNative *)callee->as.object, (int)argc, callee + 1)) {
+                LzValue result = lz_value_nil();
+                vm->native_call_offset = (uint32_t)start;
+                status = lz_native_call_fast(vm, (const LzNative *)callee->as.object, (int)argc, callee + 1,
+                                             &result);
+                if (status == LZ_OK) {
+                    for (size_t i = 0; i < argc + 1; i++) {
+                        pop(vm);
+                    }
+                    vm->stack[vm->stack_count++] = result;
+                }
+                break;
+            }
         }
         bool entered = false;
         status = lz_vm_call(vm, argc, ip, (uint32_t)start, &entered);

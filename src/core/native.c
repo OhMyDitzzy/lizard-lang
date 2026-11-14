@@ -15,6 +15,7 @@ LzNative *lz_native_new(LzHeap *heap, LzString *name, LzNativeFn fn, int min_arg
     native->max_args = max_args;
     native->result_kinds = LZ_KINDS_ANY;
     native->takes_links = LZ_LINKS_NONE;
+    native->flags = 0;
     native->data = NULL;
     return native;
 }

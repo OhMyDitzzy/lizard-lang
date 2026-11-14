@@ -1,0 +1,28 @@
+import lib
+
+fn label_here(x) => x.label()
+fn n_here(x) => x.n
+
+let it = lib.Item()
+let other = lib.Item(n: 7)
+let total = 0
+let i = 0
+while i < 20 {
+  total += len(lib.name_of(it)) + lib.n_of(other) + n_here(it)
+  i += 1
+}
+println(total)
+println(lib.try_label(it))
+
+extend lib.Item {
+    pub fn label(self) => "L" + string(self.n)
+}
+
+let j = 0
+while j < 20 {
+  total += len(label_here(it)) + lib.n_of(it) + n_here(other)
+  it.tick()
+  j += 1
+}
+println(total, label_here(other), lib.name_of(it), it.count)
+println(lib.try_label(it))
