@@ -171,6 +171,7 @@ struct LzVM {
     /* Runs a compiled module once. The compiler sets it when a file imports another, for OP_IMPORT. */
     LzStatus (*module_run)(struct LzVM *vm, struct LzModule *module);
     size_t compiling;                       /* compiles in progress, so an import is nested when it is above 0 */
+    struct LznState *lzn;                   /* native modules, see lizard/native_module.h */
     LzSkink skink; /* cycle collector, see skink.h. It stays last so the JIT's field offsets don't move */
 };
 

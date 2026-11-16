@@ -1,5 +1,6 @@
 #include "lizard/module.h"
 #include "lizard/compiler.h"
+#include "lizard/native_module.h"
 #include "lizard/vm.h"
 
 #include <stdio.h>
@@ -258,6 +259,10 @@ LzStatus lz_module_run(LzVM *vm, LzModule *module) {
     if (module->state != LZ_MODULE_COMPILED) {
         return circular_error(vm, module);
     }
+    if (module->is_native) {
+        module->state = LZ_MODULE_READY; /* its init ran when it was registered */
+        return LZ_OK;
+    }
     if (!loading_push(vm, module)) {
         return lz_vm_out_of_memory(vm);
     }
@@ -307,6 +312,15 @@ static LzStatus resolve_source(LzVM *vm, const LzModule *importer, const char *n
 }
 
 LzStatus lz_module_prepare(LzVM *vm, const LzModule *importer, const char *name, LzModule **out) {
+    bool native = false;
+    LzModule *registered = lz_native_module_find(vm, name, &native);
+    if (native) {
+        vm->module_run = lz_module_run;
+        if (out != NULL) {
+            *out = registered;
+        }
+        return LZ_OK;
+    }
     LzModuleSource source;
     LzStatus status = resolve_source(vm, importer, name, &source);
     return status != LZ_OK ? status : lz_module_prepare_source(vm, &source, out);

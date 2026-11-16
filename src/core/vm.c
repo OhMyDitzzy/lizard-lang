@@ -1,3 +1,4 @@
+#include "lizard/native_module.h"
 #include "lizard/vm.h"
 #include "lizard/class.h"
 #include "lizard/link.h"
@@ -57,6 +58,7 @@ void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err) {
     lz_vm_clear_error_extras(vm);
     vm->text_status = LZ_OK;
     vm->has_classes = false;
+    vm->lzn = NULL;
     vm->exts = NULL;
     vm->ext_count = 0;
     vm->ext_capacity = 0;
@@ -164,11 +166,13 @@ void lz_vm_free(LzVM *vm) {
     lz_writer_flush(&vm->out);
     lz_writer_flush(&vm->err);
     lz_vm_release_roots(vm);
+    lz_native_vm_shutdown(vm);
     lz_heap_destroy(&vm->heap);
     lz_link_table_free(vm);
     free(vm->class_registry);
     vm->class_registry = NULL;
     lz_modules_free(vm); /* last: chunks and classes keep borrowed pointers to modules until the heap is gone */
+    lz_native_vm_free(vm);
 }
 
 LzString *lz_vm_intern(LzVM *vm, const char *chars, size_t length) {

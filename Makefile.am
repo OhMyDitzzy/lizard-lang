@@ -61,6 +61,8 @@ bench: all
 .PHONY: bench
 
 # ---- install -------------------------------------------------------------------------------------
+# lzapi.h is the one public header, for authors of native modules (docs/NATIVE.md)
+include_HEADERS = include/lzapi.h
 # README.md and docs/**/*.md under share/doc/lizard, BUILDINFO beside them, examples in share/lizard
 nobase_dist_doc_DATA = $(lizard_docs)
 nodist_doc_DATA = generated/BUILDINFO

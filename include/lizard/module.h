@@ -5,6 +5,7 @@
 #include "lizard/common.h"
 #include "lizard/source.h"
 #include "lizard/table.h"
+#include "lzapi.h"
 
 /* One import chain can't be longer than this, and a VM can't hold more modules than this. */
 #define LZ_MODULES_MAX 1024
@@ -30,6 +31,7 @@ typedef struct LzModule {
     LzChunk *chunk;         /* its top-level code, kept for its interface; NULL for main */
     struct LzModule *next;  /* the VM's list of modules */
     bool is_main;
+    bool is_native; /* made by lz_vm_register_native_module: no code to run, see lizard/native_module.h */
 } LzModule;
 
 typedef struct LzModuleSource { /* what a resolver returns */
@@ -111,6 +113,13 @@ const LzValue *lz_module_get(const LzModule *module, const LzString *name);
  * leads back to it is then a cycle. The text is copied. False when out of memory.
  */
 bool lz_module_set_main(LzVM *vm, const char *id, const char *name);
+
+/*
+ * Registers a module written in C, see docs/NATIVE.md. `import name` finds it before the resolver
+ * is asked. init runs now, once, so a bad signature fails here and not when the module is used.
+ * A name can be registered once. Returns LZ_OK, or an error with vm->error set.
+ */
+LzStatus lz_vm_register_native_module(LzVM *vm, const char *name, LznInitFn init);
 
 /* Installs the resolver and destroys the previous one. */
 void lz_vm_set_resolver(LzVM *vm, const LzModuleResolver *resolver);

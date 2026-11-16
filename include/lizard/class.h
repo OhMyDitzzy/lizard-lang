@@ -100,6 +100,7 @@ typedef struct LzClass {
      * is the module that runs the statement, and only code of that module sees the block.
      */
     const struct LzModule *module;
+    void *native;             /* the description of a class made by a native module (lizard/native_module.h), or NULL */
 } LzClass;
 
 typedef struct LzInstance {

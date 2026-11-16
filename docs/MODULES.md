@@ -303,11 +303,15 @@ program that is one file reports exactly as before.
   a module that failed to compile or run stays counted until the VM is freed.
 * A chain of imports can be 128 files deep and a program can load 1024 modules
   (`too many modules (limit is 1024)`).
-* There is no `std.`, no packages, no permissions and no native modules.
+* There is no `std.`, no packages and no permissions. Modules written in C can be registered by the
+  embedder, see [NATIVE.md](NATIVE.md).
 * A module's top-level code always runs on the reference interpreter. Functions it defines run on
   whichever engine the program uses, and read the module's own globals on all of them.
 
 ## For embedders
+
+A module can also be written in C and registered with `lz_vm_register_native_module`. The
+interface for its author is described in [NATIVE.md](NATIVE.md).
 
 ### Globals belong to a module
 

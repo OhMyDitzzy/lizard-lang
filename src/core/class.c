@@ -10,6 +10,7 @@
 #include "lizard/array.h"
 #include "lizard/dict.h"
 #include "lizard/error.h"
+#include "lizard/native_module.h"
 #include "lizard/link.h"
 #include "lizard/native.h"
 #include "lizard/suggest.h"
@@ -113,6 +114,7 @@ LzClass *lz_class_new(LzVM *vm, LzString *name, uint32_t offset) {
     cls->ext_error_kind = 0;
     cls->ext_target = NULL;
     cls->module = NULL;
+    cls->native = NULL;
     if (!registry_add(vm, cls)) {
         lz_object_release(&vm->heap, &cls->base); /* the finalizer drops the name it holds */
         return NULL;
@@ -333,6 +335,9 @@ void lz_class_finalize(LzHeap *heap, LzClass *cls) {
 }
 
 void lz_instance_finalize(LzHeap *heap, LzInstance *instance) {
+    if (instance->cls->native != NULL) {
+        lz_native_instance_finalize(instance);
+    }
     size_t count = instance->cls->field_count;
     for (size_t i = 0; i < count; i++) {
         lz_drop_container_holder(&instance->fields[i]);
@@ -876,6 +881,10 @@ LzStatus lz_class_link(LzVM *vm, LzClass *cls, LzClass *parent) {
     if (cls->parent == parent) {
         return LZ_OK; /* the statement ran before */
     }
+    if (parent->native != NULL) {
+        return link_fail(vm, cls->offset, "a native class can be used and held, but not extended in this version",
+                         "cannot extend a native class (%s)", parent->name->data);
+    }
     if (parent->field_count + cls->own_field_count > LZ_CLASS_FIELDS_MAX) {
         return link_fail(vm, cls->offset, "a class and its parents can have at most 64 fields together",
                          "%s has too many fields with those of %s", cls->name->data, parent->name->data);
@@ -896,7 +905,7 @@ static LzValue self_of(const LzInstance *instance) {
 }
 
 static LzInstance *instance_alloc(LzVM *vm, LzClass *cls) {
-    size_t size = sizeof(LzInstance) + cls->field_count * sizeof(LzValue);
+    size_t size = sizeof(LzInstance) + cls->field_count * sizeof(LzValue) + lz_native_instance_extra(cls);
     LzInstance *instance = lz_heap_alloc(&vm->heap, LZ_OBJ_INSTANCE, size);
     if (instance == NULL) {
         return NULL;
@@ -910,7 +919,14 @@ static LzInstance *instance_alloc(LzVM *vm, LzClass *cls) {
     for (size_t i = 0; i < cls->field_count; i++) {
         instance->fields[i] = lz_value_nil();
     }
+    if (cls->native != NULL) {
+        lz_native_instance_setup(instance);
+    }
     return instance;
+}
+
+LzInstance *lz_instance_new_raw(LzVM *vm, LzClass *cls) {
+    return instance_alloc(vm, cls);
 }
 
 /*
@@ -1238,6 +1254,14 @@ static const LzString *name_at(LzVM *vm, const char *names, size_t length, size_
 static LzStatus construct_impl(LzVM *vm, LzClass *cls, size_t positional, const LzValue *argv,
                                size_t named_count, const char *names, size_t names_length,
                                const LzValue *named, LzError *core, LzValue *result) {
+    if (cls->native != NULL && core == NULL) {
+        LzValue made = lz_value_nil();
+        LzStatus built = lz_native_class_construct(vm, cls, positional, argv, named_count, &made);
+        if (built == LZ_OK) {
+            *result = made;
+        }
+        return built;
+    }
     if (cls->is_trait) {
         return fail(vm, LZ_ERR_RUNTIME, "a trait is implemented by a class; create one of those",
                     "%s is a trait and cannot be created; use a class that implements it", cls->name->data);
@@ -1420,6 +1444,9 @@ LzStatus lz_error_class_construct(LzVM *vm, LzClass *cls, uint8_t kind, size_t p
 }
 
 LzStatus lz_instance_copy(LzVM *vm, const LzInstance *source, LzValue *result) {
+    if (source->cls->native != NULL) {
+        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot copy an instance of the native class %s", source->cls->name->data);
+    }
     LzInstance *copy = instance_alloc(vm, source->cls);
     if (copy == NULL) {
         return lz_vm_out_of_memory(vm);

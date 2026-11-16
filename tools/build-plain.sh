@@ -321,6 +321,7 @@ if [ "$command" = install ]; then
         cp "$2" "$dest$3/${4:-$(basename "$2")}" && chmod "$1" "$dest$3/${4:-$(basename "$2")}"
     }
     inst 755 "$b/lizard" "$prefix/bin"
+    inst 644 "$src/include/lzapi.h" "$prefix/include"
     docdir=$prefix/share/doc/lizard
     for f in $(list_of lizard_docs); do
         inst 644 "$src/$f" "$docdir/$(dirname "$f" | sed 's|^\.$||')"

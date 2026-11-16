@@ -33,6 +33,7 @@ test_interface test_interface plain - -
 test_extend test_extend plain - -
 test_modules test_modules plain - -
 test_imports test_imports plain - -
+test_native_module test_native_module plain - -
 test_module_file test_module_file plain - -
 test_error_classes test_error_classes plain - -
 test_error_types test_error_types plain - -
@@ -63,6 +64,7 @@ test_classes_ge test_classes_ge ge - -
 test_extend_ge test_extend_ge ge - -
 test_modules_ge test_modules_ge ge - -
 test_imports_ge test_imports_ge ge - -
+test_native_module_ge test_native_module_ge ge - -
 test_error_classes_ge test_error_classes_ge ge - -
 test_loops_ge test_loops_ge ge - -
 test_for_ge test_for_ge ge - -
@@ -98,6 +100,7 @@ test_classes_ge_jit test_classes_ge none LZ_JIT=eager -
 test_extend_ge_jit test_extend_ge none LZ_JIT=eager -
 test_modules_ge_jit test_modules_ge none LZ_JIT=eager -
 test_imports_ge_jit test_imports_ge none LZ_JIT=eager -
+test_native_module_ge_jit test_native_module_ge none LZ_JIT=eager -
 test_error_classes_ge_jit test_error_classes_ge none LZ_JIT=eager -
 test_links_ge_jit test_links_ge none LZ_JIT=eager -
 fuzz_links_ge_jit fuzz_links_ge none LZ_JIT=eager -
@@ -108,3 +111,4 @@ sources_sync tools/check-sync.sh script - @srcdir
 test_typesys test_typesys plain - -
 bench_scripts tests/bench_scripts_check.sh script - @lizard
 modules_cli tests/run-modules.sh script - @lizard
+native_standalone tests/native/check-standalone.sh script - @srcdir
