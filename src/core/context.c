@@ -5,11 +5,59 @@
 #include "lizard/vm.h"
 
 void lz_vm_context_init(LzExecutionContext *context) {
-    *context = (LzExecutionContext){
-        .stack_limit = LZ_CO_STACK_MAX,
-        .frame_limit = LZ_CO_FRAMES_MAX,
-        .handler_limit = LZ_CO_HANDLERS_MAX,
-    };
+    *context = (LzExecutionContext){0};
+    lz_vm_context_set_depth(context, LZ_CO_DEPTH_DEFAULT);
+}
+
+void lz_vm_context_set_depth(LzExecutionContext *context, size_t depth) {
+    assert(depth >= 1 && depth <= LZ_FRAMES_MAX && context->stack == NULL);
+    context->stack_limit = depth * 8 < LZ_STACK_MAX ? depth * 8 : LZ_STACK_MAX;
+    context->frame_limit = depth;
+    context->handler_limit = depth / 4 + 16 < LZ_HANDLERS_MAX ? depth / 4 + 16 : LZ_HANDLERS_MAX;
+}
+
+static void coroutine_limit_help(LzVM *vm) {
+    if (vm->frame_cap < LZ_FRAMES_MAX) {
+        lz_vm_set_help(vm, "use coroutine(fn, depth) with a larger depth (up to %d) to raise this limit",
+                       LZ_FRAMES_MAX);
+    } else {
+        lz_vm_set_help(vm, "coroutine(fn, depth) is already at the maximum depth of %d. Reduce live values, calls or try blocks",
+                       LZ_FRAMES_MAX);
+    }
+}
+
+LzStatus lz_vm_value_overflow(LzVM *vm) {
+    if (vm->context->coroutine == NULL) {
+        return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow");
+    }
+    LzStatus status = lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
+                                     "stack overflow: too many values in a coroutine (limit %zu)", vm->stack_cap);
+    coroutine_limit_help(vm);
+    return status;
+}
+
+LzStatus lz_vm_frame_overflow(LzVM *vm) {
+    if (vm->context->coroutine != NULL) {
+        LzStatus status = lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
+                                         "stack overflow: too many nested calls in a coroutine (limit %zu)", vm->frame_cap);
+        coroutine_limit_help(vm);
+        return status;
+    }
+    LzStatus status = lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
+                                     "stack overflow: too many nested calls (limit %zu)", vm->frame_cap);
+    lz_vm_set_help(vm, "a function calls itself without a base case, or the recursion is too deep (limit %zu)",
+                   vm->frame_cap);
+    return status;
+}
+
+LzStatus lz_vm_handler_overflow(LzVM *vm) {
+    if (vm->context->coroutine == NULL) {
+        return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow: too many open try blocks");
+    }
+    LzStatus status = lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
+                                     "stack overflow: too many open try blocks in a coroutine (limit %zu)", vm->handler_cap);
+    coroutine_limit_help(vm);
+    return status;
 }
 
 static void save_active(LzVM *vm) {
@@ -40,17 +88,13 @@ void lz_vm_context_switch(LzVM *vm, LzExecutionContext *next) {
 
 static LzStatus context_limit_error(LzVM *vm, size_t values, size_t frames, size_t handlers) {
     if (values > vm->stack_cap) {
-        return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow");
+        return lz_vm_value_overflow(vm);
     }
     if (frames > vm->frame_cap) {
-        LzStatus status = lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
-                                          "stack overflow: too many nested calls (limit %zu)", vm->frame_cap);
-        lz_vm_set_help(vm, "a function calls itself without a base case, or the recursion is too deep (limit %zu)",
-                       vm->frame_cap);
-        return status;
+        return lz_vm_frame_overflow(vm);
     }
     if (handlers > vm->handler_cap) {
-        return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow: too many open try blocks");
+        return lz_vm_handler_overflow(vm);
     }
     return LZ_OK;
 }

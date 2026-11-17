@@ -1,0 +1,6 @@
+fn down(n) {
+    if n == 0 { return 42 }
+    return down(n - 1)
+}
+let co = coroutine(fn() => down(60), 50)
+co.resume()

@@ -28,6 +28,12 @@ static void check(const char *code, LzStatus expected, const char *output, const
         if (status != expected) fprintf(stderr, "status %d: %s\n", status, vm.error);
         if (output != NULL) LZ_CHECK(strcmp(text.data == NULL ? "" : text.data, output) == 0);
         if (error != NULL) LZ_CHECK(strstr(vm.error, error) != NULL);
+        if (strstr(vm.error, "in a coroutine (limit") != NULL) {
+            LZ_CHECK(strstr(vm.error_help, "coroutine(fn, depth)") != NULL);
+        }
+        if (strstr(vm.error, "coroutine(): depth") != NULL) {
+            LZ_CHECK(strstr(vm.error_help, "1 to 2048") != NULL);
+        }
         LZ_CHECK(vm.context == &vm.main_context && vm.stack == vm.main_stack);
         LZ_CHECK(vm.frames == vm.main_frames && vm.handlers == vm.main_handlers);
         LZ_CHECK(vm.stack_cap == LZ_STACK_MAX && vm.frame_cap == LZ_FRAMES_MAX);
@@ -120,7 +126,101 @@ static void check_open_upvalue_cycle(void) {
     lz_buffer_free(&text);
 }
 
+static void check_value_boundary(void) {
+    LzVM vm;
+    LzBuffer text = {0};
+    lz_vm_init(&vm, lz_writer_from_buffer(&text), lz_writer_from_buffer(&text));
+    LzChunk chunk;
+    lz_chunk_init(&chunk);
+    LZ_CHECK(lz_chunk_write(&chunk, LZ_OP_NIL, 0));
+    LzCoroutine co = {0};
+    lz_vm_context_init(&co.context);
+    co.context.coroutine = &co;
+    lz_vm_context_switch(&vm, &co.context);
+    LzValue storage[9];
+    for (size_t i = 0; i < 9; i++) storage[i] = lz_value_int(42);
+    /* The extra slot lets a missing guard fail deterministically without writing past C storage. */
+    vm.stack = storage;
+    vm.stack_cap = vm.stack_count = 8;
+    size_t ip = 0;
+    bool halted = false;
+    LZ_CHECK(lz_vm_exec_one(&vm, &chunk, &ip, &halted) == LZ_ERR_STACK_OVERFLOW);
+    LZ_CHECK(strcmp(vm.error, "stack overflow: too many values in a coroutine (limit 8)") == 0);
+    LZ_CHECK(vm.stack_count == 8 && storage[8].type == LZ_VAL_INT && storage[8].as.integer == 42);
+    lz_vm_context_switch(&vm, &vm.main_context);
+    lz_chunk_discard(&chunk);
+    lz_vm_free(&vm);
+    lz_buffer_free(&text);
+}
+
+static void check_capacities_and_accounting(void) {
+    LzVM vm;
+    LzBuffer text = {0};
+    lz_vm_init(&vm, lz_writer_from_buffer(&text), lz_writer_from_buffer(&text));
+    LZ_CHECK(lz_builtin_install(&vm) == LZ_OK);
+    LzSource source;
+    lz_source_from_string(&source, "accounting.lz", "fn body() { yield(7); return 9 }\n");
+    LzChunk chunk;
+    LzDiagnostics diagnostics;
+    lz_chunk_init(&chunk);
+    LZ_CHECK(lz_compile(&vm, &source, &chunk, &diagnostics) == LZ_OK);
+    LZ_CHECK(lz_vm_run(&vm, &chunk) == LZ_OK);
+    LzString *name = lz_vm_intern(&vm, "body", 4);
+    LzValue args[] = {*lz_vm_lookup(&vm, name), lz_value_nil()};
+    const struct { size_t depth, values, handlers; } cases[] = {
+        {1, 8, 16}, {7, 56, 17}, {50, 400, 28}, {1000, 8000, 266}, {2048, 16384, 528}
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        args[1] = lz_value_int((int64_t)cases[i].depth);
+        LzValue value;
+        size_t before_create = vm.heap.live_bytes;
+        LZ_CHECK(lz_builtin_coroutine(&vm, 2, args, &value) == LZ_OK);
+        LzCoroutine *co = (LzCoroutine *)value.as.object;
+        LZ_CHECK(vm.heap.live_bytes == before_create + sizeof *co);
+        LZ_CHECK(co->context.stack == NULL && co->context.frames == NULL && co->context.handlers == NULL);
+        LZ_CHECK(co->context.stack_limit == cases[i].values);
+        LZ_CHECK(co->context.frame_limit == cases[i].depth);
+        LZ_CHECK(co->context.handler_limit == cases[i].handlers);
+        size_t before_resume = vm.heap.live_bytes;
+        size_t bytes = cases[i].values * sizeof(LzValue) + cases[i].depth * sizeof(LzCallFrame) +
+                       cases[i].handlers * sizeof(LzHandler);
+        LzValue result;
+        if (cases[i].depth == 1) {
+            LZ_CHECK(lz_coroutine_resume(&vm, 1, &value, &result) == LZ_ERR_STACK_OVERFLOW);
+            LZ_CHECK(strstr(vm.error, "in a coroutine (limit 1)") != NULL);
+            LZ_CHECK(vm.heap.live_bytes == before_resume);
+        } else {
+            LZ_CHECK(lz_coroutine_resume(&vm, 1, &value, &result) == LZ_OK);
+            LZ_CHECK(result.type == LZ_VAL_INT && result.as.integer == 7);
+            LZ_CHECK(vm.heap.live_bytes == before_resume + bytes);
+            LZ_CHECK(co->context.stack != NULL);
+            LZ_CHECK(co->context.frames != NULL && co->context.handlers != NULL);
+            if (cases[i].depth == 7) {
+                lz_vm_set_fuel(&vm, 0);
+                LZ_CHECK(lz_coroutine_resume(&vm, 1, &value, &result) == LZ_ERR_FUEL);
+                lz_vm_set_fuel(&vm, LZ_FUEL_UNLIMITED);
+                LZ_CHECK(co->state == LZ_CO_FAILED);
+            } else {
+                LZ_CHECK(lz_coroutine_resume(&vm, 1, &value, &result) == LZ_OK);
+                LZ_CHECK(result.type == LZ_VAL_INT && result.as.integer == 9);
+                LZ_CHECK(co->state == LZ_CO_DONE);
+            }
+            LZ_CHECK(co->context.stack == NULL);
+            LZ_CHECK(vm.heap.live_bytes == before_resume);
+        }
+        lz_value_release(&vm.heap, &value);
+        LZ_CHECK(vm.heap.live_bytes == before_create);
+    }
+    lz_chunk_free(&vm.heap, &chunk);
+    lz_vm_release_roots(&vm);
+    LZ_CHECK(vm.heap.live_bytes == 0 && vm.heap.live_objects == 0);
+    lz_vm_free(&vm);
+    lz_buffer_free(&text);
+}
+
 int main(void) {
+    check_value_boundary();
+    check_capacities_and_accounting();
     check("let co: coroutine = coroutine(fn(x = 4, *rest) { println(x, rest); "
           "let y = yield(); println(y); return yield(1, 2) })\n"
           "println(typeof(co), co.to_string(), co.status())\n"
@@ -132,7 +232,7 @@ int main(void) {
     check("let co = coroutine(fn() { let x = 1; yield(fn(v) { x = v }); return x })\n"
           "let change = co.resume()\nchange(42)\nprintln(co.resume())\n", LZ_OK, "42\n", NULL);
     check("let co = coroutine(fn() { fn deep(n) { if n == 0 { return yield(19) }; return deep(n - 1) }; "
-          "return deep(80) })\nprintln(co.resume())\nprintln(co.resume(23))\n", LZ_OK, "19\n23\n", NULL);
+          "return deep(900) })\nprintln(co.resume())\nprintln(co.resume(23))\n", LZ_OK, "19\n23\n", NULL);
     check("yield()\n", LZ_ERR_RUNTIME, "", "cannot yield from the main program");
     check("let co = coroutine(fn() => [1].map(fn(x) => yield(x)))\nco.resume()\n",
           LZ_ERR_RUNTIME, "", "cannot yield across a native call");
@@ -179,9 +279,43 @@ int main(void) {
     check_budget("let child = coroutine(fn() { while true {} })\nlet co = coroutine(fn() => child.resume())\nco.resume()\n",
                  100, SIZE_MAX, LZ_ERR_FUEL);
     check_budget("let held = []\nfor i in range(20000) { let co = coroutine(fn() => yield()); co.resume(); held.push(co) }\n",
-                 UINT64_MAX, 512 * 1024 * 1024, LZ_ERR_HEAP_LIMIT);
-    check_budget("fn make() { let box = [nil]; let co = coroutine(fn() => yield(box)); box[0] = co; co.resume() }\n"
+                 UINT64_MAX, 4 * 1024 * 1024, LZ_ERR_HEAP_LIMIT);
+    check_budget("fn make() { let box = [nil]; let co = coroutine(fn() => yield(box), 50); box[0] = co; co.resume() }\n"
                  "for i in range(2000) { make() }\n", UINT64_MAX, 1024 * 1024, LZ_OK);
+    check("fn down(n) { if n == 0 { return 42 }; return down(n - 1) }\n"
+          "let co = coroutine(fn() => down(1100))\nco.resume()\n", LZ_ERR_STACK_OVERFLOW, "",
+          "too many nested calls in a coroutine (limit 1000)");
+    check("fn down(n) { if n == 0 { return 42 }; return down(n - 1) }\n"
+          "let co = coroutine(fn() => down(60), 50)\nco.resume()\n", LZ_ERR_STACK_OVERFLOW, "",
+          "too many nested calls in a coroutine (limit 50)");
+    check("for d in range(1, 2049) { coroutine(fn() => nil, d) }\n", LZ_OK, "", NULL);
+    check("coroutine(fn() => nil, 0)\n", LZ_ERR_RUNTIME, "", "depth must be between 1 and 2048");
+    check("coroutine(fn() => nil, 2049)\n", LZ_ERR_RUNTIME, "", "depth must be between 1 and 2048");
+    check("coroutine(fn() => nil, -1)\n", LZ_ERR_RUNTIME, "", "depth must be between 1 and 2048");
+    check("coroutine(fn() => nil, 1.0)\n", LZ_ERR_TYPE, "", "depth must be an int, got float");
+    check("coroutine(fn() => nil, \"50\")\n", LZ_ERR_TYPE, "", "depth must be an int, got string");
+    check("coroutine(fn() => nil, true)\n", LZ_ERR_TYPE, "", "depth must be an int, got bool");
+    check("let make = coroutine\nmake(fn() => nil, depth = 50)\n", LZ_ERR_ARITY, "",
+          "builtin functions do not take named arguments");
+    check("try { coroutine(fn() => nil, 0) } catch e { println(e is ValueError) }\n"
+          "try { coroutine(fn() => nil, 1.0) } catch e { println(e is TypeError) }\n", LZ_OK, "true\ntrue\n", NULL);
+    check("fn down(n) { let x = n; let change = fn(v) { x = v; return x }; "
+          "if n == 0 { yield(change); return x }; return x + down(n - 1) }\n"
+          "let co = coroutine(fn() => down(900))\nlet change = co.resume()\nchange(42)\n"
+          "println(co.resume())\nprintln(change(23))\n", LZ_OK, "405492\n23\n", NULL);
+    check_budget("let held = []\nfor i in range(20000) { let co = coroutine(fn() => yield(), 8); "
+                 "co.resume(); held.push(co) }\n", UINT64_MAX, 64 * 1024 * 1024, LZ_OK);
+    check_budget("let held = []\nfor i in range(20000) { let co = coroutine(fn() => yield(), 2048); "
+                 "co.resume(); held.push(co) }\n", UINT64_MAX, 4 * 1024 * 1024, LZ_ERR_HEAP_LIMIT);
+    check("let co = coroutine(fn() => print(*range(500)), 50)\nco.resume()\n",
+          LZ_ERR_STACK_OVERFLOW, "", "too many values in a coroutine (limit 400)");
+    check("let co = coroutine(fn() => print(*range(17000)), 2048)\nco.resume()\n",
+          LZ_ERR_STACK_OVERFLOW, "", "too many values in a coroutine (limit 16384)");
+    check("fn down(n) { if n == 0 { return 42 }; return down(n - 1) }\n"
+          "let co = coroutine(fn() => down(1100), 2048)\nprintln(co.resume())\n", LZ_OK, "42\n", NULL);
+    check("fn recur() { try { return recur() } catch e { return nil } }\n"
+          "let co = coroutine(recur, 50)\nco.resume()\n", LZ_ERR_STACK_OVERFLOW, "",
+          "too many open try blocks in a coroutine (limit 28)");
     check_direct_shutdown();
     check_open_upvalue_cycle();
     return LZ_TEST_RESULT();

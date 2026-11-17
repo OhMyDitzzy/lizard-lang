@@ -31,6 +31,7 @@ lizard_core_SOURCES = \
 	src/core/type.c \
 	src/core/value.c \
 	src/core/context.c \
+	src/core/stack_plan.c \
 	src/core/coroutine.c \
 	src/core/vm.c \
 	src/core/writer.c
@@ -83,6 +84,7 @@ lizard_docs = \
 	docs/ERRORS.md \
 	docs/FUNCTIONS.md \
 	docs/COROUTINES.md \
+	docs/COROUTINES-PROGRESS.md \
 	docs/MEMORY.md \
 	docs/METHODS.md \
 	docs/MODULES.md \

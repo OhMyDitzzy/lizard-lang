@@ -1,0 +1,26 @@
+error: stack overflow: too many open try blocks in a coroutine (limit 28)
+ --> bad_handlers_50.lz:1:16
+  |
+1 | fn recurse() { try { return recurse() } catch e { return nil } }
+  |                ^^^
+  |
+  = help: use coroutine(fn, depth) with a larger depth (up to 2048) to raise this limit
+  = stack trace: innermost call first
+      at recurse (bad_handlers_50.lz:1:16)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      ... 14 more frames
+

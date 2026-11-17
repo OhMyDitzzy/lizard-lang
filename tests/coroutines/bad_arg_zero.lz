@@ -1,0 +1,1 @@
+coroutine(fn() => nil, 0)

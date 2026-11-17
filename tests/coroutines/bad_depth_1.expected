@@ -1,0 +1,10 @@
+error: stack overflow: too many nested calls in a coroutine (limit 1)
+ --> bad_depth_1.lz:2:10
+  |
+2 | co.resume()
+  |          ^
+  |
+  = help: use coroutine(fn, depth) with a larger depth (up to 2048) to raise this limit
+  = stack trace: innermost call first
+      at <script> (bad_depth_1.lz:2:10)
+

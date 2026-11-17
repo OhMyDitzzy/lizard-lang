@@ -1,26 +1,26 @@
-error: stack overflow: too many nested calls (limit 200)
- --> bad_depth.lz:1:57
+error: stack overflow: too many nested calls in a coroutine (limit 1000)
+ --> bad_depth.lz:3:16
   |
-1 | fn recurse(n) { let captured = fn() => n; return recurse(n + 1) }
-  |                                                         ^
+3 |     return down(n - 1)
+  |                ^
   |
-  = help: a function calls itself without a base case, or the recursion is too deep (limit 200)
+  = help: use coroutine(fn, depth) with a larger depth (up to 2048) to raise this limit
   = stack trace: innermost call first
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      ... 184 more frames
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      ... 984 more frames
 

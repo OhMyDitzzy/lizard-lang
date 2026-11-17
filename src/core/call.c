@@ -32,7 +32,7 @@ static LzStatus not_callable_error(LzVM *vm) {
 }
 
 static LzStatus stack_overflow(LzVM *vm) {
-    return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow");
+    return lz_vm_value_overflow(vm);
 }
 
 static void drop_top(LzVM *vm) {
@@ -94,11 +94,7 @@ static uint64_t supplied_mask(size_t argc) {
 static LzStatus push_frame(LzVM *vm, LzClosure *closure, size_t base, uint64_t supplied,
                            size_t resume_ip, uint32_t call_offset) {
     if (vm->frame_count >= vm->frame_cap) {
-        LzStatus status = lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
-                                          "stack overflow: too many nested calls (limit %zu)", vm->frame_cap);
-        lz_vm_set_help(vm, "a function calls itself without a base case, or the recursion is too deep (limit %d)",
-                       (int)vm->frame_cap);
-        return status;
+        return lz_vm_frame_overflow(vm);
     }
     vm->frames[vm->frame_count - 1].ip = resume_ip;
     LzCallFrame *frame = &vm->frames[vm->frame_count++];

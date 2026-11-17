@@ -1,0 +1,9 @@
+let held = []
+for i in range(20000) {
+    let co = coroutine(fn() => yield(), 8)
+    co.resume()
+    held.push(co)
+}
+println(len(held))
+for co in held { co.resume() }
+println(held[19999].status())

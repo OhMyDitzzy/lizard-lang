@@ -1,0 +1,4 @@
+for d in range(1, 2049) { coroutine(fn() => nil, d) }
+println("accepted 1 through 2048")
+try { coroutine(fn() => nil, 0) } catch e { println(e is ValueError) }
+try { coroutine(fn() => nil, 1.0) } catch e { println(e is TypeError) }

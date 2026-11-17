@@ -4,6 +4,7 @@
 # env:   VAR=value[,VAR=value]   args: @lizard @buildinfo @srcdir are replaced
 test_memory test_memory plain - -
 test_context test_context plain - -
+test_stack_plan test_stack_plan plain - -
 test_coroutines test_coroutines plain - -
 test_coroutines_ge test_coroutines_ge ge - -
 test_coroutines_jit test_coroutines_ge none LZ_GE_JIT=eager -

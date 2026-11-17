@@ -1,0 +1,11 @@
+error: stack overflow: too many values in a coroutine (limit 16384)
+ --> bad_max_values.lz:1:33
+  |
+1 | let co = coroutine(fn() => print(*range(17000)), 2048)
+  |                                 ^
+  |
+  = help: coroutine(fn, depth) is already at the maximum depth of 2048. Reduce live values, calls or try blocks
+  = stack trace: innermost call first
+      at <fn> (bad_max_values.lz:1:33)
+      at <script> (bad_max_values.lz:2:10)
+

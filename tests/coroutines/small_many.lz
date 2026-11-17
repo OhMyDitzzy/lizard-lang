@@ -1,0 +1,10 @@
+let held = []
+for i in range(3000) {
+    let co = coroutine(fn(n) => yield(n), 50)
+    co.resume(i)
+    held.push(co)
+}
+println(len(held))
+println(held[0].status(), held[2999].status())
+for co in held { co.resume() }
+println(held[0].status(), held[2999].status())

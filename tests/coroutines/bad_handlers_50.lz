@@ -1,0 +1,3 @@
+fn recurse() { try { return recurse() } catch e { return nil } }
+let co = coroutine(recurse, 50)
+co.resume()

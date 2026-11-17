@@ -4,6 +4,7 @@ if LZ_RUN_TESTS
 check_PROGRAMS = \
 	test_memory \
 	test_context \
+	test_stack_plan \
 	test_coroutines \
 	test_coroutines_ge \
 	test_table \
@@ -123,6 +124,7 @@ check_SCRIPTS = \
 TESTS = \
 	test_memory \
 	test_context \
+	test_stack_plan \
 	test_coroutines \
 	test_coroutines_ge \
 	test_coroutines_jit \
@@ -241,6 +243,8 @@ test_memory_SOURCES = tests/test_memory.c
 test_memory_LDADD = $(LZ_LDADD_PLAIN)
 test_context_SOURCES = tests/test_context.c
 test_context_LDADD = $(LZ_LDADD_PLAIN)
+test_stack_plan_SOURCES = tests/test_stack_plan.c
+test_stack_plan_LDADD = $(LZ_LDADD_PLAIN)
 test_coroutines_SOURCES = tests/test_coroutines.c
 test_coroutines_LDADD = $(LZ_LDADD_PLAIN)
 test_coroutines_ge_SOURCES = tests/test_coroutines.c

@@ -1,0 +1,8 @@
+error: coroutine(): depth must be between 1 and 2048, got 0
+ --> bad_arg_zero.lz:1:10
+  |
+1 | coroutine(fn() => nil, 0)
+  |          ^
+  |
+  = help: use coroutine(fn, depth) with an int depth from 1 to 2048 (default 1000)
+

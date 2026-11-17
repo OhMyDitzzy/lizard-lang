@@ -122,6 +122,7 @@ when it can fall off the end) is its result for checking, not at run time.
 
 ## Coroutines
 
-[Coroutines](COROUTINES.md) describes the `coroutine(fn)`, `resume`, `yield` and `status`
-API, including argument passing and the native-callback restrictions. Coroutine bodies
-run in the reference interpreter on every engine.
+[Coroutines](COROUTINES.md) describes the `coroutine(fn, depth = 1000)`, `resume`, `yield` and `status`
+API. Depth is a positional int from 1 through 2048. It selects fixed execution capacities
+allocated on the first resume. The guide covers argument passing and callback restrictions.
+Coroutine bodies run in the reference interpreter on every engine.

@@ -1,0 +1,8 @@
+fn down(n) {
+    if n == 0 { return yield(19) }
+    return down(n - 1)
+}
+let co = coroutine(fn() => down(900))
+println(co.resume())
+println(co.resume(23))
+println(co.status())

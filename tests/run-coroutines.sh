@@ -9,9 +9,14 @@ for flags in "--engine=ref" "--jit=off" "--jit=eager"; do
     for file in "$here"/*.lz; do
         name=$(basename "$file")
         rc=0
-        (cd "$here" && "$lizard" $flags --color=never "$name") >"$captured" 2>&1 || rc=$?
+        heap_flags=
+        case "$name" in
+            heap_small.lz) heap_flags=--max-heap=64M ;;
+            bad_heap_large.lz) heap_flags=--max-heap=4M ;;
+        esac
+        (cd "$here" && "$lizard" $flags $heap_flags --color=never "$name") >"$captured" 2>&1 || rc=$?
         expected_status=0
-        case "$name" in bad_*) expected_status=70 ;; esac
+        case "$name" in bad_arg_named.lz) expected_status=65 ;; bad_*) expected_status=70 ;; esac
         if [ "$rc" -ne "$expected_status" ] || ! cmp -s "$captured" "${file%.lz}.expected"; then
             echo "differs: $name $flags"
             status=1

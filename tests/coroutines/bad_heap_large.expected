@@ -1,0 +1,9 @@
+error: heap limit of 4194304 bytes exceeded
+ --> bad_heap_large.lz:4:14
+  |
+4 |     co.resume()
+  |              ^
+  |
+  = stack trace: innermost call first
+      at <script> (bad_heap_large.lz:4:14)
+

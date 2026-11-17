@@ -1,0 +1,14 @@
+fn down(n) {
+    let x = n
+    let change = fn(v) { x = v
+        return x }
+    if n == 0 { yield(change)
+        return x }
+    return x + down(n - 1)
+}
+let co = coroutine(fn() => down(900))
+let change = co.resume()
+println(change(42))
+println(co.resume())
+println(change(23))
+println(co.status())

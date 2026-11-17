@@ -1,0 +1,6 @@
+let held = []
+for i in range(20000) {
+    let co = coroutine(fn() => yield(), 2048)
+    co.resume()
+    held.push(co)
+}

@@ -33,7 +33,7 @@ static LzStatus malformed(LzVM *vm, const char *what) {
 
 static LzStatus push(LzVM *vm, LzValue value) {
     if (vm->stack_count >= vm->stack_cap) {
-        return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow");
+        return lz_vm_value_overflow(vm);
     }
     lz_value_retain(&value);
     vm->stack[vm->stack_count++] = value;
@@ -914,7 +914,7 @@ static LzStatus try_begin_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
         return malformed(vm, "jump out of range");
     }
     if (vm->handler_count >= vm->handler_cap) {
-        return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow: too many open try blocks");
+        return lz_vm_handler_overflow(vm);
     }
     LzHandler *handler = &vm->handlers[vm->handler_count++];
     handler->frame = vm->frame_count - 1;
@@ -982,7 +982,7 @@ static LzStatus member_get_op(LzVM *vm, const LzString *name, bool keep, bool fo
         if (vm->stack_count >= vm->stack_cap) {
             lz_value_release(&vm->heap, &found);
             lz_value_release(&vm->heap, &target);
-            return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow");
+            return lz_vm_value_overflow(vm);
         }
         vm->stack[vm->stack_count++] = found;
     } else {

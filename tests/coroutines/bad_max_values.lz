@@ -1,0 +1,2 @@
+let co = coroutine(fn() => print(*range(17000)), 2048)
+co.resume()

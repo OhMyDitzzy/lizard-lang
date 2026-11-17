@@ -13,12 +13,10 @@
 #include "lizard/writer.h"
 
 #define LZ_STACK_MAX 16384
-#define LZ_CO_STACK_MAX 2048
 
 /* Deepest chain of nested calls, including the top-level script. */
 #define LZ_FRAMES_MAX 2048
-#define LZ_CO_FRAMES_MAX 200
-#define LZ_CO_HANDLERS_MAX 64
+#define LZ_CO_DEPTH_DEFAULT 1000
 
 /* The mask of a call that passed every argument. */
 #define LZ_ALL_SUPPLIED UINT64_MAX
@@ -218,8 +216,15 @@ struct LzVM {
 
 void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err);
 
-/* A detached context starts without buffers and uses the fixed coroutine capacities. */
+/* A detached context starts without buffers and uses the default coroutine budgets. */
 void lz_vm_context_init(LzExecutionContext *context);
+
+/* Set the budgets before the first resume. Borrowed stack pointers prevent later resizing. */
+void lz_vm_context_set_depth(LzExecutionContext *context, size_t depth);
+
+LzStatus lz_vm_value_overflow(LzVM *vm);
+LzStatus lz_vm_frame_overflow(LzVM *vm);
+LzStatus lz_vm_handler_overflow(LzVM *vm);
 
 /* Switching transfers the active counts without moving stack values. No raw pointer into a suspended context may be invalidated. */
 void lz_vm_context_switch(LzVM *vm, LzExecutionContext *next);

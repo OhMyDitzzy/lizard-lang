@@ -1,0 +1,26 @@
+error: stack overflow: too many nested calls in a coroutine (limit 50)
+ --> bad_depth_50.lz:3:16
+  |
+3 |     return down(n - 1)
+  |                ^
+  |
+  = help: use coroutine(fn, depth) with a larger depth (up to 2048) to raise this limit
+  = stack trace: innermost call first
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      ... 34 more frames
+

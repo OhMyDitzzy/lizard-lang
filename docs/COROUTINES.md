@@ -10,7 +10,11 @@ returns control to that particular caller. There is no scheduler and no new synt
 
 ## Values and calls
 
-`coroutine(fn)` accepts a Lizard function or closure and creates a suspended coroutine.
+`coroutine(fn, depth = 1000)` accepts a Lizard function or closure and creates a suspended
+coroutine. The signature shows the default, but arguments are positional. Ordinary builtins
+do not accept named arguments. `depth` must be an `int` from 1 through `LZ_FRAMES_MAX`
+(2048), inclusive. Other types raise `TypeError` and out-of-range integers raise `ValueError`.
+Both diagnostics include the accepted range in `help:`.
 Native functions, classes and other values are rejected with a type error. Creation retains
 the function but allocates no execution stacks. `typeof(co)` returns `"coroutine"`, and
 `coroutine` is also a type annotation. The text representation is
@@ -71,17 +75,41 @@ The main program keeps the existing embedded arrays. Their layout remains availa
 and the JIT, which only execute the main context. The reference interpreter and shared VM
 helpers use active stack pointers, with counts still directly in the VM. Context switches
 save those fields into the outgoing context and load the incoming context. This avoids an
-extra context-pointer dereference for every stack access. The additional reference-engine
+extra context-pointer dereference for every stack access. The existing reference-engine
 pointer-load counts and capacity checks are detailed under Implementation notes.
 
-Each coroutine allocates fixed buffers on its first resume, with `LZ_CO_STACK_MAX` set to
-2048 values, `LZ_CO_FRAMES_MAX` to 200 frames and `LZ_CO_HANDLERS_MAX` to 64 handlers.
+Each coroutine allocates fixed buffers on its first resume. For a requested depth `d`,
+the capacities are:
+
+| Buffer | Capacity | Default (`d = 1000`) | Small (`d = 50`) |
+| --- | --- | --- | --- |
+| Call frames | `d` | 1000 | 50 |
+| Values | `min(8*d, LZ_STACK_MAX)` | 8000 | 400 |
+| Open handlers | `min(d/4 + 16, LZ_HANDLERS_MAX)` | 266 | 28 |
+
+Integer division rounds down. The main program still has 2048 frames, 16384 values and
+4096 handlers. Frame capacity includes the internal caller frame used by resume, as well
+as the entry function. Thus `depth = 1` is accepted at creation but cannot start a function.
+Each buffer has its own limit. A function with many locals can exhaust values first, and
+recursion with an open `try` in every call can exhaust handlers first.
+
+The ratio of eight values per frame leaves room for parameters, callee slots, locals and
+expression temporaries. A functional audit adapted the factorial and mutual recursion in
+`examples/functions.lz` and Fibonacci in `bench/fib.lz` to yield at the base case. No timing
+was collected. The suspended snapshots held 151 values in 52 frames for factorial,
+52 in 27 for Fibonacci's first descent, and 104 in 53 for mutual recursion. The deep-upvalue
+test held 4506 values in 903 frames, about five per frame. Fibonacci can also retain a left
+result while computing its right branch. Eight allows room beyond these common cases
+without imposing the main program's value budget on every small coroutine. This is a
+budget, not a guarantee for arbitrary locals or temporary argument lists.
+
+The handler ratio allows a quarter of the frames to keep one `try` open, with 16 extra
+entries for shallow nesting. The ordinary recursion examples and bench programs above
+keep no handlers open. Code that holds one per recursive frame needs a larger depth or
+fewer simultaneously open handlers. At the maximum depth, the handler budget is 528.
+
 The buffers never move, so borrowed native `argv` slices, class operator operands and open
-upvalue locations stay valid through callbacks and suspension. Automatic growth was
-cancelled because these borrowed pointers occur throughout callback-capable helpers.
-Growth can be reconsidered with evidence if fixed capacities become limiting. A future
-optional argument to `coroutine(fn, ...)` could configure capacities, but this version does
-not expose it.
+upvalue locations stay valid through callbacks and suspension. There is no stack growth.
 
 The full capacity counts against `--max-heap` after the first resume, including while
 suspended, so the heap limit also bounds the number of live started coroutines. Buffers
@@ -90,6 +118,67 @@ Untouched pages need not consume physical memory. Poison builds may fill all sto
 Allocation failure rolls back all partial allocations and reports the ordinary heap-limit
 or out-of-memory diagnostic. Completion, failure and destruction release the buffers.
 The main program retains its embedded arrays and original capacities.
+
+On this 64-bit build, a value is 16 bytes, a frame is 48 bytes, a handler is 24 bytes and
+a coroutine object is 192 bytes. Buffer cost is
+`16*min(8*d, 16384) + 48*d + 24*min(d/4 + 16, 4096)` bytes:
+
+| Depth | Buffer bytes | Buffer KiB | Object plus buffers |
+| --- | --- | --- | --- |
+| 8 | 1840 | 1.80 | 2032 bytes |
+| 50 | 9472 | 9.25 | 9664 bytes |
+| 1000 (default) | 182384 | 178.11 | 182576 bytes |
+| 2048 | 373120 | 364.38 | 373312 bytes |
+
+These figures exclude retained closures, user values, container storage and allocator
+metadata. Structure sizes can differ on other targets. An unstarted coroutine pays only
+for its object and retained entry function. A started suspended coroutine pays for the
+entire buffer capacity in `--max-heap`, even if most pages remain untouched. Returning,
+failing or being collected releases the buffers and removes their charge immediately.
+A coroutine object retained after completion still counts until it is released.
+
+For thousands of small suspended tasks, select a shallow budget explicitly. This example
+is executed as `tests/coroutines/small_many.lz`:
+
+```lizard
+let held = []
+for i in range(3000) {
+    let co = coroutine(fn(n) => yield(n), 50)
+    co.resume(i)
+    held.push(co)
+}
+println(len(held))
+println(held[0].status(), held[2999].status())
+for co in held { co.resume() }
+println(held[0].status(), held[2999].status())
+```
+
+```text
+3000
+suspended suspended
+done done
+```
+
+The default handles 900 recursive levels, including suspension at the deepest call.
+This example is executed as `tests/coroutines/default_deep.lz`:
+
+```lizard
+fn down(n) {
+    if n == 0 { return yield(19) }
+    return down(n - 1)
+}
+let co = coroutine(fn() => down(900))
+println(co.resume())
+println(co.resume(23))
+println(co.status())
+```
+
+```text
+19
+23
+done
+```
+
 
 `resume` is a native function. It retains the target as an execution root, switches contexts
 and calls the nested reference interpreter. `yield` returns an internal `LZ_YIELD` status.
@@ -137,7 +226,10 @@ modules. An error in a resumed child can be caught by its parent coroutine.
 
 Fuel and `vm->instructions` are global. Resuming another coroutine never replenishes fuel.
 The heap limit covers coroutine objects and their buffer capacities, not just live slots.
-Value, frame and handler limits apply separately to each context. Native nesting additionally
+Value, frame and handler limits apply separately to each context. Coroutine overflows
+identify the exhausted buffer and that coroutine's limit. Their `help:` suggests
+`coroutine(fn, depth)` with a larger depth up to 2048. At depth 2048, it instead explains
+that the maximum is already selected. Main-program diagnostics remain unchanged. Native nesting additionally
 uses the existing native-depth and C-stack limits, with the existing overflow diagnostics.
 
 ## Ownership and collection
@@ -282,26 +374,62 @@ with no runtime overhead percentage claimed. No
 benchmark was run. The earlier checkpoint's AArch64 code comparison found unchanged GE and
 JIT fast-path text after the storage refactor. It did not validate x86 generated execution.
 The current build host is AArch64 Linux. The added capacity loads are in the reference and
-shared helper paths; the GE interpreter and AArch64 JIT fast paths continue using main-array
+shared helper paths. The GE interpreter and AArch64 JIT fast paths continue using main-array
 constants. The x64 JIT source also retains those constants but was not executed on this host.
 
 ### Verification
 
-The complete ordinary and UBSan plus poison suites passed 114 tests each. The bench timing
-test was excluded. ASan is pending CI. It was not retried here because an empty C program
-already reproduced the AArch64 sanitizer allocator initialization failure in this environment.
+The ordinary and UBSan plus poison suites passed 115 tests each. The `bench_scripts` test
+was excluded because it invokes timing measurements. Verification used a local copy of
+`tools/build-plain.sh` with only that test filtered out, with `TMPDIR` set to Termux's
+writable temporary directory. UBSan used the following flags together with `--poison`:
 
-All 52 examples and reduced fixture copies of `bench/*.lz` with `N=10` completed identically
-in reference, GE without JIT and eager JIT on ordinary and UBSan/poison builds. These were
-functional checks with no timings. Existing module and native suites run on all three
+```text
+-O1 -g -fsanitize=undefined -fno-sanitize=function -fno-sanitize-recover=all -fno-omit-frame-pointer
+```
+
+Clang 21's `function` instrumentation reads metadata before the generated JIT trampoline,
+which can cross its mapping boundary. The unfiltered sanitizer build segfaulted in six
+JIT tests, while `LZ_JIT=off test_engine` passed. Disabling that one check in a fresh build
+keeps the other undefined-behavior checks and all three execution modes enabled.
+ASan remains pending CI because it cannot run in this Termux environment.
+The final build-script summaries were:
+
+```text
+=> 115 tests: 115 passed, 0 skipped, 0 failed (logs: /data/data/com.termux/files/home/lizard-lang/build-depth/test-logs)
+=> 115 tests: 115 passed, 0 skipped, 0 failed (logs: /data/data/com.termux/files/home/lizard-lang/build-depth-ubsan-fixed/test-logs)
+```
+
+All 30 top-level examples, 21 reduced fixture copies of `bench/*.lz` with `N=10`, and
+`examples/modules/main.lz` completed identically in reference, GE without JIT and eager JIT
+on ordinary and UBSan/poison builds. These were functional checks with no timings. Existing module and native suites run on all three
 engines. The coroutine runner compares exact stdout, stderr and exit status, including
 module-created coroutines and diagnostic source/caret/trace fixtures.
+
+Capacity tests additionally cover every accepted depth from 1 through 2048, rejected depth
+values and error kinds, default recursion to 900, failure at 1100, failure beyond a depth
+of 50, deep open upvalues, exact buffer charges before and after completion or failure, and 20000
+started coroutines at depth 8 within 64 MiB. Depth 2048 fails cleanly within a 4 MiB heap.
+The CLI fixtures compare exit status and all diagnostic text across all three engines.
+
+The default-depth heap refusal test now uses a 4 MiB cap instead of 512 MiB, so it
+verifies refusal without retaining thousands of larger default buffers. The small-cycle
+stress test explicitly requests depth 50 to keep its collection workload small. Old value,
+frame and handler diagnostic fixtures now expect limits 8000, 1000 and 266. The new depth
+50 fixtures expect 400 values, 50 frames and 28 handlers. The ordinary call path retains
+the same successful comparisons and stores. Only overflow branches call the new context
+aware diagnostic helpers. Depth validation and budget derivation run during coroutine
+creation. No new coroutine check runs on a successful ordinary instruction or call.
+
+The checkout also contained an unregistered stack-plan source/test and progress document.
+They are now listed in the build manifests so the source-synchronization check passes.
+This adds no stack planning to execution.
 
 The C tests cover lazy allocation, full-capacity charging, partial-allocation rollback,
 small value/frame/handler limits, stable upvalues, value exchange, defaults/rest/spread,
 status transitions, deep yields, alias mutation while suspended, escaped closures after
 context destruction, try/catch across yield, native map/sort crossings, nested resumes,
-fuel, heap-bounded attempts to suspend 20000 coroutines, and an open-only cycle where a
+fuel, heap-bounded attempts to suspend 20000 default-depth coroutines, and an open-only cycle where a
 suspended coroutine holds itself in a stack slot captured by an open upvalue. The test runs
 Skink after its last external root is gone and requires a cycle deletion. It also covers
 direct VM destruction with suspended try/upvalues. Native module tests call
@@ -316,40 +444,171 @@ fuel and heap limits to differential engine checks, including poison runs.
 | Skip restoration on coroutine error | Signal 11 |
 | Remove native-crossing detection | Exit 1 |
 | Omit coroutine stack edges in Skink | Exit 1 |
+| Remove the reference value-push bound check | Exit 1 |
+| Calculate value capacity as `7*d` instead of `8*d` | Exit 1 |
 
 ### Diagnostic transcripts
 
 These are actual `--color=never` reference-engine outputs. The runner requires identical
-output on all three engines. Call carets use the same source offsets as existing calls.
+output and exit status on all three engines. The heap failure uses `--max-heap=4M`.
+Call carets use the same source offsets as existing calls.
+
+`bad_arg_bool.lz`
+
+```text
+error: coroutine(): depth must be an int, got bool
+ --> bad_arg_bool.lz:1:10
+  |
+1 | coroutine(fn() => nil, true)
+  |          ^
+  |
+  = help: use coroutine(fn, depth) with an int depth from 1 to 2048 (default 1000)
+```
+
+`bad_arg_float.lz`
+
+```text
+error: coroutine(): depth must be an int, got float
+ --> bad_arg_float.lz:1:10
+  |
+1 | coroutine(fn() => nil, 1.0)
+  |          ^
+  |
+  = help: use coroutine(fn, depth) with an int depth from 1 to 2048 (default 1000)
+```
+
+`bad_arg_high.lz`
+
+```text
+error: coroutine(): depth must be between 1 and 2048, got 2049
+ --> bad_arg_high.lz:1:10
+  |
+1 | coroutine(fn() => nil, 2049)
+  |          ^
+  |
+  = help: use coroutine(fn, depth) with an int depth from 1 to 2048 (default 1000)
+```
+
+`bad_arg_named.lz`
+
+```text
+error: builtin functions do not take named arguments
+ --> bad_arg_named.lz:1:24
+  |
+1 | coroutine(fn() => nil, depth = 50)
+  |                        ^^^^^
+
+error: aborting due to 1 previous error
+```
+
+`bad_arg_negative.lz`
+
+```text
+error: coroutine(): depth must be between 1 and 2048, got -1
+ --> bad_arg_negative.lz:1:10
+  |
+1 | coroutine(fn() => nil, -1)
+  |          ^
+  |
+  = help: use coroutine(fn, depth) with an int depth from 1 to 2048 (default 1000)
+```
+
+`bad_arg_string.lz`
+
+```text
+error: coroutine(): depth must be an int, got string
+ --> bad_arg_string.lz:1:10
+  |
+1 | coroutine(fn() => nil, "50")
+  |          ^
+  |
+  = help: use coroutine(fn, depth) with an int depth from 1 to 2048 (default 1000)
+```
+
+`bad_arg_zero.lz`
+
+```text
+error: coroutine(): depth must be between 1 and 2048, got 0
+ --> bad_arg_zero.lz:1:10
+  |
+1 | coroutine(fn() => nil, 0)
+  |          ^
+  |
+  = help: use coroutine(fn, depth) with an int depth from 1 to 2048 (default 1000)
+```
 
 `bad_depth.lz`
 
 ```text
-error: stack overflow: too many nested calls (limit 200)
- --> bad_depth.lz:1:57
+error: stack overflow: too many nested calls in a coroutine (limit 1000)
+ --> bad_depth.lz:3:16
   |
-1 | fn recurse(n) { let captured = fn() => n; return recurse(n + 1) }
-  |                                                         ^
+3 |     return down(n - 1)
+  |                ^
   |
-  = help: a function calls itself without a base case, or the recursion is too deep (limit 200)
+  = help: use coroutine(fn, depth) with a larger depth (up to 2048) to raise this limit
   = stack trace: innermost call first
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      at recurse (bad_depth.lz:1:57)
-      ... 184 more frames
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      at down (bad_depth.lz:3:16)
+      ... 984 more frames
+```
+
+`bad_depth_1.lz`
+
+```text
+error: stack overflow: too many nested calls in a coroutine (limit 1)
+ --> bad_depth_1.lz:2:10
+  |
+2 | co.resume()
+  |          ^
+  |
+  = help: use coroutine(fn, depth) with a larger depth (up to 2048) to raise this limit
+  = stack trace: innermost call first
+      at <script> (bad_depth_1.lz:2:10)
+```
+
+`bad_depth_50.lz`
+
+```text
+error: stack overflow: too many nested calls in a coroutine (limit 50)
+ --> bad_depth_50.lz:3:16
+  |
+3 |     return down(n - 1)
+  |                ^
+  |
+  = help: use coroutine(fn, depth) with a larger depth (up to 2048) to raise this limit
+  = stack trace: innermost call first
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      at down (bad_depth_50.lz:3:16)
+      ... 34 more frames
 ```
 
 `bad_done.lz`
@@ -375,12 +634,13 @@ error: cannot resume a coroutine that is failed
 `bad_handlers.lz`
 
 ```text
-error: stack overflow: too many open try blocks
+error: stack overflow: too many open try blocks in a coroutine (limit 266)
  --> bad_handlers.lz:1:16
   |
 1 | fn recurse() { try { return recurse() } catch e { return nil } }
   |                ^^^
   |
+  = help: use coroutine(fn, depth) with a larger depth (up to 2048) to raise this limit
   = stack trace: innermost call first
       at recurse (bad_handlers.lz:1:16)
       at recurse (bad_handlers.lz:1:36)
@@ -398,7 +658,50 @@ error: stack overflow: too many open try blocks
       at recurse (bad_handlers.lz:1:36)
       at recurse (bad_handlers.lz:1:36)
       at recurse (bad_handlers.lz:1:36)
-      ... 50 more frames
+      ... 252 more frames
+```
+
+`bad_handlers_50.lz`
+
+```text
+error: stack overflow: too many open try blocks in a coroutine (limit 28)
+ --> bad_handlers_50.lz:1:16
+  |
+1 | fn recurse() { try { return recurse() } catch e { return nil } }
+  |                ^^^
+  |
+  = help: use coroutine(fn, depth) with a larger depth (up to 2048) to raise this limit
+  = stack trace: innermost call first
+      at recurse (bad_handlers_50.lz:1:16)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      at recurse (bad_handlers_50.lz:1:36)
+      ... 14 more frames
+```
+
+`bad_heap_large.lz`
+
+```text
+error: heap limit of 4194304 bytes exceeded
+ --> bad_heap_large.lz:4:14
+  |
+4 |     co.resume()
+  |              ^
+  |
+  = stack trace: innermost call first
+      at <script> (bad_heap_large.lz:4:14)
 ```
 
 `bad_main.lz`
@@ -409,6 +712,21 @@ error: cannot yield from the main program
   |
 1 | yield()
   |      ^
+```
+
+`bad_max_values.lz`
+
+```text
+error: stack overflow: too many values in a coroutine (limit 16384)
+ --> bad_max_values.lz:1:33
+  |
+1 | let co = coroutine(fn() => print(*range(17000)), 2048)
+  |                                 ^
+  |
+  = help: coroutine(fn, depth) is already at the maximum depth of 2048. Reduce live values, calls or try blocks
+  = stack trace: innermost call first
+      at <fn> (bad_max_values.lz:1:33)
+      at <script> (bad_max_values.lz:2:10)
 ```
 
 `bad_native.lz`
@@ -474,14 +792,15 @@ error: Error: broken
 `bad_values.lz`
 
 ```text
-error: stack overflow
- --> bad_values.lz:1:36
+error: stack overflow: too many values in a coroutine (limit 8000)
+ --> bad_values.lz:1:58
   |
 1 | fn recurse(n) { let a = n; let b = n; let c = n; let d = n; let e = n; let f = n; let g = n; let h = n; let i = n; let j = n; let k = n; let capture = fn() => a; return recurse(n + 1) }
-  |                                    ^
+  |                                                          ^
   |
+  = help: use coroutine(fn, depth) with a larger depth (up to 2048) to raise this limit
   = stack trace: innermost call first
-      at recurse (bad_values.lz:1:36)
+      at recurse (bad_values.lz:1:58)
       at recurse (bad_values.lz:1:177)
       at recurse (bad_values.lz:1:177)
       at recurse (bad_values.lz:1:177)
@@ -497,6 +816,20 @@ error: stack overflow
       at recurse (bad_values.lz:1:177)
       at recurse (bad_values.lz:1:177)
       at recurse (bad_values.lz:1:177)
-      ... 133 more frames
+      ... 558 more frames
 ```
 
+`bad_values_spread.lz`
+
+```text
+error: stack overflow: too many values in a coroutine (limit 400)
+ --> bad_values_spread.lz:1:33
+  |
+1 | let co = coroutine(fn() => print(*range(500)), 50)
+  |                                 ^
+  |
+  = help: use coroutine(fn, depth) with a larger depth (up to 2048) to raise this limit
+  = stack trace: innermost call first
+      at <fn> (bad_values_spread.lz:1:33)
+      at <script> (bad_values_spread.lz:2:10)
+```

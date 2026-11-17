@@ -32,10 +32,27 @@ static LzStatus pack(LzVM *vm, size_t count, const LzValue *values, LzValue *out
 }
 
 LzStatus lz_builtin_coroutine(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
-    (void)argc;
     if (!lz_value_is_closure(&argv[0])) {
         return lz_vm_set_error(vm, LZ_ERR_TYPE, "coroutine(): expected a Lizard function, got %s",
                                lz_value_kind_name(&argv[0]));
+    }
+    size_t depth = LZ_CO_DEPTH_DEFAULT;
+    if (argc > 1) {
+        LzStatus status = LZ_OK;
+        if (argv[1].type != LZ_VAL_INT) {
+            status = lz_vm_set_error(vm, LZ_ERR_TYPE, "coroutine(): depth must be an int, got %s",
+                                     lz_value_kind_name(&argv[1]));
+        } else if (argv[1].as.integer < 1 || argv[1].as.integer > LZ_FRAMES_MAX) {
+            status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "coroutine(): depth must be between 1 and %d, got %lld",
+                                     LZ_FRAMES_MAX, (long long)argv[1].as.integer);
+            vm->error_kind = LZ_ERROR_VALUE;
+        }
+        if (status != LZ_OK) {
+            lz_vm_set_help(vm, "use coroutine(fn, depth) with an int depth from 1 to %d (default %d)",
+                           LZ_FRAMES_MAX, LZ_CO_DEPTH_DEFAULT);
+            return status;
+        }
+        depth = (size_t)argv[1].as.integer;
     }
     LzCoroutine *co = lz_heap_alloc(&vm->heap, LZ_OBJ_COROUTINE, sizeof *co);
     if (co == NULL) {
@@ -44,6 +61,7 @@ LzStatus lz_builtin_coroutine(LzVM *vm, int argc, const LzValue *argv, LzValue *
     co->vm = vm;
     vm->skink.coroutine_count++;
     lz_vm_context_init(&co->context);
+    lz_vm_context_set_depth(&co->context, depth);
     co->context.coroutine = co;
     co->entry = argv[0];
     lz_value_retain(&co->entry);

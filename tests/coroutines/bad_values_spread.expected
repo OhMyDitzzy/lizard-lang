@@ -1,0 +1,11 @@
+error: stack overflow: too many values in a coroutine (limit 400)
+ --> bad_values_spread.lz:1:33
+  |
+1 | let co = coroutine(fn() => print(*range(500)), 50)
+  |                                 ^
+  |
+  = help: use coroutine(fn, depth) with a larger depth (up to 2048) to raise this limit
+  = stack trace: innermost call first
+      at <fn> (bad_values_spread.lz:1:33)
+      at <script> (bad_values_spread.lz:2:10)
+
