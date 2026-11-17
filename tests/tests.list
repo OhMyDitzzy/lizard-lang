@@ -3,6 +3,11 @@
 #        none = runs an already built program; script = a POSIX sh script under the source tree
 # env:   VAR=value[,VAR=value]   args: @lizard @buildinfo @srcdir are replaced
 test_memory test_memory plain - -
+test_context test_context plain - -
+test_coroutines test_coroutines plain - -
+test_coroutines_ge test_coroutines_ge ge - -
+test_coroutines_jit test_coroutines_ge none LZ_GE_JIT=eager -
+coroutines_cli tests/run-coroutines.sh script - @lizard
 test_table test_table plain - -
 test_native test_native plain - -
 test_chunk test_chunk plain - -

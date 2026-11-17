@@ -47,7 +47,8 @@ typedef enum LznKind {
     LZN_FUNCTION,
     LZN_INSTANCE,
     LZN_LINK,
-    LZN_ERROR
+    LZN_ERROR,
+    LZN_COROUTINE
 } LznKind;
 
 /* The built-in kinds of error. A module's own kinds come from lzn_module_error. */
@@ -72,7 +73,6 @@ typedef int LznErrId;
 typedef LznStatus (*LznFn)(LznCtx *ctx);
 typedef LznStatus (*LznInitFn)(LznBuilder *b);
 
-/* ---- arguments and results ------------------------------------------------------------------ */
 
 /* For a method, argument 0 is the first one after self. */
 int lzn_arg_count(LznCtx *ctx);
@@ -94,7 +94,6 @@ LznStatus lzn_return_int(LznCtx *ctx, int64_t value);
 LznStatus lzn_return_float(LznCtx *ctx, double value);
 LznStatus lzn_return_string(LznCtx *ctx, const char *data, size_t length);
 
-/* ---- reading values ------------------------------------------------------------------------- */
 
 LznKind lzn_kind(LznCtx *ctx, LznValue *value);
 const char *lzn_kind_name(LznKind kind);
@@ -110,7 +109,6 @@ LznStatus lzn_to_bool(LznCtx *ctx, LznValue *value, bool *out);
 /* Borrowed and NUL-terminated. Valid until the native function returns, and not to be written to. */
 const char *lzn_string_data(LznCtx *ctx, LznValue *value, size_t *length);
 
-/* ---- arrays and dicts ------------------------------------------------------------------------ */
 
 size_t lzn_array_len(LznCtx *ctx, LznValue *array);
 LznValue *lzn_array_get(LznCtx *ctx, LznValue *array, size_t index); /* NULL when out of range */
@@ -125,7 +123,6 @@ bool lzn_dict_has_int(LznCtx *ctx, LznValue *dict, int64_t key);
 LznStatus lzn_dict_set(LznCtx *ctx, LznValue *dict, const char *key, LznValue *value);
 LznStatus lzn_dict_set_int(LznCtx *ctx, LznValue *dict, int64_t key, LznValue *value);
 
-/* ---- lasting references ---------------------------------------------------------------------- */
 
 /*
  * A strong reference. The VM releases the ones still alive when it is freed, after the finalizers
@@ -136,7 +133,6 @@ LznRef *lzn_ref(LznCtx *ctx, LznValue *value); /* NULL with an error set when ou
 LznValue *lzn_deref(LznCtx *ctx, LznRef *ref); /* a new handle in the current call */
 void lzn_unref(LznRef *ref);                   /* NULL is fine */
 
-/* ---- errors ---------------------------------------------------------------------------------- */
 
 /* Sets the error and returns LZN_FAIL, so `return lzn_throw(...)` is the usual form. */
 LznStatus lzn_throw(LznCtx *ctx, LznErrId kind, const char *fmt, ...) LZN_PRINTF(3, 4);
@@ -154,7 +150,6 @@ LznStatus lzn_check_array(LznCtx *ctx, int index, LznValue **out);
 LznStatus lzn_check_dict(LznCtx *ctx, int index, LznValue **out);
 LznStatus lzn_check_function(LznCtx *ctx, int index, LznValue **out);
 
-/* ---- calling back ---------------------------------------------------------------------------- */
 
 /*
  * Calls a Lizard function or closure. On LZN_FAIL the error is set and the native function returns
@@ -163,7 +158,6 @@ LznStatus lzn_check_function(LznCtx *ctx, int index, LznValue **out);
  */
 LznStatus lzn_call(LznCtx *ctx, LznValue *fn, int nargs, LznValue *const *args, LznValue **result);
 
-/* ---- memory and fuel ------------------------------------------------------------------------- */
 
 /* Counted against --max-heap. NULL with the usual error set when over the limit. */
 void *lzn_alloc(LznCtx *ctx, size_t size);
@@ -172,7 +166,6 @@ void lzn_free(LznCtx *ctx, void *block, size_t size);
 /* Charges `units` of fuel. LZN_FAIL with the usual "instruction limit exceeded" when out. */
 LznStatus lzn_spend(LznCtx *ctx, uint64_t units);
 
-/* ---- declaring a module ---------------------------------------------------------------------- */
 
 /*
  * The signature determines argument names, types, defaults and arity, for example

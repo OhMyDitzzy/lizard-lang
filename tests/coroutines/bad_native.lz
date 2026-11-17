@@ -1,0 +1,3 @@
+fn step(x) => yield(x)
+let co = coroutine(fn() => [1].map(step))
+co.resume()

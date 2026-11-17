@@ -1,0 +1,11 @@
+error: cannot resume a coroutine that is normal
+ --> bad_normal.lz:2:44
+  |
+2 | let child = coroutine(fn() => box[0].resume())
+  |                                            ^
+  |
+  = stack trace: innermost call first
+      at <fn> (bad_normal.lz:2:44)
+      at <fn> (bad_normal.lz:3:40)
+      at <script> (bad_normal.lz:4:14)
+

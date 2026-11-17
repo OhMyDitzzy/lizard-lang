@@ -15,7 +15,8 @@ typedef enum LzObjType {
     LZ_OBJ_CLASS,    /* a class declared with `class`, see lizard/class.h */
     LZ_OBJ_INSTANCE, /* an object made by calling a class */
     LZ_OBJ_BOUND,    /* a method tied to its receiver (`p.sum`), see lizard/class.h */
-    LZ_OBJ_LINK      /* a non-owning reference to another object, see lizard/link.h */
+    LZ_OBJ_LINK,     /* a non-owning reference to another object, see lizard/link.h */
+    LZ_OBJ_COROUTINE
 } LzObjType;
 
 /*

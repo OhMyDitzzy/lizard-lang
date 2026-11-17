@@ -32,7 +32,7 @@ static LzStatus malformed(LzVM *vm, const char *what) {
 }
 
 static LzStatus push(LzVM *vm, LzValue value) {
-    if (vm->stack_count >= LZ_STACK_MAX) {
+    if (vm->stack_count >= vm->stack_cap) {
         return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow");
     }
     lz_value_retain(&value);
@@ -913,7 +913,7 @@ static LzStatus try_begin_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     if (*ip + distance > chunk->count) {
         return malformed(vm, "jump out of range");
     }
-    if (vm->handler_count >= LZ_HANDLERS_MAX) {
+    if (vm->handler_count >= vm->handler_cap) {
         return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow: too many open try blocks");
     }
     LzHandler *handler = &vm->handlers[vm->handler_count++];
@@ -979,7 +979,7 @@ static LzStatus member_get_op(LzVM *vm, const LzString *name, bool keep, bool fo
         return status;
     }
     if (keep) {
-        if (vm->stack_count >= LZ_STACK_MAX) {
+        if (vm->stack_count >= vm->stack_cap) {
             lz_value_release(&vm->heap, &found);
             lz_value_release(&vm->heap, &target);
             return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow");
@@ -1767,7 +1767,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
          * an index out of range, a full stack) leaves ip alone and takes the general path, which
          * reports it.
          */
-        if (ip + 2 <= chunk->count && vm->stack_count < LZ_STACK_MAX) {
+        if (ip + 2 <= chunk->count && vm->stack_count < vm->stack_cap) {
             size_t index = (size_t)((chunk->code[ip] << 8) | chunk->code[ip + 1]);
             if (index < chunk->constant_count) {
                 LzValue value = chunk->constants[index];
@@ -2511,6 +2511,10 @@ LzStatus lz_vm_run_until(LzVM *vm, size_t depth, size_t *failed_at) {
         size_t at = ip;
         status = exec_one(vm, &chunk, &ip, true);
         if (status != LZ_OK) {
+            if (status == LZ_YIELD) {
+                vm->frames[vm->frame_count - 1].ip = ip;
+                return status;
+            }
             if (unwind_to_handler(vm, &status, depth, at, &chunk, &ip)) {
                 continue;
             }

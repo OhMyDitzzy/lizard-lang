@@ -1,0 +1,1 @@
+pub fn make() => coroutine(fn(start = 1, *extra) => yield(start, extra))

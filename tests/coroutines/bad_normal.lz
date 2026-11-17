@@ -1,0 +1,4 @@
+let box = [nil]
+let child = coroutine(fn() => box[0].resume())
+box[0] = coroutine(fn() => child.resume())
+box[0].resume()

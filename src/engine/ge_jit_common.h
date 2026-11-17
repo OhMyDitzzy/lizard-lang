@@ -19,11 +19,11 @@
 
 #define OFFS(type, field) ((int32_t)offsetof(type, field))
 
-#define O_STACK OFFS(LzVM, stack)
+#define O_STACK OFFS(LzVM, main_stack)
 #define O_SC OFFS(LzVM, stack_count)
 #define O_INSTR OFFS(LzVM, instructions)
 #define O_FC OFFS(LzVM, frame_count)
-#define O_FRAMES OFFS(LzVM, frames)
+#define O_FRAMES OFFS(LzVM, main_frames)
 #define O_OPENUPV OFFS(LzVM, open_upvalues)
 #define O_GENT (OFFS(LzVM, globals) + OFFS(LzTable, entries))
 #define O_GCNT (OFFS(LzVM, globals) + OFFS(LzTable, count))
@@ -68,6 +68,12 @@ static inline const LzTable *jit_chunk_table(const LzChunk *chunk) {
 #define X_PC OFFS(GeJitExit, pc)
 #define X_STATUS OFFS(GeJitExit, status)
 
+_Static_assert(offsetof(LzVM, stack_count) == offsetof(LzVM, main_stack) + sizeof(((LzVM *)0)->main_stack),
+               "the embedded stack must keep its JIT layout");
+_Static_assert(offsetof(LzVM, frame_count) == offsetof(LzVM, main_frames) + sizeof(((LzVM *)0)->main_frames),
+               "the embedded frames must keep their JIT layout");
+_Static_assert(offsetof(LzVM, handler_count) == offsetof(LzVM, main_handlers) + sizeof(((LzVM *)0)->main_handlers),
+               "the embedded handlers must keep their layout");
 _Static_assert(sizeof(LzValue) == 16, "the JIT assumes 16-byte values");
 _Static_assert(offsetof(LzValue, as) == 8, "the JIT assumes the payload at +8");
 _Static_assert(sizeof(LzValueType) == 4, "the JIT assumes a 4-byte value tag");

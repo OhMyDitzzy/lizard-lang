@@ -4,6 +4,7 @@
 #include "lizard/class.h"
 #include "lizard/dict.h"
 #include "lizard/function.h"
+#include "lizard/coroutine.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -93,6 +94,11 @@ void lz_heap_destroy(LzHeap *heap) {
             lz_free_sized(((LzArray *)object)->items, ((LzArray *)object)->capacity * sizeof(LzValue));
         } else if (object->type == LZ_OBJ_FUNCTION) {
             lz_function_free_storage(heap, (LzFunction *)object, false);
+        } else if (object->type == LZ_OBJ_COROUTINE) {
+            LzExecutionContext *context = &((LzCoroutine *)object)->context;
+            lz_free_sized(context->stack, context->stack_capacity * sizeof *context->stack);
+            lz_free_sized(context->frames, context->frame_capacity * sizeof *context->frames);
+            lz_free_sized(context->handlers, context->handler_capacity * sizeof *context->handlers);
         }
 #ifdef LZ_POISON
         memset(object, 0xDD, object->size);
@@ -217,7 +223,7 @@ uint32_t lz_heap_next_epoch(LzHeap *heap) {
 #define LZ_ASSERT_LIVE(object)                                                                     \
     do {                                                                                           \
         assert((object)->refcount != 0xDDDDDDDDu && (object)->refcount > 0);                       \
-        assert((unsigned)(object)->type <= (unsigned)LZ_OBJ_LINK);                                 \
+        assert((unsigned)(object)->type <= (unsigned)LZ_OBJ_COROUTINE);                            \
     } while (0)
 #else
 #define LZ_ASSERT_LIVE(object) assert((object)->refcount > 0)

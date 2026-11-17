@@ -13,9 +13,12 @@
 #include "lizard/writer.h"
 
 #define LZ_STACK_MAX 16384
+#define LZ_CO_STACK_MAX 2048
 
 /* Deepest chain of nested calls, including the top-level script. */
 #define LZ_FRAMES_MAX 2048
+#define LZ_CO_FRAMES_MAX 200
+#define LZ_CO_HANDLERS_MAX 64
 
 /* The mask of a call that passed every argument. */
 #define LZ_ALL_SUPPLIED UINT64_MAX
@@ -54,6 +57,25 @@ typedef struct LzHandler {
 } LzHandler;
 
 #define LZ_HANDLERS_MAX 4096
+
+/* Counts are saved here while a context is inactive. The active counts live directly in the VM so helpers do not need another pointer lookup. */
+typedef struct LzExecutionContext {
+    LzValue *stack;
+    size_t stack_count;
+    size_t stack_capacity;
+    size_t stack_limit;
+    LzCallFrame *frames;
+    size_t frame_count;
+    size_t frame_capacity;
+    size_t frame_limit;
+    LzHandler *handlers;
+    size_t handler_count;
+    size_t handler_capacity;
+    size_t handler_limit;
+    LzUpvalue *open_upvalues;
+    struct LzCoroutine *coroutine;
+    bool embedded;
+} LzExecutionContext;
 
 /*
  * A kind of error declared with `error Name : Parent`. Its kind number is LZ_ERROR_KIND_COUNT +
@@ -94,9 +116,9 @@ struct LzVM {
     LzFnType **fn_types; /* interned signatures of function types, see lz_vm_fn_of */
     size_t fn_type_count;
     size_t fn_type_capacity;
-    LzValue stack[LZ_STACK_MAX];
+    LzValue main_stack[LZ_STACK_MAX];
     size_t stack_count;
-    LzCallFrame frames[LZ_FRAMES_MAX];
+    LzCallFrame main_frames[LZ_FRAMES_MAX];
     size_t frame_count;         /* 0 while nothing runs */
     LzUpvalue *open_upvalues;   /* captured stack slots, highest first, and the list owns a reference */
     uint64_t fuel;
@@ -112,7 +134,7 @@ struct LzVM {
     LzValue last_thrown; /* the error that stopped the last run, kept for the report and retained */
     LzErrorType error_types[LZ_ERROR_TYPES_MAX - LZ_ERROR_KIND_COUNT];
     size_t error_type_count;
-    LzHandler handlers[LZ_HANDLERS_MAX];
+    LzHandler main_handlers[LZ_HANDLERS_MAX];
     size_t handler_count;
     const struct LzSource *trace_source; /* optional, and lets an error's trace say file:line:column */
     /*
@@ -172,6 +194,15 @@ struct LzVM {
     LzStatus (*module_run)(struct LzVM *vm, struct LzModule *module);
     size_t compiling;                       /* compiles in progress, so an import is nested when it is above 0 */
     struct LznState *lzn;                   /* native modules, see lizard/native_module.h */
+    /* Active storage pointers stay before skink so the JIT's field offsets don't move. GE and JIT address the embedded main arrays directly. */
+    LzValue *stack;
+    LzCallFrame *frames;
+    LzHandler *handlers;
+    size_t stack_cap;
+    size_t frame_cap;
+    size_t handler_cap;
+    LzExecutionContext main_context;
+    LzExecutionContext *context;
     LzSkink skink; /* cycle collector, see skink.h. It stays last so the JIT's field offsets don't move */
 };
 
@@ -186,6 +217,18 @@ struct LzVM {
 #define LZ_NATIVE_DEPTH_MAX LZ_FRAMES_MAX
 
 void lz_vm_init(LzVM *vm, LzWriter out, LzWriter err);
+
+/* A detached context starts without buffers and uses the fixed coroutine capacities. */
+void lz_vm_context_init(LzExecutionContext *context);
+
+/* Switching transfers the active counts without moving stack values. No raw pointer into a suspended context may be invalidated. */
+void lz_vm_context_switch(LzVM *vm, LzExecutionContext *next);
+
+/* Allocate all three fixed buffers in the active detached context. */
+LzStatus lz_vm_context_reserve(LzVM *vm, size_t values, size_t frames, size_t handlers);
+
+/* The context must be detached and must not use the VM's embedded arrays. Escaped upvalues are closed before its storage goes away. */
+void lz_vm_context_free(LzVM *vm, LzExecutionContext *context);
 
 /* Caps live heap bytes for this VM. LZ_HEAP_UNLIMITED is the default and removes the cap. */
 void lz_vm_set_heap_limit(LzVM *vm, size_t bytes);
@@ -271,6 +314,8 @@ LzStatus lz_vm_call(LzVM *vm, size_t argc, size_t resume_ip, uint32_t call_offse
  */
 LzStatus lz_vm_call_value(LzVM *vm, const LzValue *callee, size_t argc, const LzValue *argv,
                           LzValue *result);
+
+LzStatus lz_vm_check_native_depth(LzVM *vm);
 
 /*
  * OP_CALL_EX: [callee][array of positional arguments][named_count named values]. names is the

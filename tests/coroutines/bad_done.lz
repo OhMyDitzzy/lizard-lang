@@ -1,0 +1,3 @@
+let co = coroutine(fn() => nil)
+co.resume()
+co.resume()

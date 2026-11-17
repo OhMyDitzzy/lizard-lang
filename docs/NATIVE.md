@@ -240,7 +240,8 @@ static const LznFieldDef counter_fields[] = {
 `lzn_call(ctx, fn, nargs, args, &result)` runs a function or closure. When it fails, the error is
 already set and the native function returns `LZN_FAIL` to pass it on. Fuel, `--max-heap` and the
 depth of calls count as they do for any call. A native function that calls back cannot be
-suspended. That is a deliberate limit of this version, until there are coroutines. `lzn_call` has
+suspended. A coroutine may call `lzn_call` synchronously, but its callback cannot yield across
+the native call. Coroutine handles report `LZN_COROUTINE`. `lzn_call` has
 no context in a finalizer, so it cannot be used there.
 
 ```c
@@ -340,5 +341,7 @@ These are not built and nothing above depends on them:
 * Permissions for each module.
 * An interface for an event loop and a `lzn_post` to hand work to the VM from other threads.
 * A `trace` callback so that the cycle collector can see references held by native code.
-* How native calls that cannot be suspended fit with coroutines.
+* A native async protocol that returns a pending status and lets an event loop wake a
+  coroutine. It must define ownership without suspending a C frame. The
+  [coroutine design](COROUTINES.md) keeps `lzn_call` synchronous for this phase.
 * A generator for stubs and documentation from the signatures.

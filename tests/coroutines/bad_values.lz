@@ -1,0 +1,3 @@
+fn recurse(n) { let a = n; let b = n; let c = n; let d = n; let e = n; let f = n; let g = n; let h = n; let i = n; let j = n; let k = n; let capture = fn() => a; return recurse(n + 1) }
+let co = coroutine(fn() => recurse(0))
+co.resume()

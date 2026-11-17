@@ -7,6 +7,7 @@
 #include "lizard/function.h"
 #include "lizard/link.h"
 #include "lizard/native.h"
+#include "lizard/coroutine.h"
 
 #include <inttypes.h>
 #include <math.h>
@@ -300,6 +301,10 @@ static bool write_object(const LzObject *object, const LzWriter *writer) {
         return lz_writer_write_cstr(writer, "<function code>");
     case LZ_OBJ_UPVALUE:
         return lz_writer_write_cstr(writer, "<upvalue>");
+    case LZ_OBJ_COROUTINE:
+        return lz_writer_write_cstr(writer, "<coroutine ") &&
+               lz_writer_write_cstr(writer, lz_coroutine_status((const LzCoroutine *)object)) &&
+               lz_writer_write_cstr(writer, ">");
     case LZ_OBJ_LINK: {
         const LzLink *link = (const LzLink *)object;
         if (link->target == NULL) {
@@ -321,6 +326,10 @@ static bool write_object(const LzObject *object, const LzWriter *writer) {
 
 void lz_object_finalize(LzHeap *heap, LzObject *object) {
     switch (object->type) {
+    case LZ_OBJ_COROUTINE:
+        ((LzCoroutine *)object)->vm->skink.coroutine_count--;
+        lz_coroutine_clear((LzCoroutine *)object);
+        break;
     case LZ_OBJ_STRING:
         break;
     case LZ_OBJ_NATIVE:

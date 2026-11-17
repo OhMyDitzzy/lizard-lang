@@ -24,7 +24,9 @@ typedef enum LzStatus {
      */
     LZ_ERR_HEAP_LIMIT,
     LZ_ERR_FUEL,
-    LZ_ERR_STACK_OVERFLOW
+    LZ_ERR_STACK_OVERFLOW,
+    /* Internal control transfer from a yielded coroutine, never a language error. */
+    LZ_YIELD
 } LzStatus;
 
 #if defined(__GNUC__) || defined(__clang__)

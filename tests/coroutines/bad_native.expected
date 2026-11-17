@@ -1,0 +1,11 @@
+error: cannot yield across a native call
+ --> bad_native.lz:1:20
+  |
+1 | fn step(x) => yield(x)
+  |                    ^
+  |
+  = stack trace: innermost call first
+      at step (bad_native.lz:1:20)
+      at <fn> (bad_native.lz:2:35)
+      at <script> (bad_native.lz:3:10)
+

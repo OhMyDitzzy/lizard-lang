@@ -1,12 +1,12 @@
 /*
  * The Gecko JIT, x86-64 backend for the System V ABI. See docs/ENGINE.md.
  *
- * Native code runs on the VM's own value stack and frame stack. Values stay in memory (vm->stack),
+ * Native code runs on the VM's own value stack and frame stack. Values stay in memory (vm->main_stack),
  * and the JIT knows statically how many values each instruction has above the frame base ("depth"),
  * so locals and temporaries are plain [r14 + 16 * slot] operands. The registers are:
  *
  *   rbx  the LzVM            r12  the GeJitExit of this entry
- *   r13  base index of the frame     r14  &vm->stack[base]
+ *   r13  base index of the frame     r14  &vm->main_stack[base]
  *   r15  instructions executed since entry, flushed to vm->instructions on exit
  *
  * Instructions are compiled the way GE fuses them, see ge_translate.c, so `i = i + 1` is one block
@@ -133,7 +133,7 @@ bool ge_jit_enter(LzVM *vm, const struct GeJit *jit, size_t pc, size_t base, siz
     exit->reason = 0;
     exit->pc = 0;
     exit->status = 0;
-    (void)g_tramp(vm, base, &vm->stack[base], jit->entry[pc], exit);
+    (void)g_tramp(vm, base, &vm->main_stack[base], jit->entry[pc], exit);
     return true;
 }
 

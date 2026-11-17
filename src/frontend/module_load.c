@@ -82,7 +82,7 @@ static LzStatus run_module_code(LzVM *vm, const LzChunk *chunk) {
     if (vm->frame_count == 0) {
         return lz_vm_run(vm, chunk);
     }
-    if (vm->frame_count >= LZ_FRAMES_MAX || vm->stack_count + 1 > LZ_STACK_MAX) {
+    if (vm->frame_count >= vm->frame_cap || vm->stack_count + 1 > vm->stack_cap) {
         return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW, "stack overflow: modules nested too deeply");
     }
     size_t depth = vm->frame_count;

@@ -1,0 +1,25 @@
+error: stack overflow: too many open try blocks
+ --> bad_handlers.lz:1:16
+  |
+1 | fn recurse() { try { return recurse() } catch e { return nil } }
+  |                ^^^
+  |
+  = stack trace: innermost call first
+      at recurse (bad_handlers.lz:1:16)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      at recurse (bad_handlers.lz:1:36)
+      ... 50 more frames
+

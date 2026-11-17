@@ -1,6 +1,7 @@
 #include "method/method.h"
 
 #include <stdio.h>
+#include <limits.h>
 #include <string.h>
 
 #include "array/array.h"
@@ -12,6 +13,7 @@
 #include "lizard/dict.h"
 #include "lizard/format.h"
 #include "lizard/link.h"
+#include "lizard/coroutine.h"
 
 /* ---- methods that need no file of their own ---- */
 
@@ -126,6 +128,8 @@ LzStatus lz_method_last(LzVM *vm, int argc, const LzValue *argv, LzValue *result
  * Counts are the arguments after the receiver.
  */
 static const LzMethod methods[] = {
+    {"resume", LZ_KIND_COROUTINE, lz_coroutine_resume, 0, INT_MAX, LZ_KINDS_ANY},
+    {"status", LZ_KIND_COROUTINE, lz_coroutine_get_status, 0, 0, LZ_KIND_STRING},
     /* every kind */
     {"to_string", LZ_KINDS_ANY, lz_method_to_string, 0, 0, LZ_KIND_STRING},
     {"to_debug", LZ_KINDS_ANY, lz_method_to_debug, 0, 0, LZ_KIND_STRING},
@@ -223,7 +227,7 @@ static void kinds_served(const LzMethod *first, char *out, size_t size) {
     }
     out[0] = '\0';
     size_t used = 0;
-    for (uint16_t bit = 1; bit != 0 && bit <= LZ_KIND_DICT; bit = (uint16_t)(bit << 1)) {
+    for (uint16_t bit = 1; bit != 0 && bit <= LZ_KIND_COROUTINE; bit = (uint16_t)(bit << 1)) {
         if ((mask & bit) == 0 || used + 24 > size) {
             continue;
         }

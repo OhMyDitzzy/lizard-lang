@@ -33,6 +33,8 @@ uint16_t lz_kind_of(const LzValue *value) {
             return LZ_KIND_DICT;
         case LZ_OBJ_ERROR:
             return LZ_KIND_ERROR;
+        case LZ_OBJ_COROUTINE:
+            return LZ_KIND_COROUTINE;
         case LZ_OBJ_NATIVE:
         case LZ_OBJ_CLOSURE:
         case LZ_OBJ_CLASS:
@@ -72,6 +74,8 @@ const char *lz_kind_name(uint16_t kind) {
         return "error";
     case LZ_KIND_INSTANCE:
         return "object";
+    case LZ_KIND_COROUTINE:
+        return "coroutine";
     default:
         return "value";
     }
@@ -859,6 +863,9 @@ void lz_type_describe(const LzType *type, const LzWriter *out) {
     }
     if ((kinds & LZ_KIND_BOOL) != 0) {
         PART("bool");
+    }
+    if ((kinds & LZ_KIND_COROUTINE) != 0) {
+        PART("coroutine");
     }
     if ((kinds & LZ_KIND_NIL) != 0) {
         PART("nil");

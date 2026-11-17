@@ -296,6 +296,9 @@ static void test_finalizers(void) {
 }
 
 static void test_callbacks(void) {
+    run_expect("import test.nmod as n\nlet co = coroutine(fn() => n.apply(fn(x) => x + 1, 41))\nprintln(co.resume())\n", "42\n");
+    run_expect("import test.nmod as n\nlet co = coroutine(fn() => n.apply(fn(x) => yield(x), 41))\n"
+               "try { co.resume() } catch e { println(e.message) }\n", "cannot yield across a native call\n");
     run_expect("import test.nmod as n\n"
                "println(n.apply(fn(x: int) => x + 1, 41))\n"
                "let base = 100\n"
@@ -380,6 +383,8 @@ static void test_registration(void) {
         "fn(a: int = 0, b: int)",
         "fn(*a: any, *b: any)",
         "fn(*a: any, b: int)",
+        "fn(x: int, *a: any, *b: any)",
+        "fn(x: int, *a: any, b: int)",
         "fn(a: int, a: int)",
         "fn(*a: any = nil)",
         "fn(a: bool = -true)",
@@ -387,7 +392,9 @@ static void test_registration(void) {
     const char *reasons[] = {
         "a parameter default must be a literal",
         "a parameter without a default cannot follow one with a default",
+        "a signature can have only one rest parameter",
         "the rest parameter must be the last one",
+        "a signature can have only one rest parameter",
         "the rest parameter must be the last one",
         "duplicate parameter name 'a'",
         "a rest parameter cannot have a default",

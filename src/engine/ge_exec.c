@@ -510,7 +510,7 @@ static void ic_fill(LzVM *vm, GeIns *ins, const LzInstance *instance, const LzSt
     if (!in_chain) {
         return;
     }
-    const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
+    const LzCallFrame *frame = &vm->main_frames[vm->frame_count - 1];
     uint64_t owner = frame->closure != NULL ? frame->closure->function->owner_id : 0;
     bool sees = lz_class_sees(vm, owner, hit.declared_in);
     if (member->vis == LZ_VIS_PRIVATE && !sees) {
@@ -594,7 +594,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
     LzTable *globals = lz_chunk_globals(vm, chunk);
     size_t base = 0; /* stack index of the frame's local slot 0 */
     size_t forced_fail = SIZE_MAX; /* failure offset reported by a call run on the reference interpreter */
-    LzValue *const stack = vm->stack;
+    LzValue *const stack = vm->main_stack;
     size_t sp = vm->stack_count;
     size_t pc = 0;
     uint64_t executed = 0;
@@ -987,8 +987,8 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 if (GE_LIKELY(argc == function->param_count && !function->has_rest &&
                               callee_program != NULL && vm->frame_count < LZ_FRAMES_MAX)) {
                     /* Exactly the arguments the function wants, so the frame starts right here. */
-                    vm->frames[vm->frame_count - 1].ip = pc + 1;
-                    LzCallFrame *frame = &vm->frames[vm->frame_count++];
+                    vm->main_frames[vm->frame_count - 1].ip = pc + 1;
+                    LzCallFrame *frame = &vm->main_frames[vm->frame_count++];
                     frame->closure = closure;
                     frame->chunk = &function->chunk;
                     frame->ip = 0;
@@ -1083,7 +1083,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
 
         case LZ_OP_JUMP_IF_SUPPLIED:
             TICK(1);
-            pc = (ins->a >= 64 || ((vm->frames[vm->frame_count - 1].supplied >> ins->a) & 1u) != 0)
+            pc = (ins->a >= 64 || ((vm->main_frames[vm->frame_count - 1].supplied >> ins->a) & 1u) != 0)
                      ? ins->target
                      : pc + 1;
             break;
@@ -1094,7 +1094,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 status = LZ_OK;
                 goto done;
             }
-            const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
+            const LzCallFrame *frame = &vm->main_frames[vm->frame_count - 1];
             if (GE_LIKELY(sp > base && base > 0 &&
                           (vm->open_upvalues == NULL || vm->open_upvalues->location < &stack[base]))) {
                 /* No variable of this frame was captured, so drop the frame and keep the result. */
@@ -1114,7 +1114,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                     goto fail;
                 }
             }
-            const LzCallFrame *caller = &vm->frames[vm->frame_count - 1];
+            const LzCallFrame *caller = &vm->main_frames[vm->frame_count - 1];
             pc = caller->ip;
             base = caller->base;
             if (caller->closure == NULL) {
@@ -1314,7 +1314,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 continue;
             }
             case LZ_OP_GET_UPVALUE: {
-                const LzClosure *owner = vm->frames[vm->frame_count - 1].closure;
+                const LzClosure *owner = vm->main_frames[vm->frame_count - 1].closure;
                 if (GE_UNLIKELY(owner == NULL || ins->a >= owner->upvalue_count || sp >= LZ_STACK_MAX)) {
                     goto plain_tick;
                 }
@@ -1330,7 +1330,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                  * Only a value that cannot close a reference cycle. An object goes to the
                  * reference, where the cycle collector is told about the store.
                  */
-                const LzClosure *owner = vm->frames[vm->frame_count - 1].closure;
+                const LzClosure *owner = vm->main_frames[vm->frame_count - 1].closure;
                 if (GE_UNLIKELY(sp == 0 || owner == NULL || ins->a >= owner->upvalue_count ||
                                 stack[sp - 1].type == LZ_VAL_OBJECT)) {
                     goto plain_tick;
@@ -1461,7 +1461,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
 
     /* A frame was just pushed for a call that needed the slow path, so start running it. */
     enter_callee : {
-        const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
+        const LzCallFrame *frame = &vm->main_frames[vm->frame_count - 1];
         LzFunction *function = frame->closure->function;
         GeProgram *program = function_program(function, run);
         if (program == NULL) {
@@ -1476,7 +1476,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 forced_fail = nested;
                 goto fail;
             }
-            pc = vm->frames[vm->frame_count - 1].ip;
+            pc = vm->main_frames[vm->frame_count - 1].ip;
             continue;
         }
         base = frame->base;
@@ -1506,7 +1506,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             if (!run->jit_eager && prog->hot < run->jit_threshold) {
                 continue;
             }
-            const LzCallFrame *top = &vm->frames[vm->frame_count - 1];
+            const LzCallFrame *top = &vm->main_frames[vm->frame_count - 1];
             size_t entry_depth = top->closure == NULL ? 0 : lz_function_slots(top->closure->function);
             prog->jit = ge_jit_compile(chunk, prog, entry_depth);
             prog->jit_state = prog->jit != NULL ? GE_JIT_COMPILED : GE_JIT_FAILED;
@@ -1532,7 +1532,7 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             goto enter_callee;
         }
         {
-            const LzCallFrame *top = &vm->frames[vm->frame_count - 1];
+            const LzCallFrame *top = &vm->main_frames[vm->frame_count - 1];
             base = top->base;
             if (top->closure == NULL) {
                 chunk = main_chunk;

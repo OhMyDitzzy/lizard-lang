@@ -30,6 +30,8 @@ lizard_core_SOURCES = \
 	src/core/table.c \
 	src/core/type.c \
 	src/core/value.c \
+	src/core/context.c \
+	src/core/coroutine.c \
 	src/core/vm.c \
 	src/core/writer.c
 
@@ -80,6 +82,7 @@ lizard_docs = \
 	docs/ENGINE.md \
 	docs/ERRORS.md \
 	docs/FUNCTIONS.md \
+	docs/COROUTINES.md \
 	docs/MEMORY.md \
 	docs/METHODS.md \
 	docs/MODULES.md \

@@ -62,7 +62,7 @@ println(running_total([1, 2, 3, 4]))   # 10
 
 fn counter() {
   let n = 0
-  fn bump(by) { n += by }
+  fn bump(amount) { n += amount }
   bump(2)
   bump(5)
   return n

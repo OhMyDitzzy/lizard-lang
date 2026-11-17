@@ -1,0 +1,6 @@
+error: cannot resume a coroutine that is failed
+ --> bad_failed.lz:4:10
+  |
+4 | co.resume()
+  |          ^
+

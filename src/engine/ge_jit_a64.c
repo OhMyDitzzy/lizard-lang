@@ -7,7 +7,7 @@
  * The registers are:
  *
  *   x19  the LzVM                     x20  the GeJitExit of this entry
- *   x21  base index of the frame      x22  &vm->stack[base]
+ *   x21  base index of the frame      x22  &vm->main_stack[base]
  *   x23  instructions executed since entry, added to vm->instructions on exit
  *   x24  &vm->stack_count             x25  &vm->frame_count
  *        The last two are anchors, because the fields after the big stack array are out of
@@ -152,7 +152,7 @@ bool ge_jit_enter(LzVM *vm, const struct GeJit *jit, size_t pc, size_t base, siz
     exit->reason = 0;
     exit->pc = 0;
     exit->status = 0;
-    (void)g_tramp(vm, base, &vm->stack[base], jit->entry[pc], exit);
+    (void)g_tramp(vm, base, &vm->main_stack[base], jit->entry[pc], exit);
     return true;
 }
 

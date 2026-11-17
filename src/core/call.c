@@ -93,11 +93,11 @@ static uint64_t supplied_mask(size_t argc) {
 
 static LzStatus push_frame(LzVM *vm, LzClosure *closure, size_t base, uint64_t supplied,
                            size_t resume_ip, uint32_t call_offset) {
-    if (vm->frame_count >= LZ_FRAMES_MAX) {
+    if (vm->frame_count >= vm->frame_cap) {
         LzStatus status = lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
-                                          "stack overflow: too many nested calls (limit %d)", LZ_FRAMES_MAX);
+                                          "stack overflow: too many nested calls (limit %zu)", vm->frame_cap);
         lz_vm_set_help(vm, "a function calls itself without a base case, or the recursion is too deep (limit %d)",
-                       LZ_FRAMES_MAX);
+                       (int)vm->frame_cap);
         return status;
     }
     vm->frames[vm->frame_count - 1].ip = resume_ip;
@@ -128,7 +128,7 @@ static LzStatus arrange(LzVM *vm, const LzFunction *function, size_t argc, bool 
     }
 
     size_t base = vm->stack_count - argc;
-    if (base + lz_function_slots(function) > LZ_STACK_MAX) {
+    if (base + lz_function_slots(function) > vm->stack_cap) {
         return stack_overflow(vm);
     }
 
@@ -171,13 +171,15 @@ static LzStatus call_native(LzVM *vm, const LzNative *native, size_t argc) {
     const LzValue *args = &vm->stack[vm->stack_count - argc];
     LzStatus status = lz_native_call(vm, native, (int)argc, args, &result);
     if (status != LZ_OK) {
-        return status;
+        if (status != LZ_YIELD) {
+            return status;
+        }
     }
     for (size_t i = 0; i < argc + 1; i++) {
         drop_top(vm);
     }
     vm->stack[vm->stack_count++] = result;
-    return LZ_OK;
+    return status;
 }
 
 
@@ -203,7 +205,7 @@ static LzStatus unwrap_bound(LzVM *vm, size_t callee_index, size_t *argc) {
             (*argc)--;
             lz_value_release(&vm->heap, &first);
         } else {
-            if (vm->stack_count + 1 > LZ_STACK_MAX) {
+            if (vm->stack_count + 1 > vm->stack_cap) {
                 lz_value_release(&vm->heap, &callee);
                 return stack_overflow(vm);
             }
@@ -340,6 +342,19 @@ static bool c_stack_exhausted(LzVM *vm) {
     return now < vm->c_stack_floor;
 }
 
+LzStatus lz_vm_check_native_depth(LzVM *vm) {
+    if (c_stack_exhausted(vm)) {
+        return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
+                               "stack overflow: callbacks nested too deeply for the C stack");
+    }
+    if (vm->native_depth >= LZ_NATIVE_DEPTH_MAX) {
+        return lz_vm_set_error(vm, LZ_ERR_STACK_OVERFLOW,
+                               "stack overflow: callbacks nested too deeply (limit %d)",
+                               LZ_NATIVE_DEPTH_MAX);
+    }
+    return LZ_OK;
+}
+
 LzStatus lz_vm_call_value(LzVM *vm, const LzValue *callee, size_t argc, const LzValue *argv,
                           LzValue *result) {
     if (c_stack_exhausted(vm)) {
@@ -351,7 +366,7 @@ LzStatus lz_vm_call_value(LzVM *vm, const LzValue *callee, size_t argc, const Lz
                                "stack overflow: callbacks nested too deeply (limit %d)",
                                LZ_NATIVE_DEPTH_MAX);
     }
-    if (vm->frame_count == 0 || vm->stack_count + argc + 1 > LZ_STACK_MAX) {
+    if (vm->frame_count == 0 || vm->stack_count + argc + 1 > vm->stack_cap) {
         return stack_overflow(vm);
     }
 
@@ -508,7 +523,7 @@ LzStatus lz_vm_call_ex(LzVM *vm, const LzChunk *chunk, size_t named_count, uint1
     /* Spread the positional array in place of itself. */
     LzArray *array = lz_value_as_array(&vm->stack[array_index]);
     size_t count = array->count;
-    if (array_index + count > LZ_STACK_MAX) {
+    if (array_index + count > vm->stack_cap) {
         drop_values(vm, named, named_count);
         return stack_overflow(vm);
     }
@@ -729,7 +744,7 @@ void lz_vm_close_upvalues(LzVM *vm, size_t level) {
 }
 
 LzStatus lz_vm_make_closure(LzVM *vm, LzFunction *function) {
-    if (vm->stack_count >= LZ_STACK_MAX) {
+    if (vm->stack_count >= vm->stack_cap) {
         return stack_overflow(vm);
     }
     const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
@@ -770,12 +785,13 @@ LzStatus lz_vm_make_closure(LzVM *vm, LzFunction *function) {
 void lz_vm_capture_trace(LzVM *vm) {
     vm->trace_count = 0;
     vm->trace_total = 0;
+    size_t floor = vm->context->coroutine == NULL ? 0 : 1;
     if (vm->frame_count < 2) {
         return; /* a failure in the script itself needs no trace */
     }
-    vm->trace_total = vm->frame_count;
+    vm->trace_total = vm->frame_count - floor;
     uint32_t offset = vm->error_offset;
-    for (size_t i = vm->frame_count; i > 0 && vm->trace_count < LZ_TRACE_MAX; i--) {
+    for (size_t i = vm->frame_count; i > floor && vm->trace_count < LZ_TRACE_MAX; i--) {
         const LzCallFrame *frame = &vm->frames[i - 1];
         LzTraceEntry *entry = &vm->trace[vm->trace_count++];
         const char *name = frame->closure != NULL ? lz_function_display_name(frame->closure->function)

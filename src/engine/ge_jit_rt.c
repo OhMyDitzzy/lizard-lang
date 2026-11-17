@@ -80,7 +80,7 @@ uint64_t jit_call(LzVM *vm, uint64_t argc, uint64_t resume, uint64_t call_offset
     *entry = NULL;
     if (vm->stack_count > argc) {
         /* The same short way to a native that runs no user code as in the interpreters. */
-        const LzValue *callee = &vm->stack[vm->stack_count - argc - 1];
+        const LzValue *callee = &vm->main_stack[vm->stack_count - argc - 1];
         if (callee->type == LZ_VAL_OBJECT && callee->as.object->type == LZ_OBJ_NATIVE &&
             lz_native_is_leaf((const LzNative *)callee->as.object, (int)argc, callee + 1)) {
             LzValue result = lz_value_nil();
@@ -90,16 +90,16 @@ uint64_t jit_call(LzVM *vm, uint64_t argc, uint64_t resume, uint64_t call_offset
             if (done == LZ_OK) {
                 for (uint64_t i = 0; i < argc + 1; i++) {
                     vm->stack_count--;
-                    lz_value_release(&vm->heap, &vm->stack[vm->stack_count]);
+                    lz_value_release(&vm->heap, &vm->main_stack[vm->stack_count]);
                 }
-                vm->stack[vm->stack_count++] = result;
+                vm->main_stack[vm->stack_count++] = result;
             }
             return (uint64_t)done;
         }
     }
     LzStatus status = lz_vm_call(vm, (size_t)argc, (size_t)resume, (uint32_t)call_offset, &entered);
     if (status == LZ_OK && entered) {
-        const LzFunction *function = vm->frames[vm->frame_count - 1].closure->function;
+        const LzFunction *function = vm->main_frames[vm->frame_count - 1].closure->function;
         const GeProgram *program = function->engine_cache;
         if (program != NULL && program->jit != NULL) {
             *entry = program->jit->entry_call;

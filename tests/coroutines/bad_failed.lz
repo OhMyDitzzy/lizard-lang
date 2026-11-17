@@ -1,0 +1,4 @@
+fn fail() { throw Error("broken") }
+let co = coroutine(fail)
+try { co.resume() } catch e {}
+co.resume()

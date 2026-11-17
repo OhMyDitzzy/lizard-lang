@@ -1,0 +1,6 @@
+error: cannot yield from the main program
+ --> bad_main.lz:1:6
+  |
+1 | yield()
+  |      ^
+

@@ -5,9 +5,12 @@
 #include "convert/convert.h"
 #include "io/io.h"
 #include "lizard/builtin.h"
+#include "lizard/coroutine.h"
 #include "method/method.h"
 
 static const LzBuiltin builtins[] = {
+    {"coroutine", lz_builtin_coroutine, 1, 1, LZ_KIND_COROUTINE, 0},
+    {"yield", lz_builtin_yield, 0, LZ_VARIADIC, LZ_KINDS_ANY, 0},
     {"print", lz_builtin_print, 0, LZ_VARIADIC, LZ_KIND_NIL, LZ_NATIVE_LEAF_SCALARS},
     {"println", lz_builtin_println, 0, LZ_VARIADIC, LZ_KIND_NIL, LZ_NATIVE_LEAF_SCALARS},
     {"int", lz_builtin_int, 1, 1, LZ_KIND_INT, LZ_NATIVE_LEAF},

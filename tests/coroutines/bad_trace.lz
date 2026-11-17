@@ -1,0 +1,5 @@
+fn fail() { throw Error("broken") }
+fn body() { return fail() }
+let co = coroutine(body)
+fn drive() { co.resume() }
+drive()

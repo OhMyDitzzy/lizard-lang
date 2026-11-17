@@ -3,6 +3,9 @@
 if LZ_RUN_TESTS
 check_PROGRAMS = \
 	test_memory \
+	test_context \
+	test_coroutines \
+	test_coroutines_ge \
 	test_table \
 	test_native \
 	test_chunk \
@@ -81,6 +84,8 @@ check_PROGRAMS = \
 	test_typesys
 
 check_SCRIPTS = \
+	test_coroutines_jit \
+	coroutines_cli \
 	test_engine_jit \
 	test_ic_jit \
 	fuzz_engine_jit \
@@ -117,6 +122,11 @@ check_SCRIPTS = \
 
 TESTS = \
 	test_memory \
+	test_context \
+	test_coroutines \
+	test_coroutines_ge \
+	test_coroutines_jit \
+	coroutines_cli \
 	test_table \
 	test_native \
 	test_chunk \
@@ -229,6 +239,13 @@ TESTS = \
 
 test_memory_SOURCES = tests/test_memory.c
 test_memory_LDADD = $(LZ_LDADD_PLAIN)
+test_context_SOURCES = tests/test_context.c
+test_context_LDADD = $(LZ_LDADD_PLAIN)
+test_coroutines_SOURCES = tests/test_coroutines.c
+test_coroutines_LDADD = $(LZ_LDADD_PLAIN)
+test_coroutines_ge_SOURCES = tests/test_coroutines.c
+test_coroutines_ge_CFLAGS = $(AM_CFLAGS) -include $(top_srcdir)/tests/engine_redirect.h
+test_coroutines_ge_LDADD = $(LZ_LDADD_ENGINE)
 test_table_SOURCES = tests/test_table.c
 test_table_LDADD = $(LZ_LDADD_PLAIN)
 test_native_SOURCES = tests/test_native.c
@@ -411,6 +428,10 @@ test_typesys_LDADD = $(LZ_LDADD_PLAIN)
 
 # Tests that are not programs of their own (variants, scripts) are stubs: the file only has
 # to exist; tests/run-test.sh looks the test up in tests/tests.list by its name.
+test_coroutines_jit:
+	@$(lz_make_stub)
+coroutines_cli:
+	@$(lz_make_stub)
 test_engine_jit:
 	@$(lz_make_stub)
 test_ic_jit:

@@ -71,6 +71,7 @@ bool lz_status_catchable(LzStatus status) {
     case LZ_ERR_TYPE:
         return true;
     case LZ_OK:
+    case LZ_YIELD:
     case LZ_ERR_MEMORY:
     case LZ_ERR_COMPILE:
     case LZ_ERR_HEAP_LIMIT:

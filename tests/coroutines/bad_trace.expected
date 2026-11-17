@@ -1,0 +1,12 @@
+error: Error: broken
+ --> bad_trace.lz:1:13
+  |
+1 | fn fail() { throw Error("broken") }
+  |             ^^^^^
+  |
+  = stack trace: innermost call first
+      at fail (bad_trace.lz:1:13)
+      at body (bad_trace.lz:2:24)
+      at drive (bad_trace.lz:4:23)
+      at <script> (bad_trace.lz:5:6)
+

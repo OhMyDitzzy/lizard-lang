@@ -9,6 +9,7 @@
 #include "lizard/dict.h"
 #include "lizard/type.h"
 #include "lizard/vm.h"
+#include "lizard/coroutine.h"
 
 #include <assert.h>
 #include <stddef.h>
@@ -61,6 +62,7 @@ typedef struct TrialBuffers {
 
 typedef struct Trial {
     const LzSkink *skink;
+    LzVM *vm;
     size_t capacity; /* nodes the arrays have room for, always a power of two */
     size_t budget;
     size_t count;
@@ -75,6 +77,8 @@ typedef struct Trial {
 } Trial;
 
 typedef bool (*EdgeFn)(Trial *trial, LzObject *target);
+static bool intern_node(Trial *trial, LzObject *object, size_t *index);
+static bool visit_discover(Trial *trial, LzObject *target);
 
 typedef enum TrialResult {
     TRIAL_LIVE,         /* something outside still holds the subgraph, or nothing is dead */
@@ -98,7 +102,7 @@ static bool type_is_closure_free(const LzType *type, unsigned depth) {
         return false;
     }
     uint16_t kinds = lz_type_possible_kinds(type);
-    if ((kinds & LZ_KIND_FUNCTION) != 0) {
+    if ((kinds & (LZ_KIND_FUNCTION | LZ_KIND_COROUTINE)) != 0) {
         return false;
     }
     if ((kinds & LZ_KIND_ARRAY) != 0) {
@@ -153,6 +157,7 @@ static bool is_node(const LzObject *object) {
     case LZ_OBJ_UPVALUE:
     case LZ_OBJ_INSTANCE:
     case LZ_OBJ_BOUND:
+    case LZ_OBJ_COROUTINE:
         return true;
     case LZ_OBJ_ARRAY:
         return array_may_hold_cycles((const LzArray *)object);
@@ -188,6 +193,7 @@ static bool may_join_cycle(const LzValue *value) {
     case LZ_OBJ_CLOSURE:
     case LZ_OBJ_INSTANCE:
     case LZ_OBJ_BOUND:
+    case LZ_OBJ_COROUTINE:
         return true;
     case LZ_OBJ_CLASS:
         return false;
@@ -224,6 +230,17 @@ static size_t slot_count(const LzObject *node) {
         return ((const LzInstance *)node)->cls->field_count;
     case LZ_OBJ_BOUND:
         return 2;
+    case LZ_OBJ_COROUTINE: {
+        const LzCoroutine *co = (const LzCoroutine *)node;
+        bool active = co->vm->context == &co->context;
+        size_t count = (active ? co->vm->stack_count : co->context.stack_count) +
+                       (co->entry.type != LZ_VAL_NIL ? 1u : 0u);
+        const LzUpvalue *open = active ? co->vm->open_upvalues : co->context.open_upvalues;
+        for (const LzUpvalue *upvalue = open; upvalue != NULL; upvalue = upvalue->next_open) {
+            count++;
+        }
+        return count;
+    }
     case LZ_OBJ_CLASS:
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
@@ -253,8 +270,13 @@ static bool each_edge(Trial *trial, LzObject *node, EdgeFn visit) {
     }
     case LZ_OBJ_UPVALUE: {
         const LzUpvalue *upvalue = (const LzUpvalue *)node;
-        if (upvalue->location == &upvalue->closed && is_graph_value(&upvalue->closed)) {
-            return visit(trial, upvalue->closed.as.object);
+        if (is_graph_value(upvalue->location)) {
+            if (upvalue->location != &upvalue->closed && visit == visit_discover) {
+                size_t index;
+                /* An open upvalue borrows its slot. Discover it without subtracting an owned reference. */
+                return intern_node(trial, upvalue->location->as.object, &index);
+            }
+            return visit(trial, upvalue->location->as.object);
         }
         return true;
     }
@@ -308,6 +330,29 @@ static bool each_edge(Trial *trial, LzObject *node, EdgeFn visit) {
         }
         if (error->payload != NULL && !visit(trial, &error->payload->base)) {
             return false;
+        }
+        return true;
+    }
+    case LZ_OBJ_COROUTINE: {
+        const LzCoroutine *co = (const LzCoroutine *)node;
+        if (co->entry.type == LZ_VAL_OBJECT && is_graph_value(&co->entry) &&
+            !visit(trial, co->entry.as.object)) {
+            return false;
+        }
+        bool active = trial->vm->context == &co->context;
+        const LzValue *stack = active ? trial->vm->stack : co->context.stack;
+        size_t stack_count = active ? trial->vm->stack_count : co->context.stack_count;
+        LzUpvalue *open = active ? trial->vm->open_upvalues : co->context.open_upvalues;
+        for (size_t i = 0; i < stack_count; i++) {
+            const LzValue *value = &stack[i];
+            if (is_graph_value(value) && !visit(trial, value->as.object)) {
+                return false;
+            }
+        }
+        for (LzUpvalue *upvalue = open; upvalue != NULL; upvalue = upvalue->next_open) {
+            if (!visit(trial, &upvalue->base)) {
+                return false;
+            }
         }
         return true;
     }
@@ -578,6 +623,9 @@ static void clear_edges(LzVM *vm, LzObject *node) {
         }
         break;
     }
+    case LZ_OBJ_COROUTINE:
+        lz_coroutine_clear((LzCoroutine *)node);
+        break;
     case LZ_OBJ_CLASS:
     case LZ_OBJ_STRING:
     case LZ_OBJ_NATIVE:
@@ -602,8 +650,16 @@ static size_t collect(LzVM *vm, const Trial *trial) {
     if (dead == 0) {
         return 0;
     }
+    bool was_collecting = vm->skink.collecting;
+    vm->skink.collecting = true;
+    /* Close contexts first because closing transfers slot references into their open upvalues. */
     for (size_t i = 0; i < trial->count; i++) {
-        if (!trial->live[i]) {
+        if (!trial->live[i] && trial->node[i]->type == LZ_OBJ_COROUTINE) {
+            clear_edges(vm, trial->node[i]);
+        }
+    }
+    for (size_t i = 0; i < trial->count; i++) {
+        if (!trial->live[i] && trial->node[i]->type != LZ_OBJ_COROUTINE) {
             clear_edges(vm, trial->node[i]);
         }
     }
@@ -612,6 +668,7 @@ static size_t collect(LzVM *vm, const Trial *trial) {
             lz_object_release(&vm->heap, trial->node[i]);
         }
     }
+    vm->skink.collecting = was_collecting;
     return dead;
 }
 
@@ -640,6 +697,7 @@ static TrialResult trial_from(LzVM *vm, LzUpvalue *suspect, size_t *freed) {
     TrialBuffers buffers;
     Trial trial;
     trial.skink = &vm->skink;
+    trial.vm = vm;
     trial.capacity = LZ_SKINK_MAX_NODES;
     trial.budget = LZ_SKINK_BUDGET;
     trial.count = 0;
@@ -821,7 +879,7 @@ static void bounded_passes(LzVM *vm) {
  */
 static bool full_pass_once(LzVM *vm, bool during_run) {
     LzSkink *skink = &vm->skink;
-    if (!watching(skink)) {
+    if (!watching(skink) && skink->coroutine_count == 0) {
         return true; /* nothing to look at, so no pass, no memory and no statistics */
     }
     uint64_t started = trial_now(skink);
@@ -829,6 +887,7 @@ static bool full_pass_once(LzVM *vm, bool during_run) {
     if (!trial_init_growable(&trial, skink, 1024)) {
         return false;
     }
+    trial.vm = vm;
     bool complete = true;
     for (size_t level = 0; level < LZ_SKINK_LEVELS && complete; level++) {
         for (const LzWatchLink *link = skink->watch[level].next;
@@ -838,6 +897,13 @@ static bool full_pass_once(LzVM *vm, bool during_run) {
             if (upvalue->location == &upvalue->closed && may_join_cycle(&upvalue->closed)) {
                 complete = intern_node(&trial, &upvalue->base, &index);
             }
+        }
+    }
+    for (LzObject *object = skink->coroutine_count == 0 ? NULL : vm->heap.head;
+         object != NULL && complete; object = object->next) {
+        if (object->type == LZ_OBJ_COROUTINE) {
+            size_t index;
+            complete = intern_node(&trial, object, &index);
         }
     }
     size_t freed = 0;
@@ -932,6 +998,8 @@ void lz_skink_init(LzSkink *skink) {
     skink->timing = false;
     skink->pending_count = 0;
     skink->ticks = 0;
+    skink->coroutine_count = 0;
+    skink->collecting = false;
     skink->closed_any = false;
     skink->next_full_bytes = LZ_SKINK_FULL_MIN_BYTES;
     for (size_t i = 0; i < LZ_SKINK_LEVELS; i++) {
@@ -988,7 +1056,7 @@ void lz_skink_alloc_tick(void *context) {
     if (!skink->enabled || skink->pending_count > 0) {
         return;
     }
-    if (!watching(skink)) {
+    if (!watching(skink) && skink->coroutine_count == 0) {
         return;
     }
     skink->stats.alloc_ticks++;
@@ -1060,7 +1128,7 @@ size_t lz_skink_reclaim(void *context, size_t needed_bytes) {
     (void)needed_bytes;
     LzVM *vm = context;
     LzSkink *skink = &vm->skink;
-    if (!skink->enabled || skink->pending_count > 0 || !watching(skink)) {
+    if (!skink->enabled || skink->pending_count > 0 || (!watching(skink) && skink->coroutine_count == 0)) {
         return 0;
     }
     size_t before = vm->heap.live_bytes;

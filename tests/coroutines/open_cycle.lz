@@ -1,0 +1,2 @@
+fn make() { let co = coroutine(fn(self) { let local = self; let capture = fn() => local; yield(capture) }); co.resume(co) }
+make()

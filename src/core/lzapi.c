@@ -122,7 +122,6 @@ struct LznBuilder {
     char **pending_label;
 };
 
-/* ---- state ---------------------------------------------------------------------------------- */
 
 static LznState *state_get(LzVM *vm) {
     if (vm->lzn == NULL) {
@@ -140,7 +139,6 @@ static char *dup_text(const char *text) {
     return copy;
 }
 
-/* ---- handles -------------------------------------------------------------------------------- */
 
 static LznStatus ctx_fail(LznCtx *ctx, LzStatus status) {
     ctx->error_set = true;
@@ -213,7 +211,6 @@ static void handles_release(LznCtx *ctx) {
     }
 }
 
-/* ---- calling a native function --------------------------------------------------------------- */
 
 static LzStatus run_fn(LzVM *vm, const FnInfo *fn, int argc, const LzValue *argv, void *self_data, LzValue *result) {
     LzValue filled[ARGS_MAX];
@@ -300,7 +297,6 @@ bool lz_native_module_arity(LzVM *vm, const LzNative *native, int argc, LzStatus
     return true;
 }
 
-/* ---- instance data -------------------------------------------------------------------------- */
 
 static InstanceHdr *hdr_of(const LzInstance *instance) {
     uintptr_t at = (uintptr_t)&instance->fields[instance->cls->field_count];
@@ -393,7 +389,6 @@ LzStatus lz_native_class_construct(LzVM *vm, LzClass *cls, size_t positional, co
     return LZ_OK;
 }
 
-/* ---- values --------------------------------------------------------------------------------- */
 
 int lzn_arg_count(LznCtx *ctx) {
     return ctx->argc;
@@ -507,6 +502,7 @@ static LznKind kind_of(const LzValue *v) {
     case LZ_OBJ_INSTANCE: return LZN_INSTANCE;
     case LZ_OBJ_LINK: return LZN_LINK;
     case LZ_OBJ_ERROR: return LZN_ERROR;
+    case LZ_OBJ_COROUTINE: return LZN_COROUTINE;
     default: return LZN_FUNCTION;
     }
 }
@@ -517,7 +513,7 @@ LznKind lzn_kind(LznCtx *ctx, LznValue *value) {
 
 const char *lzn_kind_name(LznKind kind) {
     static const char *const names[] = {"nil", "bool", "int", "float", "string", "array", "dict",
-                                        "function", "instance", "link", "error"};
+                                        "function", "instance", "link", "error", "coroutine"};
     return (unsigned)kind < sizeof names / sizeof names[0] ? names[kind] : "?";
 }
 
@@ -556,7 +552,6 @@ const char *lzn_string_data(LznCtx *ctx, LznValue *value, size_t *length) {
     return s->data;
 }
 
-/* ---- arrays and dicts ----------------------------------------------------------------------- */
 
 static LzArray *array_of(LznCtx *ctx, LznValue *h) {
     return handle_ok(ctx, h) && lz_value_is_array(&h->v) ? lz_value_as_array(&h->v) : NULL;
@@ -680,7 +675,6 @@ LznStatus lzn_dict_set_int(LznCtx *ctx, LznValue *dict, int64_t key, LznValue *v
     return dict_store(ctx, dict, &k, value);
 }
 
-/* ---- lasting references --------------------------------------------------------------------- */
 
 LznRef *lzn_ref(LznCtx *ctx, LznValue *value) {
     if (handle_bad(ctx, value)) {
@@ -731,7 +725,6 @@ void lzn_unref(LznRef *ref) {
     lz_value_release(&vm->heap, &v);
 }
 
-/* ---- errors --------------------------------------------------------------------------------- */
 
 LznStatus lzn_throw(LznCtx *ctx, LznErrId kind, const char *fmt, ...) {
     char text[256];
@@ -841,7 +834,6 @@ LznStatus lzn_check_function(LznCtx *ctx, int index, LznValue **out) {
     return LZN_OK;
 }
 
-/* ---- calling back, memory and fuel ---------------------------------------------------------- */
 
 LznStatus lzn_call(LznCtx *ctx, LznValue *fn, int nargs, LznValue *const *args, LznValue **result) {
     LzValue values[32];
@@ -929,7 +921,6 @@ void *lzn_self_data(LznCtx *ctx) {
     return ctx->self_data;
 }
 
-/* ---- declaring modules ---------------------------------------------------------------------- */
 
 LznStatus lzn_builder_fail(LznBuilder *b, const char *fmt, ...) {
     if (!b->failed) {
@@ -1061,12 +1052,13 @@ static bool parsed_add(Parsed *p, const char *start, const char *end, char *err,
         (void)snprintf(err, err_size, "empty parameter type");
         return false;
     }
+    bool rest = text[0] == '*';
     if (p->count > 0 && p->rest[p->count - 1]) {
         free(text);
-        (void)snprintf(err, err_size, "the rest parameter must be the last one");
+        (void)snprintf(err, err_size, rest ? "a signature can have only one rest parameter"
+                                         : "the rest parameter must be the last one");
         return false;
     }
-    bool rest = text[0] == '*';
     if (rest) memmove(text, text + 1, strlen(text));
     char *equal = strchr(text, '=');
     char *fallback = NULL;
@@ -1585,7 +1577,6 @@ LznStatus lzn_module_class(LznBuilder *b, const char *name, const LznClassDef *d
     return set_global(b, name, lz_value_object(&cls->base));
 }
 
-/* ---- building a module ---------------------------------------------------------------------- */
 
 static ModuleRec *rec_find(LznState *st, const char *name) {
     for (ModuleRec *rec = st->modules; rec != NULL; rec = rec->next) {
@@ -1737,7 +1728,6 @@ LzModule *lz_native_module_find(LzVM *vm, const char *name, bool *known) {
     return rec->module;
 }
 
-/* ---- shutdown ------------------------------------------------------------------------------- */
 
 void lz_native_vm_shutdown(LzVM *vm) {
     LznState *st = vm->lzn;

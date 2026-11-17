@@ -7,6 +7,7 @@ Read in order, from the most basic to the most advanced:
 - [TYPES.md](TYPES.md) — type system: `int`, `float`, `bool`, `nil`, `string`, optionals, unions, literals, aliases
 - [CONTROL_FLOW.md](CONTROL_FLOW.md) — `if`, `while`, `for`, `break`, `continue`
 - [FUNCTIONS.md](FUNCTIONS.md) — functions, parameters, named arguments, variadics, closures
+- [COROUTINES.md](COROUTINES.md): coroutine API, execution contexts and collection
 - [COLLECTIONS.md](COLLECTIONS.md) — arrays and dicts
 - [STRINGS.md](STRINGS.md) — literals, templates, format specs, debug form
 - [ERRORS.md](ERRORS.md) — `try`/`catch`/`finally`/`throw`, error kinds, error reports

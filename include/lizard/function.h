@@ -74,7 +74,7 @@ typedef struct LzUpvalue {
     LzValue *location; /* the stack slot while open, and &closed afterwards */
     LzValue closed;
     struct LzUpvalue *next_open; /* the VM's list of open upvalues, highest slot first */
-    LzWatchLink watch;           /* last, because the engines address the fields above by offset */
+    LzWatchLink watch; /* Last field, because the engines address the fields above by offset. */
 } LzUpvalue;
 
 typedef struct LzClosure {

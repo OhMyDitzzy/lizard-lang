@@ -1,0 +1,10 @@
+error: cannot resume a coroutine that is running
+ --> bad_running.lz:2:41
+  |
+2 | box[0] = coroutine(fn() => box[0].resume())
+  |                                         ^
+  |
+  = stack trace: innermost call first
+      at <fn> (bad_running.lz:2:41)
+      at <script> (bad_running.lz:3:14)
+

@@ -1,0 +1,10 @@
+import source
+let co: coroutine = source.make()
+println(typeof(co), co.status())
+println(co.resume(4, 5, 6))
+println(co.resume(8, 9))
+println(co.status())
+let alias = coroutine(fn() { let x = 1; yield(fn(v) { x = v }); return x })
+let write = alias.resume()
+write(42)
+println(alias.resume())

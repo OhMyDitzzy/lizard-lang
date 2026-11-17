@@ -1,0 +1,26 @@
+error: stack overflow: too many nested calls (limit 200)
+ --> bad_depth.lz:1:57
+  |
+1 | fn recurse(n) { let captured = fn() => n; return recurse(n + 1) }
+  |                                                         ^
+  |
+  = help: a function calls itself without a base case, or the recursion is too deep (limit 200)
+  = stack trace: innermost call first
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      at recurse (bad_depth.lz:1:57)
+      ... 184 more frames
+

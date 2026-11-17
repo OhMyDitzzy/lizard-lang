@@ -119,3 +119,9 @@ explained with more examples in [Types](TYPES.md#function-types).
 
 A function without `->` is not left unknown: the union of its `return` types (and `nil`
 when it can fall off the end) is its result for checking, not at run time.
+
+## Coroutines
+
+[Coroutines](COROUTINES.md) describes the `coroutine(fn)`, `resume`, `yield` and `status`
+API, including argument passing and the native-callback restrictions. Coroutine bodies
+run in the reference interpreter on every engine.

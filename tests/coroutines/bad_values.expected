@@ -1,0 +1,25 @@
+error: stack overflow
+ --> bad_values.lz:1:36
+  |
+1 | fn recurse(n) { let a = n; let b = n; let c = n; let d = n; let e = n; let f = n; let g = n; let h = n; let i = n; let j = n; let k = n; let capture = fn() => a; return recurse(n + 1) }
+  |                                    ^
+  |
+  = stack trace: innermost call first
+      at recurse (bad_values.lz:1:36)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      at recurse (bad_values.lz:1:177)
+      ... 133 more frames
+

@@ -268,7 +268,7 @@ static void test_descriptions(void) {
     LZ_CHECK(described_as(&string_or_int, "int | string"));
     LZ_CHECK(described_as(&nullable, "string | nil"));
     LZ_CHECK(described_as(&everything_but_nil,
-                          "number | string | bool | function | any[] | dict"));
+                          "number | string | bool | coroutine | function | any[] | dict"));
 
     LzType mode = modes();
     LZ_CHECK(described_as(&mode, "\"r\" | \"w\""));

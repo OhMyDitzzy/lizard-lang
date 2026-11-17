@@ -122,6 +122,8 @@ typedef struct LzSkink {
     /* Read the clock around trials and full passes so the report can show the worst pause. */
     bool timing;
     size_t pending_count;
+    size_t coroutine_count;
+    bool collecting;
     LzUpvalue *pending[LZ_SKINK_PENDING_MAX]; /* every entry owns one reference */
     uint64_t ticks;
     bool closed_any; /* an upvalue was closed since the last lz_skink_run */

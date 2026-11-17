@@ -23,7 +23,6 @@ typedef struct CounterData {
     int64_t step;
 } CounterData;
 
-/* ---- plain functions ------------------------------------------------------------------------ */
 
 static LznStatus nm_add(LznCtx *ctx) {
     int64_t a, b;
@@ -88,7 +87,6 @@ static LznStatus nm_strict(LznCtx *ctx) {
     return lzn_return_int(ctx, score);
 }
 
-/* ---- arrays and dicts ----------------------------------------------------------------------- */
 
 static LznStatus nm_sum(LznCtx *ctx) {
     LznValue *array;
@@ -168,7 +166,6 @@ static LznStatus nm_dict_info(LznCtx *ctx) {
     return lzn_return_int(ctx, score);
 }
 
-/* ---- errors --------------------------------------------------------------------------------- */
 
 static LznStatus nm_fail(LznCtx *ctx) {
     int64_t which;
@@ -184,7 +181,6 @@ static LznStatus nm_fail(LznCtx *ctx) {
     }
 }
 
-/* ---- calling back and lasting references ---------------------------------------------------- */
 
 static LznStatus nm_apply(LznCtx *ctx) {
     LznValue *fn;
@@ -256,7 +252,6 @@ static LznStatus nm_use_handle(LznCtx *ctx) {
     return lzn_return(ctx, g_stale);
 }
 
-/* ---- memory and fuel ------------------------------------------------------------------------ */
 
 static LznStatus nm_spin(LznCtx *ctx) {
     int64_t n;
@@ -293,7 +288,6 @@ static LznStatus nm_created(LznCtx *ctx) {
     return lzn_return_int(ctx, g_created);
 }
 
-/* ---- a class -------------------------------------------------------------------------------- */
 
 static LznStatus counter_init(LznCtx *ctx) {
     CounterData *d = lzn_self_data(ctx);
@@ -374,7 +368,6 @@ static const LznFieldDef counter_fields[] = {
     {NULL, NULL, NULL},
 };
 
-/* ---- the module ----------------------------------------------------------------------------- */
 
 LznStatus nmod_init(LznBuilder *b);
 LznStatus nmod_init(LznBuilder *b) {
@@ -465,7 +458,6 @@ int nmod_finalized(void) {
     return g_finalized;
 }
 
-/* ---- modules that must not register --------------------------------------------------------- */
 
 LznStatus badsig_init(LznBuilder *b);
 LznStatus badsig_init(LznBuilder *b) {

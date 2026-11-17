@@ -1645,6 +1645,8 @@ static bool builtin_type(const char *name, LzType *out) {
         *out = lz_type_of_kinds(LZ_KIND_FUNCTION);
     } else if (strcmp(name, "dict") == 0) {
         *out = lz_type_of_kinds(LZ_KIND_DICT);
+    } else if (strcmp(name, "coroutine") == 0) {
+        *out = lz_type_of_kinds(LZ_KIND_COROUTINE);
     } else {
         return false;
     }

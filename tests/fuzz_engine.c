@@ -533,6 +533,19 @@ static void fuzz_programs(unsigned count, uint64_t seed) {
     LZ_CHECK(compiled * 10 >= count * 8); /* the generator must keep producing valid programs */
     LZ_CHECK(imported > 0);                /* and some of them reach LZ_OP_IMPORT */
     printf("fuzz_engine: %u programs imported a module\n", imported);
+    for (unsigned i = 0; i < count / 10 + 1; i++) {
+        rng_state = seed + (uint64_t)i * UINT64_C(0xD1B54A32D192ED03) + 7;
+        char text[256];
+        unsigned initial = below(1000);
+        unsigned reply = below(1000);
+        unsigned fuel = 1 + below(256);
+        size_t heap_limit = 128 * 1024 + (size_t)below(1024 * 1024);
+        (void)snprintf(text, sizeof text,
+                       "let co = coroutine(fn(n) { let x = n; yield(x); return x + 1 })\n"
+                       "let sent = co.resume(%u)\nlet done = co.resume(%u)\nprintln(sent, done, co.status())\n",
+                       initial, reply);
+        LZ_CHECK(compare_source("random coroutine", text, fuel, heap_limit, false));
+    }
 }
 
 /* ---------------------------------------------------------------- bytecode */
