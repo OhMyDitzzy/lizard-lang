@@ -71,21 +71,26 @@ function that fails without setting an error still reports a failure, as
 `name(): failed without an error`.
 
 `lzn_check_int(ctx, i, &out)` and its relatives check an argument and write
-`test.nmod.add(): expected int, got string` with a note that says which argument it was. The VM
-itself checks the number of arguments against the minimum and maximum of the declaration, so a
-function does not look at the count for that.
+`argument 'b' of test.nmod.add() expects int, got "x"`. The VM checks the number
+of arguments against the signature and fills omitted defaults before entering native code.
 
 ## Declaring a module
 
 `init` gets a `LznBuilder` and declares everything through it: `lzn_module_fn`,
 `lzn_module_const_int`, `_float`, `_string`, `_bool`, `lzn_module_error` and `lzn_module_class`. The
-signature of a function is Lizard's own type text, `"fn(int, int) -> int"` or `"fn(string) -> string?"`,
-optionally with parameter names (`"fn(x: float, k: int) -> float"`). The names of the module's own
-classes and errors can be used in it. The text is not interpreted by the native code. It becomes the
-interface of the module, and each type in it is read with the compiler's own type reader when the
-module is registered. A text that does not parse, a parameter count that disagrees with the minimum
-and maximum, or a name declared twice is an error of the registration. With a maximum of `-1` the
-function takes any number of arguments after the declared ones.
+signature is the only source of argument names, types and arity. Use named parameters,
+for example `"fn(a: int, b: int = 0) -> int"`. Defaults must be literal nil, booleans,
+numbers or strings. Required parameters precede default parameters. A final `*rest: any`
+accepts surplus arguments. Rest parameters cannot have defaults. Duplicate parameter
+names fail registration. Legacy unnamed types remain accepted with names `arg1`, `arg2`.
+
+The VM fills omitted defaults before entering native code. `lzn_arg_count(ctx)` always
+includes every fixed parameter, followed by each supplied rest argument. Native code
+receives rest arguments individually. Methods omit `self` from their signatures.
+Constructors use the same syntax without a result type.
+
+Native functions and constructors currently reject named arguments on the existing call
+path. This API does not change that restriction.
 
 The test module declares like this:
 
@@ -101,9 +106,7 @@ LznStatus nmod_init(LznBuilder *b) {
     LznClassDef counter = {
         .size = sizeof(CounterData),
         .init = counter_init,
-        .init_signature = "fn(value: int, step: int)",
-        .init_min_args = 0,
-        .init_max_args = 2,
+        .init_signature = "fn(value: int = 0, step: int = 1)",
         .finalize = counter_finalize,
         .methods = counter_methods,
         .fields = counter_fields,
@@ -119,36 +122,37 @@ LznStatus nmod_init(LznBuilder *b) {
         const char *name;
         LznFn fn;
         const char *sig;
-        int min, max;
     } fns[] = {
-        {"add", nm_add, "fn(int, int) -> int", 2, 2},
-        {"scale", nm_scale, "fn(x: float, k: int) -> float", 2, 2},
-        {"greet", nm_greet, "fn(string) -> string", 1, 1},
-        {"flip", nm_flip, "fn(bool) -> bool", 1, 1},
-        {"kind", nm_kind, "fn(any) -> string", 1, 1},
-        {"nothing", nm_nothing, "fn()", 0, 0},
-        {"count_args", nm_count_args, "fn(a: any, b: any, c: any) -> int", 0, 3},
-        {"strict", nm_strict, "fn(any) -> int", 1, 1},
-        {"sum", nm_sum, "fn(int[]) -> int", 1, 1},
-        {"range", nm_range, "fn(int) -> int[]", 1, 1},
-        {"poke", nm_poke, "fn(int[], int, int)", 3, 3},
-        {"make_dict", nm_make_dict, "fn(string, int) -> any", 2, 2},
-        {"dict_info", nm_dict_info, "fn(any) -> int", 1, 1},
-        {"fail", nm_fail, "fn(int)", 1, 1},
-        {"apply", nm_apply, "fn(fn(int) -> int, int) -> int", 2, 2},
-        {"store", nm_store, "fn(fn(int) -> int)", 1, 1},
-        {"fire", nm_fire, "fn(int) -> int", 1, 1},
-        {"clear", nm_clear, "fn()", 0, 0},
-        {"keep", nm_keep, "fn(any)", 1, 1},
-        {"remember_handle", nm_remember_handle, "fn()", 0, 0},
-        {"use_handle", nm_use_handle, "fn() -> int", 0, 0},
-        {"spin", nm_spin, "fn(int) -> int", 1, 1},
-        {"alloc", nm_alloc, "fn(int) -> int", 1, 1},
-        {"finalized", nm_finalized, "fn() -> int", 0, 0},
-        {"created", nm_created, "fn() -> int", 0, 0},
+        {"add", nm_add, "fn(a: int, b: int) -> int"},
+        {"scale", nm_scale, "fn(x: float, k: int) -> float"},
+        {"greet", nm_greet, "fn(name: string) -> string"},
+        {"flip", nm_flip, "fn(value: bool) -> bool"},
+        {"kind", nm_kind, "fn(value: any) -> string"},
+        {"nothing", nm_nothing, "fn()"},
+        {"rest_args", nm_count_args, "fn(*rest: any) -> int"},
+        {"mixed_args", nm_count_args, "fn(a: int = 7, *rest: any) -> int"},
+        {"count_args", nm_count_args, "fn(a: any = nil, b: any = nil, c: any = nil) -> int"},
+        {"strict", nm_strict, "fn(value: any) -> int"},
+        {"sum", nm_sum, "fn(values: int[]) -> int"},
+        {"range", nm_range, "fn(n: int) -> int[]"},
+        {"poke", nm_poke, "fn(values: int[], index: int, value: int)"},
+        {"make_dict", nm_make_dict, "fn(key: string, value: int) -> any"},
+        {"dict_info", nm_dict_info, "fn(value: any) -> int"},
+        {"fail", nm_fail, "fn(value: int)"},
+        {"apply", nm_apply, "fn(f: fn(int) -> int, value: int) -> int"},
+        {"store", nm_store, "fn(f: fn(int) -> int)"},
+        {"fire", nm_fire, "fn(value: int) -> int"},
+        {"clear", nm_clear, "fn()"},
+        {"keep", nm_keep, "fn(value: any)"},
+        {"remember_handle", nm_remember_handle, "fn()"},
+        {"use_handle", nm_use_handle, "fn() -> int"},
+        {"spin", nm_spin, "fn(value: int) -> int"},
+        {"alloc", nm_alloc, "fn(value: int) -> int"},
+        {"finalized", nm_finalized, "fn() -> int"},
+        {"created", nm_created, "fn() -> int"},
     };
     for (size_t i = 0; i < sizeof fns / sizeof fns[0]; i++) {
-        if (lzn_module_fn(b, fns[i].name, fns[i].fn, fns[i].sig, fns[i].min, fns[i].max) != LZN_OK) {
+        if (lzn_module_fn(b, fns[i].name, fns[i].fn, fns[i].sig) != LZN_OK) {
             return LZN_FAIL;
         }
     }
@@ -211,7 +215,7 @@ static void counter_finalize(void *data) {
 static LznStatus counter_add(LznCtx *ctx) {
     CounterData *d = lzn_self_data(ctx);
     int64_t n = d->step;
-    if (lzn_arg_count(ctx) > 0 && lzn_check_int(ctx, 0, &n) != LZN_OK) {
+    if (lzn_kind(ctx, lzn_arg(ctx, 0)) != LZN_NIL && lzn_check_int(ctx, 0, &n) != LZN_OK) {
         return LZN_FAIL;
     }
     d->value += n;
@@ -219,10 +223,10 @@ static LznStatus counter_add(LznCtx *ctx) {
 }
 
 static const LznMethodDef counter_methods[] = {
-    {"add", counter_add, "fn(n: int) -> int", 0, 1},
-    {"merge", counter_merge, "fn(other: Counter) -> Counter", 1, 1},
-    {"apply_to", counter_apply_to, "fn(f: fn(int) -> int) -> int", 1, 1},
-    {NULL, NULL, NULL, 0, 0},
+    {"add", counter_add, "fn(n: int? = nil) -> int"},
+    {"merge", counter_merge, "fn(other: Counter) -> Counter"},
+    {"apply_to", counter_apply_to, "fn(f: fn(int) -> int) -> int"},
+    {NULL, NULL, NULL},
 };
 
 static const LznFieldDef counter_fields[] = {

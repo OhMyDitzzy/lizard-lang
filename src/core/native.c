@@ -1,6 +1,7 @@
 #include "lizard/native.h"
 
 #include "lizard/link.h"
+#include "lizard/native_module.h"
 #include "lizard/vm.h"
 
 LzNative *lz_native_new(LzHeap *heap, LzString *name, LzNativeFn fn, int min_args, int max_args) {
@@ -25,6 +26,8 @@ LzStatus lz_native_call(LzVM *vm, const LzNative *native, int argc, const LzValu
     bool too_few = argc < native->min_args;
     bool too_many = native->max_args != LZ_VARIADIC && argc > native->max_args;
     if (too_few || too_many) {
+        LzStatus status;
+        if (lz_native_module_arity(vm, native, argc, &status)) return status;
         return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): wrong number of arguments (%d given)",
                                native->name->data, argc);
     }

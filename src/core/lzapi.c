@@ -7,6 +7,7 @@
 #include "lizard/error.h"
 #include "lizard/function.h"
 #include "lizard/link.h"
+#include "lizard/lexer.h"
 #include "lizard/module.h"
 #include "lizard/native.h"
 #include "lizard/native_module.h"
@@ -16,6 +17,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+LznLiteralReader lz_native_literals;
 
 #define HANDLES_MAX 65536
 #define PARAMS_MAX 32
@@ -54,6 +57,9 @@ typedef struct FnInfo {
     int min_args;
     int max_args;
     bool is_method;
+    char *names[PARAMS_MAX];
+    int fixed_count;
+    LzValue defaults[PARAMS_MAX];
 } FnInfo;
 
 struct ClassInfo {
@@ -210,6 +216,12 @@ static void handles_release(LznCtx *ctx) {
 /* ---- calling a native function --------------------------------------------------------------- */
 
 static LzStatus run_fn(LzVM *vm, const FnInfo *fn, int argc, const LzValue *argv, void *self_data, LzValue *result) {
+    LzValue filled[ARGS_MAX];
+    if (argc < fn->fixed_count) {
+        for (int i = 0; i < fn->fixed_count; i++) filled[i] = i < argc ? argv[i] : fn->defaults[i];
+        argv = filled;
+        argc = fn->fixed_count;
+    }
     LznState *st = state_get(vm);
     if (st == NULL) {
         return lz_vm_out_of_memory(vm);
@@ -246,6 +258,19 @@ static LzStatus run_fn(LzVM *vm, const FnInfo *fn, int argc, const LzValue *argv
     return out;
 }
 
+static LzStatus native_arity_error(LzVM *vm, const FnInfo *fn, int given) {
+    if (fn->max_args < 0) {
+        return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): expected at least %d argument%s, got %d",
+                               fn->shown, fn->min_args, fn->min_args == 1 ? "" : "s", given);
+    }
+    if (fn->min_args == fn->max_args) {
+        return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): expected %d argument%s, got %d",
+                               fn->shown, fn->min_args, fn->min_args == 1 ? "" : "s", given);
+    }
+    return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): expected %d to %d arguments, got %d",
+                           fn->shown, fn->min_args, fn->max_args, given);
+}
+
 static LzStatus trampoline(LzVM *vm, int argc, const LzValue *argv, LzValue *result) {
     const FnInfo *fn = (const FnInfo *)vm->current_native->data;
     if (!fn->is_method) {
@@ -254,7 +279,7 @@ static LzStatus trampoline(LzVM *vm, int argc, const LzValue *argv, LzValue *res
     /* A method or getter takes self first, so the arity is checked here against what the caller wrote. */
     int written = argc - 1;
     if (written < fn->min_args || (fn->max_args >= 0 && written > fn->max_args)) {
-        return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): wrong number of arguments (%d given)", fn->shown, written);
+        return native_arity_error(vm, fn, written);
     }
     const LzValue *self = &argv[0];
     if (!lz_value_is_instance(self) || lz_value_as_instance(self)->cls != fn->cls->cls) {
@@ -266,6 +291,13 @@ static LzStatus trampoline(LzVM *vm, int argc, const LzValue *argv, LzValue *res
     }
     void *data = lz_native_instance_data(lz_value_as_instance(self));
     return run_fn(vm, fn, written, argv + 1, data, result);
+}
+
+bool lz_native_module_arity(LzVM *vm, const LzNative *native, int argc, LzStatus *status) {
+    if (native->fn != trampoline) return false;
+    const FnInfo *fn = native->data;
+    *status = native_arity_error(vm, fn, argc - (fn->is_method ? 1 : 0));
+    return true;
 }
 
 /* ---- instance data -------------------------------------------------------------------------- */
@@ -334,11 +366,11 @@ LzStatus lz_native_class_construct(LzVM *vm, LzClass *cls, size_t positional, co
     if (named_count > 0) {
         return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): native classes do not take named arguments", cls->name->data);
     }
-    int min = info->def.init != NULL ? info->def.init_min_args : 0;
-    int max = info->def.init != NULL ? info->def.init_max_args : 0;
+    int min = info->def.init != NULL ? info->init->min_args : 0;
+    int max = info->def.init != NULL ? info->init->max_args : 0;
     if ((int)positional < min || (max >= 0 && (int)positional > max)) {
-        return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): wrong number of arguments (%zu given)", cls->name->data,
-                               positional);
+        if (info->init != NULL) return native_arity_error(vm, info->init, (int)positional);
+        return lz_vm_set_error(vm, LZ_ERR_ARITY, "%s(): expected 0 arguments, got %zu", cls->name->data, positional);
     }
     if (state_get(vm) == NULL) {
         return lz_vm_out_of_memory(vm);
@@ -724,10 +756,18 @@ LznStatus lzn_throw(LznCtx *ctx, LznErrId kind, const char *fmt, ...) {
 }
 
 static LznStatus expected(LznCtx *ctx, int index, const char *want) {
-    const char *got = index < ctx->argc ? lz_value_kind_name(&ctx->st->handles[ctx->base + (size_t)index].v) : "nothing";
-    LznStatus status = ctx_error(ctx, LZ_ERR_TYPE, LZ_ERROR_TYPE, "%s(): expected %s, got %s", ctx->fn->shown, want, got);
-    lz_vm_set_note(ctx->vm, "this is argument %d", index + 1);
-    return status;
+    const LzValue *value = index >= 0 && index < ctx->argc ? &ctx->st->handles[ctx->base + (size_t)index].v : NULL;
+    const char *got = value != NULL ? lz_value_kind_name(value) : "nothing";
+    char shown[128];
+    if (value != NULL && (value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_STRING)) {
+        LzString *string = (LzString *)value->as.object;
+        (void)snprintf(shown, sizeof shown, "\"%.*s\"", (int)string->length, string->data);
+        got = shown;
+    }
+    int slot = index < ctx->fn->fixed_count ? index : ctx->fn->fixed_count;
+    const char *name = slot >= 0 && slot < PARAMS_MAX ? ctx->fn->names[slot] : NULL;
+    return ctx_error(ctx, LZ_ERR_TYPE, LZ_ERROR_TYPE, "argument '%s' of %s() expects %s, got %s",
+                     name != NULL ? name : "argument", ctx->fn->shown, want, got);
 }
 
 static const LzValue *arg_value(LznCtx *ctx, int index) {
@@ -976,6 +1016,8 @@ typedef struct Parsed {
     char *names[PARAMS_MAX];
     char *types[PARAMS_MAX];
     size_t count;
+    char *defaults[PARAMS_MAX];
+    bool rest[PARAMS_MAX];
     char *result;
 } Parsed;
 
@@ -983,6 +1025,7 @@ static void parsed_free(Parsed *p) {
     for (size_t i = 0; i < p->count; i++) {
         free(p->names[i]);
         free(p->types[i]);
+        free(p->defaults[i]);
     }
     free(p->result);
     memset(p, 0, sizeof *p);
@@ -1018,19 +1061,62 @@ static bool parsed_add(Parsed *p, const char *start, const char *end, char *err,
         (void)snprintf(err, err_size, "empty parameter type");
         return false;
     }
+    if (p->count > 0 && p->rest[p->count - 1]) {
+        free(text);
+        (void)snprintf(err, err_size, "the rest parameter must be the last one");
+        return false;
+    }
+    bool rest = text[0] == '*';
+    if (rest) memmove(text, text + 1, strlen(text));
+    char *equal = strchr(text, '=');
+    char *fallback = NULL;
+    if (equal != NULL) {
+        *equal = '\0';
+        fallback = trimmed(equal + 1, equal + 1 + strlen(equal + 1));
+        if (fallback == NULL) {
+            free(text);
+            (void)snprintf(err, err_size, "out of memory");
+            return false;
+        }
+        LzSource source;
+        lz_source_from_string(&source, "<native signature>", fallback);
+        LzLexer lexer;
+        lz_native_literals.init(&lexer, &source);
+        LzToken token = lz_native_literals.next(&lexer);
+        bool signed_literal = token.type == LZ_TOKEN_MINUS || token.type == LZ_TOKEN_PLUS;
+        if (signed_literal) token = lz_native_literals.next(&lexer);
+        bool literal = token.type == LZ_TOKEN_INTEGER || token.type == LZ_TOKEN_FLOAT ||
+                       token.type == LZ_TOKEN_NIL || token.type == LZ_TOKEN_TRUE || token.type == LZ_TOKEN_FALSE ||
+                       (token.type == LZ_TOKEN_STRING && !token.value.string.is_template);
+        if (signed_literal && token.type != LZ_TOKEN_INTEGER && token.type != LZ_TOKEN_FLOAT) literal = false;
+        LzToken tail = lz_native_literals.next(&lexer);
+        if (tail.type == LZ_TOKEN_NEWLINE) tail = lz_native_literals.next(&lexer);
+        if (rest || !literal || tail.type != LZ_TOKEN_EOF) {
+            free(fallback);
+            free(text);
+            (void)snprintf(err, err_size, rest ? "a rest parameter cannot have a default" : "a parameter default must be a literal");
+            return false;
+        }
+    } else if (!rest && p->count > 0 && p->defaults[p->count - 1] != NULL) {
+        free(text);
+        (void)snprintf(err, err_size, "a parameter without a default cannot follow one with a default");
+        return false;
+    }
     const char *p0 = text;
     while (*p0 == '_' || (*p0 >= 'a' && *p0 <= 'z') || (*p0 >= 'A' && *p0 <= 'Z') || (*p0 >= '0' && *p0 <= '9')) {
         p0++;
     }
     char name[16];
-    (void)snprintf(name, sizeof name, "arg%zu", p->count);
+    (void)snprintf(name, sizeof name, "arg%zu", p->count + 1);
     const char *type = text;
     char *owned_name = NULL;
-    if (p0 != text && *p0 == ':') {
-        owned_name = malloc((size_t)(p0 - text) + 1);
+    const char *name_end = p0;
+    while (*p0 == ' ' || *p0 == '\t') p0++;
+    if (name_end != text && *p0 == ':') {
+        owned_name = malloc((size_t)(name_end - text) + 1);
         if (owned_name != NULL) {
-            memcpy(owned_name, text, (size_t)(p0 - text));
-            owned_name[p0 - text] = '\0';
+            memcpy(owned_name, text, (size_t)(name_end - text));
+            owned_name[name_end - text] = '\0';
         }
         type = p0 + 1;
         while (*type == ' ' || *type == '\t') {
@@ -1041,11 +1127,23 @@ static bool parsed_add(Parsed *p, const char *start, const char *end, char *err,
     p->types[p->count] = dup_text(type);
     free(text);
     if (p->names[p->count] == NULL || p->types[p->count] == NULL || p->types[p->count][0] == '\0') {
+        free(fallback);
         free(p->names[p->count]);
         free(p->types[p->count]);
         (void)snprintf(err, err_size, "empty parameter type");
         return false;
     }
+    for (size_t i = 0; i < p->count; i++) {
+        if (strcmp(p->names[i], p->names[p->count]) == 0) {
+            (void)snprintf(err, err_size, "duplicate parameter name '%s'", p->names[p->count]);
+            free(fallback);
+            free(p->names[p->count]);
+            free(p->types[p->count]);
+            return false;
+        }
+    }
+    p->defaults[p->count] = fallback;
+    p->rest[p->count] = rest;
     p->count++;
     return true;
 }
@@ -1077,6 +1175,17 @@ static bool sig_parse(const char *text, Parsed *out, char *err, size_t err_size)
     const char *start = p;
     int depth = 0;
     for (;; p++) {
+        if (*p == '\'' || *p == '"' || (*p == 'r' && (p[1] == '\'' || p[1] == '"'))) {
+            LzSource source;
+            lz_source_from_string(&source, "<native signature>", p);
+            LzLexer lexer;
+            lz_native_literals.init(&lexer, &source);
+            LzToken token = lz_native_literals.next(&lexer);
+            if (token.type == LZ_TOKEN_STRING) {
+                p += token.length - 1;
+                continue;
+            }
+        }
         if (*p == '\0') {
             (void)snprintf(err, err_size, "missing ')'");
             parsed_free(out);
@@ -1128,35 +1237,20 @@ static bool sig_parse(const char *text, Parsed *out, char *err, size_t err_size)
 }
 
 /*
- * Reads a signature, checks its arity against the declaration and returns the interface record.
+ * Reads a signature and returns the interface record.
  * The type texts are checked later, once every name of the module is known.
  */
-static LzIfaceSig *sig_make(LznBuilder *b, const char *label, const char *text, int min_args, int max_args,
-                            const char *override_result) {
+static LzIfaceSig *sig_make(LznBuilder *b, const char *label, const char *text, const char *override_result) {
     Parsed parsed;
     char err[160];
     if (!sig_parse(text, &parsed, err, sizeof err)) {
         (void)lzn_builder_fail(b, "invalid signature for '%s' in module '%s': %s", label, b->rec->name, err);
         return NULL;
     }
-    if (min_args < 0 || (max_args >= 0 && max_args < min_args)) {
-        (void)lzn_builder_fail(b, "invalid argument counts for '%s' in module '%s'", label, b->rec->name);
-        parsed_free(&parsed);
-        return NULL;
-    }
-    if ((max_args >= 0 && parsed.count != (size_t)max_args) || (max_args < 0 && parsed.count < (size_t)min_args)) {
-        (void)lzn_builder_fail(b, "signature of '%s' in module '%s' has %zu parameters, but the counts say %d to %d",
-                               label, b->rec->name, parsed.count, min_args, max_args);
-        parsed_free(&parsed);
-        return NULL;
-    }
     LzIfaceSig *sig = lz_iface_sig_new();
     bool ok = sig != NULL;
     for (size_t i = 0; ok && i < parsed.count; i++) {
-        ok = lz_iface_sig_add_param(sig, parsed.names[i], parsed.types[i], i >= (size_t)min_args, false);
-    }
-    if (ok && max_args < 0) {
-        ok = lz_iface_sig_add_param(sig, "rest", "any", false, true);
+        ok = lz_iface_sig_add_param(sig, parsed.names[i], parsed.types[i], parsed.defaults[i] != NULL, parsed.rest[i]);
     }
     const char *result = override_result != NULL ? override_result : parsed.result != NULL ? parsed.result : "nil";
     ok = ok && lz_iface_sig_set_result(sig, result, true);
@@ -1195,8 +1289,7 @@ static LzIfaceSig *sig_make(LznBuilder *b, const char *label, const char *text, 
     return sig;
 }
 
-static FnInfo *fn_make(LznBuilder *b, const char *shown, LznFn fn, ClassInfo *cls, bool is_method, int min_args,
-                       int max_args) {
+static FnInfo *fn_make(LznBuilder *b, const char *shown, LznFn fn, ClassInfo *cls, bool is_method, const char *signature) {
     FnInfo *info = calloc(1, sizeof *info);
     if (info == NULL) {
         (void)lzn_builder_fail(b, "out of memory");
@@ -1207,8 +1300,58 @@ static FnInfo *fn_make(LznBuilder *b, const char *shown, LznFn fn, ClassInfo *cl
     info->module = b->rec;
     info->cls = cls;
     info->is_method = is_method;
-    info->min_args = min_args;
-    info->max_args = max_args;
+    Parsed parsed;
+    char err[160];
+    if (!sig_parse(signature, &parsed, err, sizeof err)) {
+        free(info->shown);
+        free(info);
+        (void)lzn_builder_fail(b, "%s", err);
+        return NULL;
+    }
+    info->max_args = (int)parsed.count;
+    info->fixed_count = (int)parsed.count;
+    for (size_t i = 0; i < parsed.count; i++) {
+        info->names[i] = dup_text(parsed.names[i]);
+        if (parsed.rest[i]) {
+            info->max_args = -1;
+            info->fixed_count--;
+        } else if (parsed.defaults[i] == NULL) {
+            info->min_args++;
+        } else {
+            LzSource source;
+            lz_source_from_string(&source, "<native signature>", parsed.defaults[i]);
+            LzLexer lexer;
+            lz_native_literals.init(&lexer, &source);
+            LzToken token = lz_native_literals.next(&lexer);
+            bool negative = token.type == LZ_TOKEN_MINUS;
+            if (negative || token.type == LZ_TOKEN_PLUS) token = lz_native_literals.next(&lexer);
+            LzValue value = lz_value_nil();
+            if (token.type == LZ_TOKEN_INTEGER) value = lz_value_int(negative ? (int64_t)(0 - (uint64_t)token.value.integer) : token.value.integer);
+            if (token.type == LZ_TOKEN_FLOAT) value = lz_value_float(negative ? -token.value.number : token.value.number);
+            if (token.type == LZ_TOKEN_TRUE || token.type == LZ_TOKEN_FALSE) value = lz_value_bool(token.type == LZ_TOKEN_TRUE);
+            if (token.type == LZ_TOKEN_STRING) {
+                LzBuffer buffer = {0};
+                bool decoded = lz_native_literals.string(&source, &token, &buffer);
+                LzString *string = decoded ? lz_vm_intern(b->vm, buffer.data != NULL ? buffer.data : "", buffer.length) : NULL;
+                lz_buffer_free(&buffer);
+                if (string == NULL) {
+                    parsed_free(&parsed);
+                    for (size_t j = 0; j <= i; j++) {
+                        free(info->names[j]);
+                        lz_value_release(&b->vm->heap, &info->defaults[j]);
+                    }
+                    free(info->shown);
+                    free(info);
+                    (void)lzn_builder_fail(b, "out of memory");
+                    return NULL;
+                }
+                value = lz_value_object(&string->base);
+                lz_value_retain(&value);
+            }
+            info->defaults[i] = value;
+        }
+    }
+    parsed_free(&parsed);
     info->next = b->rec->fns;
     b->rec->fns = info;
     if (info->shown == NULL) {
@@ -1230,22 +1373,21 @@ static LzNative *native_make(LznBuilder *b, FnInfo *info, int min_args, int max_
     return native;
 }
 
-LznStatus lzn_module_fn(LznBuilder *b, const char *name, LznFn fn, const char *signature, int min_args,
-                        int max_args) {
+LznStatus lzn_module_fn(LznBuilder *b, const char *name, LznFn fn, const char *signature) {
     if (!claim(b, name)) {
         return LZN_FAIL;
     }
     if (fn == NULL) {
         return lzn_builder_fail(b, "function '%s' of module '%s' has no implementation", name, b->rec->name);
     }
-    LzIfaceSig *sig = sig_make(b, name, signature, min_args, max_args, NULL);
+    LzIfaceSig *sig = sig_make(b, name, signature, NULL);
     if (sig == NULL) {
         return LZN_FAIL;
     }
     char shown[160];
     (void)snprintf(shown, sizeof shown, "%s.%s", b->rec->name, name);
-    FnInfo *info = fn_make(b, shown, fn, NULL, false, min_args, max_args);
-    LzNative *native = info != NULL ? native_make(b, info, min_args, max_args < 0 ? LZ_VARIADIC : max_args) : NULL;
+    FnInfo *info = fn_make(b, shown, fn, NULL, false, signature);
+    LzNative *native = info != NULL ? native_make(b, info, info->min_args, info->max_args < 0 ? LZ_VARIADIC : info->max_args) : NULL;
     LzIfaceEntry *entry = native != NULL ? lz_iface_add_entry(b->iface, LZ_IFACE_FN, name) : NULL;
     if (entry == NULL) {
         if (native != NULL) {
@@ -1360,7 +1502,6 @@ LznStatus lzn_module_class(LznBuilder *b, const char *name, const LznClassDef *d
     char shown[160];
     /* the constructor */
     LzIfaceSig *init_sig = sig_make(b, name, def->init_signature != NULL ? def->init_signature : "fn()",
-                                    def->init != NULL ? def->init_min_args : 0, def->init != NULL ? def->init_max_args : 0,
                                     "nil");
     if (init_sig == NULL) {
         lz_object_release(&vm->heap, &cls->base);
@@ -1375,7 +1516,7 @@ LznStatus lzn_module_class(LznBuilder *b, const char *name, const LznClassDef *d
     lz_iface_member_set_sig(init_member, init_sig);
     if (def->init != NULL) {
         (void)snprintf(shown, sizeof shown, "%s.init", name);
-        info->init = fn_make(b, shown, def->init, info, true, def->init_min_args, def->init_max_args);
+        info->init = fn_make(b, shown, def->init, info, true, def->init_signature != NULL ? def->init_signature : "fn()");
         if (info->init == NULL) {
             lz_object_release(&vm->heap, &cls->base);
             return LZN_FAIL;
@@ -1393,9 +1534,9 @@ LznStatus lzn_module_class(LznBuilder *b, const char *name, const LznClassDef *d
             return lzn_builder_fail(b, "class '%s' of module '%s' has a bad or repeated member '%s'", name, b->rec->name,
                                     m->name != NULL ? m->name : "(null)");
         }
-        LzIfaceSig *sig = sig_make(b, m->name, m->signature, m->min_args, m->max_args, NULL);
+        LzIfaceSig *sig = sig_make(b, m->name, m->signature, NULL);
         (void)snprintf(shown, sizeof shown, "%s.%s", name, m->name);
-        FnInfo *minfo = sig != NULL ? fn_make(b, shown, m->fn, info, true, m->min_args, m->max_args) : NULL;
+        FnInfo *minfo = sig != NULL ? fn_make(b, shown, m->fn, info, true, m->signature) : NULL;
         LzNative *native = minfo != NULL ? native_make(b, minfo, 1, LZ_VARIADIC) : NULL;
         LzIfaceMember *im = native != NULL ? lz_iface_add_member(entry, LZ_IFACE_MEMBER_METHOD, m->name) : NULL;
         if (im == NULL || mname == NULL || !lz_class_add_member(cls, mname, LZ_MEMBER_METHOD, LZ_VIS_PUB, 0, &member)) {
@@ -1423,9 +1564,9 @@ LznStatus lzn_module_class(LznBuilder *b, const char *name, const LznClassDef *d
         }
         char signature[200];
         (void)snprintf(signature, sizeof signature, "fn() -> %s", f->type);
-        LzIfaceSig *sig = sig_make(b, f->name, signature, 0, 0, NULL);
+        LzIfaceSig *sig = sig_make(b, f->name, signature, NULL);
         (void)snprintf(shown, sizeof shown, "%s.%s", name, f->name);
-        FnInfo *finfo = sig != NULL ? fn_make(b, shown, f->get, info, true, 0, 0) : NULL;
+        FnInfo *finfo = sig != NULL ? fn_make(b, shown, f->get, info, true, signature) : NULL;
         LzNative *native = finfo != NULL ? native_make(b, finfo, 1, LZ_VARIADIC) : NULL;
         LzIfaceMember *im = native != NULL ? lz_iface_add_member(entry, LZ_IFACE_MEMBER_GETTER, f->name) : NULL;
         if (im == NULL || fname == NULL || !lz_class_add_member(cls, fname, LZ_MEMBER_GETTER, LZ_VIS_PUB, 0, &member)) {
@@ -1614,6 +1755,12 @@ void lz_native_vm_shutdown(LzVM *vm) {
         }
     }
     for (ModuleRec *rec = st->modules; rec != NULL; rec = rec->next) {
+        for (FnInfo *fn = rec->fns; fn != NULL; fn = fn->next) {
+            for (int i = 0; i < fn->fixed_count; i++) {
+                lz_value_release(&vm->heap, &fn->defaults[i]);
+                fn->defaults[i] = lz_value_nil();
+            }
+        }
         if (rec->module != NULL && !rec->linked) {
             if (rec->module->chunk != NULL) {
                 lz_chunk_free(&vm->heap, rec->module->chunk);
@@ -1638,6 +1785,7 @@ void lz_native_vm_free(LzVM *vm) {
         while (rec->fns != NULL) {
             FnInfo *fn = rec->fns;
             rec->fns = fn->next;
+            for (int i = 0; i < PARAMS_MAX; i++) free(fn->names[i]);
             free(fn->shown);
             free(fn);
         }

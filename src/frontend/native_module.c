@@ -51,5 +51,6 @@ static bool check_types(LzVM *vm, const char *const *declared, size_t declared_c
 }
 
 LzStatus lz_vm_register_native_module(LzVM *vm, const char *name, LznInitFn init) {
+    lz_native_literals = (LznLiteralReader){lz_lexer_init, lz_lexer_next, lz_token_string_value};
     return lz_native_module_build(vm, name, init, check_types);
 }

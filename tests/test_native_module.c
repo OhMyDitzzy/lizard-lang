@@ -14,6 +14,7 @@
 #include "lizard/compiler.h"
 #include "lizard/link.h"
 #include "lizard/module.h"
+#include "lizard/native_module.h"
 #include "test_util.h"
 
 typedef struct Src {
@@ -153,7 +154,7 @@ static void test_values(void) {
                "println(n.count_args(), n.count_args(1), n.count_args(1, 2, 3))\n"
                "println(n.strict(1), n.strict(1.5), n.strict(true), n.strict(\"s\"), n.strict(nil))\n"
                "println(n.VERSION, n.HALF, n.NAME, n.ON)\n",
-               "5\n6.0\nhello, lizard\nfalse\nnil\nint float string nil bool array dict\n0 1 3\n1 10 100 1000 0\n"
+               "5\n6.0\nhello, lizard\nfalse\nnil\nint float string nil bool array dict\n3 3 3\n1 10 100 1000 0\n"
                "3 0.5 nmod true\n");
 }
 
@@ -214,11 +215,11 @@ static void test_argument_checks(void) {
                "try {\n    n.greet(k)\n} catch TypeError as e {\n    println(e.message)\n}\n"
                "let two: any = 2\n"
                "try {\n    n.sum(two)\n} catch TypeError as e {\n    println(e.message)\n}\n",
-               "test.nmod.add(): expected int, got string\ntest.nmod.add(): expected int, got float\n4.0\n"
-               "test.nmod.greet(): expected string, got int\ntest.nmod.sum(): expected array, got int\n");
-    run_fails("import test.nmod as n\nlet a: any = []\nlet f: any = n.add\nf(a)\n", LZ_ERR_ARITY, "wrong number of arguments (1 given)");
+               "argument 'b' of test.nmod.add() expects int, got \"x\"\nargument 'a' of test.nmod.add() expects int, got float\n4.0\n"
+               "argument 'name' of test.nmod.greet() expects string, got int\nargument 'values' of test.nmod.sum() expects array, got int\n");
+    run_fails("import test.nmod as n\nlet a: any = []\nlet f: any = n.add\nf(a)\n", LZ_ERR_ARITY, "expected 2 arguments, got 1");
     run_fails("import test.nmod as n\nlet a: any = []\nlet f: any = n.count_args\nf(a, a, a, a)\n", LZ_ERR_ARITY,
-              "wrong number of arguments (4 given)");
+              "expected 0 to 3 arguments, got 4");
     compile_fails("import test.nmod as n\nn.add(1, \"x\")\n", "type mismatch");
     compile_fails("import test.nmod as n\nlet s: string = n.add(1, 2)\n", "int");
     compile_fails("import test.nmod as n\nn.greet(1)\n", "type mismatch");
@@ -260,9 +261,9 @@ static void test_class(void) {
                "println(g(1))\n"
                "println(n.created())\n",
                "6 16 16\n1 1\n11 13\ntrue false Counter\n16 1\n1016 1\n2032\n1017\n3\n");
-    run_fails("import test.nmod as n\nn.Counter(\"x\")\n", LZ_ERR_TYPE, "Counter.init(): expected int, got string");
-    run_fails("import test.nmod as n\nn.Counter(1, 2, 3)\n", LZ_ERR_ARITY, "wrong number of arguments (3 given)");
-    run_fails("import test.nmod as n\nlet c = n.Counter(1)\nc.add(\"x\")\n", LZ_ERR_TYPE, "Counter.add(): expected int, got string");
+    run_fails("import test.nmod as n\nn.Counter(\"x\")\n", LZ_ERR_TYPE, "argument 'value' of Counter.init() expects int, got");
+    run_fails("import test.nmod as n\nn.Counter(1, 2, 3)\n", LZ_ERR_ARITY, "expected 0 to 2 arguments, got 3");
+    run_fails("import test.nmod as n\nlet c = n.Counter(1)\nc.add(\"x\")\n", LZ_ERR_TYPE, "argument 'n' of Counter.add() expects int, got");
     run_fails("import test.nmod as n\nlet c = n.Counter(1)\nlet d = c.copy()\n", LZ_ERR_RUNTIME, "cannot copy an instance of the native class");
     run_fails("import test.nmod as n\nclass Mine : n.Counter {\n}\n", LZ_ERR_RUNTIME, "cannot extend a native class");
 }
@@ -347,6 +348,17 @@ static void test_limits(void) {
     finish(&env, false);
 }
 
+static void test_signature_defaults(void) {
+    Env env;
+    setup(&env, NULL, 0);
+    LZ_CHECK(lz_vm_register_native_module(&env.vm, "test.defaults", defaults_test_init) == LZ_OK);
+    LzStatus status = run_main(&env, "import test.defaults as d\nprintln(d.values(1), d.values(1, 2), d.values(1, 2, 3), d.legacy(4, 5), d.literals())\n");
+    LZ_CHECK(status == LZ_OK);
+    LZ_CHECK(strcmp(out_of(&env), "51 33 6 9 1\n") == 0);
+    lz_native_vm_shutdown(&env.vm);
+    finish(&env, true);
+}
+
 static void test_registration(void) {
     Env env;
     setup(&env, NULL, 0);
@@ -358,9 +370,35 @@ static void test_registration(void) {
     LZ_CHECK(lz_vm_register_native_module(&env.vm, "test.badtype", badtype_init) == LZ_ERR_RUNTIME);
     LZ_CHECK(strstr(env.vm.error, "invalid signature for 'f'") != NULL);
     LZ_CHECK(lz_vm_register_native_module(&env.vm, "test.badcount", badcount_init) == LZ_ERR_RUNTIME);
-    LZ_CHECK(strstr(env.vm.error, "has 2 parameters") != NULL);
+    LZ_CHECK(strstr(env.vm.error, "a parameter without a default cannot follow one with a default") != NULL);
+    LZ_CHECK(lz_vm_register_native_module(&env.vm, "test.duplicate_param", duplicate_param_init) == LZ_ERR_RUNTIME);
+    LZ_CHECK(strstr(env.vm.error, "duplicate parameter name 'a'") != NULL);
     LZ_CHECK(lz_vm_register_native_module(&env.vm, "test.dup", dupname_init) == LZ_ERR_RUNTIME);
     LZ_CHECK(strstr(env.vm.error, "declares 'f' twice") != NULL);
+    const char *invalid[] = {
+        "fn(a: int = 1 + 2)",
+        "fn(a: int = 0, b: int)",
+        "fn(*a: any, *b: any)",
+        "fn(*a: any, b: int)",
+        "fn(a: int, a: int)",
+        "fn(*a: any = nil)",
+        "fn(a: bool = -true)",
+    };
+    const char *reasons[] = {
+        "a parameter default must be a literal",
+        "a parameter without a default cannot follow one with a default",
+        "the rest parameter must be the last one",
+        "the rest parameter must be the last one",
+        "duplicate parameter name 'a'",
+        "a rest parameter cannot have a default",
+        "a parameter default must be a literal",
+    };
+    for (size_t i = 0; i < sizeof invalid / sizeof invalid[0]; i++) {
+        invalid_native_signature = invalid[i];
+        LZ_CHECK(lz_vm_register_native_module(&env.vm, "test.invalid", invalid_native_init) == LZ_ERR_RUNTIME);
+        LZ_CHECK(strstr(env.vm.error, "cannot register native module 'test.invalid':") != NULL);
+        LZ_CHECK(strstr(env.vm.error, reasons[i]) != NULL);
+    }
     finish(&env, true);
 
     /* a failed registration is not an importable module */
@@ -384,6 +422,12 @@ static void test_std_prefix(void) {
 }
 
 int main(void) {
+    run_expect("import test.nmod as n\n"
+               "println(n.rest_args(), n.rest_args(1), n.rest_args(1, 2, 3))\n"
+               "println(n.mixed_args(), n.mixed_args(1), n.mixed_args(1, 2, 3))\n"
+               "println(n.count_args(1), n.count_args(1, 2), n.count_args(1, 2, 3))\n",
+               "0 1 3\n1 1 3\n3 3 3\n");
+    test_signature_defaults();
     test_values();
     test_arrays_and_dicts();
     test_errors();

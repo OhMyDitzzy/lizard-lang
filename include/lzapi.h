@@ -142,7 +142,7 @@ void lzn_unref(LznRef *ref);                   /* NULL is fine */
 LznStatus lzn_throw(LznCtx *ctx, LznErrId kind, const char *fmt, ...) LZN_PRINTF(3, 4);
 
 /*
- * Each one sets "name.fn(): expected int, got string" and returns LZN_FAIL when argument `index`
+ * Each one reports the parameter name and expected type and returns LZN_FAIL when argument `index`
  * is of another kind, else LZN_OK and the value in *out. The _opt forms accept nil or a missing
  * argument and leave *out as it was.
  */
@@ -175,13 +175,14 @@ LznStatus lzn_spend(LznCtx *ctx, uint64_t units);
 /* ---- declaring a module ---------------------------------------------------------------------- */
 
 /*
- * `signature` is Lizard's own text for a function type, like "fn(int, int) -> int" or
- * "fn(string) -> string?". Names of the module's own classes and errors can appear in it. A
- * signature that does not parse fails the registration of the module. min_args and max_args count
- * the arguments the caller writes, and the VM checks them. max_args of -1 means any number.
+ * The signature determines argument names, types, defaults and arity, for example
+ * "fn(a: int, b: int = 0) -> int" or "fn(*rest: any)". Defaults must be literals.
+ * The VM fills omitted defaults before calling native code. lzn_arg_count includes
+ * every fixed parameter and each supplied rest argument. Methods omit self.
+ * Unnamed parameter types remain accepted with names arg1, arg2 and so on.
+ * Invalid signatures fail module registration.
  */
-LznStatus lzn_module_fn(LznBuilder *b, const char *name, LznFn fn, const char *signature, int min_args,
-                        int max_args);
+LznStatus lzn_module_fn(LznBuilder *b, const char *name, LznFn fn, const char *signature);
 LznStatus lzn_module_const_int(LznBuilder *b, const char *name, int64_t value);
 LznStatus lzn_module_const_float(LznBuilder *b, const char *name, double value);
 LznStatus lzn_module_const_bool(LznBuilder *b, const char *name, bool value);
@@ -194,8 +195,6 @@ typedef struct LznMethodDef {
     const char *name;
     LznFn fn;
     const char *signature; /* as for lzn_module_fn, without self */
-    int min_args;
-    int max_args;
 } LznMethodDef;
 
 typedef struct LznFieldDef {
@@ -207,9 +206,7 @@ typedef struct LznFieldDef {
 typedef struct LznClassDef {
     size_t size;                          /* bytes of opaque data in every instance */
     LznFn init;                           /* the constructor, may be NULL */
-    const char *init_signature;           /* "fn(int) -> nil" style, used for the constructor's arguments */
-    int init_min_args;
-    int init_max_args;
+    const char *init_signature;           /* for example "fn(start: int = 0)", without a result */
     void (*finalize)(void *data);         /* once per instance, may be NULL */
     const LznMethodDef *methods;          /* ended by an entry with name NULL, or NULL */
     const LznFieldDef *fields;            /* read-only fields, ended by name NULL, or NULL */

@@ -7,9 +7,18 @@
  */
 
 #include "lizard/class.h"
+#include "lizard/native.h"
 #include "lizard/module.h"
 #include "lizard/vm.h"
 #include "lzapi.h"
+#include "lizard/lexer.h"
+
+typedef struct LznLiteralReader {
+    void (*init)(LzLexer *, const LzSource *);
+    LzToken (*next)(LzLexer *);
+    bool (*string)(const LzSource *, const LzToken *, LzBuffer *);
+} LznLiteralReader;
+extern LznLiteralReader lz_native_literals;
 
 struct LznState;
 
@@ -29,6 +38,8 @@ LzModule *lz_native_module_find(LzVM *vm, const char *name, bool *known);
 /* Called from lz_vm_free. */
 void lz_native_vm_shutdown(LzVM *vm); /* finalizers, then lasting references, before the heap goes */
 void lz_native_vm_free(LzVM *vm);     /* after the modules are freed */
+
+bool lz_native_module_arity(LzVM *vm, const LzNative *native, int argc, LzStatus *status);
 
 /* Native classes: hooks for class.c. */
 size_t lz_native_instance_extra(const LzClass *cls);

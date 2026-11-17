@@ -326,7 +326,7 @@ static void counter_finalize(void *data) {
 static LznStatus counter_add(LznCtx *ctx) {
     CounterData *d = lzn_self_data(ctx);
     int64_t n = d->step;
-    if (lzn_arg_count(ctx) > 0 && lzn_check_int(ctx, 0, &n) != LZN_OK) {
+    if (lzn_kind(ctx, lzn_arg(ctx, 0)) != LZN_NIL && lzn_check_int(ctx, 0, &n) != LZN_OK) {
         return LZN_FAIL;
     }
     d->value += n;
@@ -363,10 +363,10 @@ static LznStatus counter_apply_to(LznCtx *ctx) {
 }
 
 static const LznMethodDef counter_methods[] = {
-    {"add", counter_add, "fn(n: int) -> int", 0, 1},
-    {"merge", counter_merge, "fn(other: Counter) -> Counter", 1, 1},
-    {"apply_to", counter_apply_to, "fn(f: fn(int) -> int) -> int", 1, 1},
-    {NULL, NULL, NULL, 0, 0},
+    {"add", counter_add, "fn(n: int? = nil) -> int"},
+    {"merge", counter_merge, "fn(other: Counter) -> Counter"},
+    {"apply_to", counter_apply_to, "fn(f: fn(int) -> int) -> int"},
+    {NULL, NULL, NULL},
 };
 
 static const LznFieldDef counter_fields[] = {
@@ -387,9 +387,7 @@ LznStatus nmod_init(LznBuilder *b) {
     LznClassDef counter = {
         .size = sizeof(CounterData),
         .init = counter_init,
-        .init_signature = "fn(value: int, step: int)",
-        .init_min_args = 0,
-        .init_max_args = 2,
+        .init_signature = "fn(value: int = 0, step: int = 1)",
         .finalize = counter_finalize,
         .methods = counter_methods,
         .fields = counter_fields,
@@ -405,36 +403,37 @@ LznStatus nmod_init(LznBuilder *b) {
         const char *name;
         LznFn fn;
         const char *sig;
-        int min, max;
     } fns[] = {
-        {"add", nm_add, "fn(int, int) -> int", 2, 2},
-        {"scale", nm_scale, "fn(x: float, k: int) -> float", 2, 2},
-        {"greet", nm_greet, "fn(string) -> string", 1, 1},
-        {"flip", nm_flip, "fn(bool) -> bool", 1, 1},
-        {"kind", nm_kind, "fn(any) -> string", 1, 1},
-        {"nothing", nm_nothing, "fn()", 0, 0},
-        {"count_args", nm_count_args, "fn(a: any, b: any, c: any) -> int", 0, 3},
-        {"strict", nm_strict, "fn(any) -> int", 1, 1},
-        {"sum", nm_sum, "fn(int[]) -> int", 1, 1},
-        {"range", nm_range, "fn(int) -> int[]", 1, 1},
-        {"poke", nm_poke, "fn(int[], int, int)", 3, 3},
-        {"make_dict", nm_make_dict, "fn(string, int) -> any", 2, 2},
-        {"dict_info", nm_dict_info, "fn(any) -> int", 1, 1},
-        {"fail", nm_fail, "fn(int)", 1, 1},
-        {"apply", nm_apply, "fn(fn(int) -> int, int) -> int", 2, 2},
-        {"store", nm_store, "fn(fn(int) -> int)", 1, 1},
-        {"fire", nm_fire, "fn(int) -> int", 1, 1},
-        {"clear", nm_clear, "fn()", 0, 0},
-        {"keep", nm_keep, "fn(any)", 1, 1},
-        {"remember_handle", nm_remember_handle, "fn()", 0, 0},
-        {"use_handle", nm_use_handle, "fn() -> int", 0, 0},
-        {"spin", nm_spin, "fn(int) -> int", 1, 1},
-        {"alloc", nm_alloc, "fn(int) -> int", 1, 1},
-        {"finalized", nm_finalized, "fn() -> int", 0, 0},
-        {"created", nm_created, "fn() -> int", 0, 0},
+        {"add", nm_add, "fn(a: int, b: int) -> int"},
+        {"scale", nm_scale, "fn(x: float, k: int) -> float"},
+        {"greet", nm_greet, "fn(name: string) -> string"},
+        {"flip", nm_flip, "fn(value: bool) -> bool"},
+        {"kind", nm_kind, "fn(value: any) -> string"},
+        {"nothing", nm_nothing, "fn()"},
+        {"rest_args", nm_count_args, "fn(*rest: any) -> int"},
+        {"mixed_args", nm_count_args, "fn(a: int = 7, *rest: any) -> int"},
+        {"count_args", nm_count_args, "fn(a: any = nil, b: any = nil, c: any = nil) -> int"},
+        {"strict", nm_strict, "fn(value: any) -> int"},
+        {"sum", nm_sum, "fn(values: int[]) -> int"},
+        {"range", nm_range, "fn(n: int) -> int[]"},
+        {"poke", nm_poke, "fn(values: int[], index: int, value: int)"},
+        {"make_dict", nm_make_dict, "fn(key: string, value: int) -> any"},
+        {"dict_info", nm_dict_info, "fn(value: any) -> int"},
+        {"fail", nm_fail, "fn(value: int)"},
+        {"apply", nm_apply, "fn(f: fn(int) -> int, value: int) -> int"},
+        {"store", nm_store, "fn(f: fn(int) -> int)"},
+        {"fire", nm_fire, "fn(value: int) -> int"},
+        {"clear", nm_clear, "fn()"},
+        {"keep", nm_keep, "fn(value: any)"},
+        {"remember_handle", nm_remember_handle, "fn()"},
+        {"use_handle", nm_use_handle, "fn() -> int"},
+        {"spin", nm_spin, "fn(value: int) -> int"},
+        {"alloc", nm_alloc, "fn(value: int) -> int"},
+        {"finalized", nm_finalized, "fn() -> int"},
+        {"created", nm_created, "fn() -> int"},
     };
     for (size_t i = 0; i < sizeof fns / sizeof fns[0]; i++) {
-        if (lzn_module_fn(b, fns[i].name, fns[i].fn, fns[i].sig, fns[i].min, fns[i].max) != LZN_OK) {
+        if (lzn_module_fn(b, fns[i].name, fns[i].fn, fns[i].sig) != LZN_OK) {
             return LZN_FAIL;
         }
     }
@@ -470,22 +469,22 @@ int nmod_finalized(void) {
 
 LznStatus badsig_init(LznBuilder *b);
 LznStatus badsig_init(LznBuilder *b) {
-    return lzn_module_fn(b, "f", nm_nothing, "fn(int", 1, 1);
+    return lzn_module_fn(b, "f", nm_nothing, "fn(int");
 }
 
 LznStatus badtype_init(LznBuilder *b);
 LznStatus badtype_init(LznBuilder *b) {
-    return lzn_module_fn(b, "f", nm_add, "fn(int[, int) -> int", 2, 2);
+    return lzn_module_fn(b, "f", nm_add, "fn(int[, int) -> int");
 }
 
 LznStatus badcount_init(LznBuilder *b);
 LznStatus badcount_init(LznBuilder *b) {
-    return lzn_module_fn(b, "f", nm_add, "fn(int, int) -> int", 1, 1);
+    return lzn_module_fn(b, "f", nm_add, "fn(a: int = 0, b: int) -> int");
 }
 
 LznStatus dupname_init(LznBuilder *b);
 LznStatus dupname_init(LznBuilder *b) {
-    if (lzn_module_fn(b, "f", nm_add, "fn(int, int) -> int", 2, 2) != LZN_OK) {
+    if (lzn_module_fn(b, "f", nm_add, "fn(int, int) -> int") != LZN_OK) {
         return LZN_FAIL;
     }
     return lzn_module_const_int(b, "f", 1);
@@ -504,5 +503,44 @@ LznStatus other_init(LznBuilder *b) {
     if (g_err_other < 0) {
         return LZN_FAIL;
     }
-    return lzn_module_fn(b, "fail", other_fail, "fn()", 0, 0);
+    return lzn_module_fn(b, "fail", other_fail, "fn()");
+}
+
+LznStatus duplicate_param_init(LznBuilder *b);
+LznStatus duplicate_param_init(LznBuilder *b) {
+    return lzn_module_fn(b, "f", nm_add, "fn(a: int, a: int) -> int");
+}
+
+static const char *invalid_native_signature;
+LznStatus invalid_native_init(LznBuilder *b);
+LznStatus invalid_native_init(LznBuilder *b) {
+    return lzn_module_fn(b, "f", nm_nothing, invalid_native_signature);
+}
+
+static LznStatus nm_default_values(LznCtx *ctx) {
+    int64_t a, b, c;
+    if (lzn_arg_count(ctx) != 3) return lzn_throw(ctx, LZN_ERR_RUNTIME, "defaults were not filled");
+    if (lzn_check_int(ctx, 0, &a) != LZN_OK || lzn_check_int(ctx, 1, &b) != LZN_OK ||
+        lzn_check_int(ctx, 2, &c) != LZN_OK) return LZN_FAIL;
+    return lzn_return_int(ctx, a + b + c);
+}
+
+static LznStatus nm_literal_values(LznCtx *ctx) {
+    double number;
+    bool flag;
+    const char *text;
+    size_t length;
+    if (lzn_arg_count(ctx) != 5 || lzn_kind(ctx, lzn_arg(ctx, 0)) != LZN_NIL ||
+        lzn_check_bool(ctx, 1, &flag) != LZN_OK || !flag ||
+        lzn_check_float(ctx, 2, &number) != LZN_OK || number != -1.25 ||
+        lzn_check_string(ctx, 3, &text, &length) != LZN_OK || length != 5 || memcmp(text, "a,b)c", 5) != 0 ||
+        lzn_kind(ctx, lzn_arg(ctx, 4)) != LZN_BOOL) return lzn_throw(ctx, LZN_ERR_RUNTIME, "literal defaults differ");
+    return lzn_return_int(ctx, 1);
+}
+
+LznStatus defaults_test_init(LznBuilder *b);
+LznStatus defaults_test_init(LznBuilder *b) {
+    if (lzn_module_fn(b, "values", nm_default_values, "fn(a: int, b: int = 20, c: int = 30) -> int") != LZN_OK) return LZN_FAIL;
+    if (lzn_module_fn(b, "literals", nm_literal_values, "fn(a: any = nil, b: bool = true, c: float = -1.25, d: string = \"a,b)c\", e: bool = false) -> int") != LZN_OK) return LZN_FAIL;
+    return lzn_module_fn(b, "legacy", nm_add, "fn(int, int) -> int");
 }
