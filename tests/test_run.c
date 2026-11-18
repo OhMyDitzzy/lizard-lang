@@ -286,7 +286,7 @@ static void test_arithmetic_errors(void) {
 
     LzChunk wrong_type;
     lz_chunk_init(&wrong_type);
-    emit(&wrong_type, LZ_OP_TRUE, 6);
+    emit(&wrong_type, LZ_OP_NIL, 6);
     emit(&wrong_type, LZ_OP_NEGATE, 6);
     emit(&wrong_type, LZ_OP_RETURN, 6);
     LZ_CHECK(lz_vm_run(&vm, &wrong_type) == LZ_ERR_RUNTIME);

@@ -3337,14 +3337,8 @@ static void error_bitwise(Parser *parser, const LzToken *op, const LzType *left,
         (void)snprintf(message, sizeof message, "operator '%s' needs an int, got %s", symbol, first);
     } else {
         describe_bit_operand(right, second, sizeof second);
-        const char *hint = "";
-        if ((lz_type_widen(left).kinds == LZ_KIND_BOOL || lz_type_widen(right).kinds == LZ_KIND_BOOL)) {
-            hint = op->type == LZ_TOKEN_AMPERSAND ? " (use 'and' for logic)"
-                   : op->type == LZ_TOKEN_PIPE    ? " (use 'or' for logic)"
-                                                  : "";
-        }
-        (void)snprintf(message, sizeof message, "operator '%s' needs two ints, got %s and %s%s",
-                       symbol, first, second, hint);
+        (void)snprintf(message, sizeof message, "operator '%s' needs two ints, got %s and %s",
+                       symbol, first, second);
     }
     error_at(parser, op, message);
 }
@@ -3362,6 +3356,13 @@ static Expr arithmetic_result(Parser *parser, const LzToken *op, const Expr *lef
     return result;
 }
 
+/* Bool participates as int in operators, without changing assignability. */
+static uint16_t operator_number_kinds(const LzType *type) {
+    uint16_t kinds = lz_type_possible_kinds(type);
+    return (uint16_t)((kinds & LZ_KINDS_NUMBER) |
+                      ((kinds & LZ_KIND_BOOL) != 0 ? LZ_KIND_INT : 0));
+}
+
 static Expr unary(Parser *parser) {
     LzToken op = parser->previous;
     if (op.type == LZ_TOKEN_MINUS && check(parser, LZ_TOKEN_INTEGER) &&
@@ -3375,7 +3376,7 @@ static Expr unary(Parser *parser) {
     Expr operand = parse_precedence(parser, PREC_UNARY);
     if (op.type == LZ_TOKEN_TILDE) {
         emit_op_at(parser, LZ_OP_BIT_NOT, op.offset);
-        if ((lz_type_possible_kinds(&operand.type) & LZ_KIND_INT) == 0) {
+        if ((lz_type_possible_kinds(&operand.type) & (LZ_KIND_INT | LZ_KIND_BOOL)) == 0) {
             error_bitwise(parser, &op, &operand.type, NULL);
         }
         return expr_of(lz_type_of_kinds(LZ_KIND_INT));
@@ -3390,7 +3391,7 @@ static Expr unary(Parser *parser) {
         return negated;
     }
 
-    uint16_t numbers = (uint16_t)(lz_type_possible_kinds(&operand.type) & LZ_KINDS_NUMBER);
+    uint16_t numbers = operator_number_kinds(&operand.type);
     if (numbers == 0) {
         /* an object: its class may define the operator, which is looked for when this runs */
         if ((lz_type_possible_kinds(&operand.type) & LZ_KIND_INSTANCE) == 0) {
@@ -4090,7 +4091,8 @@ static Expr arithmetic_result_strict(Parser *parser, const LzToken *op, const Ex
                                      const Expr *right) {
     uint16_t a = lz_type_possible_kinds(&left->type);
     uint16_t b = lz_type_possible_kinds(&right->type);
-    bool numbers = (a & LZ_KINDS_NUMBER) != 0 && (b & LZ_KINDS_NUMBER) != 0;
+    bool numbers = operator_number_kinds(&left->type) != 0 &&
+                   operator_number_kinds(&right->type) != 0;
     bool strings = op->type == LZ_TOKEN_PLUS && (a & LZ_KIND_STRING) != 0 &&
                    (b & LZ_KIND_STRING) != 0;
     bool arrays = op->type == LZ_TOKEN_PLUS && (a & LZ_KIND_ARRAY) != 0 &&
@@ -4105,8 +4107,8 @@ static Expr arithmetic_result_strict(Parser *parser, const LzToken *op, const Ex
 
     uint16_t kinds = 0;
     if (numbers) {
-        uint16_t an = (uint16_t)(a & LZ_KINDS_NUMBER);
-        uint16_t bn = (uint16_t)(b & LZ_KINDS_NUMBER);
+        uint16_t an = operator_number_kinds(&left->type);
+        uint16_t bn = operator_number_kinds(&right->type);
         if (op->type == LZ_TOKEN_SLASH) {
             kinds = LZ_KIND_FLOAT;
         } else if (an == LZ_KIND_INT && bn == LZ_KIND_INT) {
@@ -4176,8 +4178,8 @@ static Expr binary(Parser *parser, Expr left) {
                         : op.type == LZ_TOKEN_LESS_LESS ? LZ_OP_SHL
                                                         : LZ_OP_SHR;
         emit_op_at(parser, code, op.offset);
-        if ((lz_type_possible_kinds(&left.type) & LZ_KIND_INT) == 0 ||
-            (lz_type_possible_kinds(&right.type) & LZ_KIND_INT) == 0) {
+        if ((lz_type_possible_kinds(&left.type) & (LZ_KIND_INT | LZ_KIND_BOOL)) == 0 ||
+            (lz_type_possible_kinds(&right.type) & (LZ_KIND_INT | LZ_KIND_BOOL)) == 0) {
             error_bitwise(parser, &op, &left.type, &right.type);
         }
         return expr_of(lz_type_of_kinds(LZ_KIND_INT));
@@ -4226,7 +4228,8 @@ static Expr binary(Parser *parser, Expr left) {
 
     uint16_t a = lz_type_possible_kinds(&left.type);
     uint16_t b = lz_type_possible_kinds(&right.type);
-    if (((a & LZ_KINDS_NUMBER) == 0 || (b & LZ_KINDS_NUMBER) == 0) && ((a | b) & LZ_KIND_INSTANCE) == 0) {
+    if ((operator_number_kinds(&left.type) == 0 || operator_number_kinds(&right.type) == 0) &&
+        ((a | b) & LZ_KIND_INSTANCE) == 0) {
         error_operator(parser, &op, &left.type, &right.type);
     }
     return expr_of(lz_type_of_kinds(LZ_KIND_BOOL));
@@ -7430,8 +7433,8 @@ static Expr compound_value(Parser *parser, const LzToken *at, const Expr *target
     case LZ_TOKEN_CARET:
     case LZ_TOKEN_LESS_LESS:
     case LZ_TOKEN_GREATER_GREATER:
-        if ((lz_type_possible_kinds(&target->type) & LZ_KIND_INT) == 0 ||
-            (lz_type_possible_kinds(&value->type) & LZ_KIND_INT) == 0) {
+        if ((lz_type_possible_kinds(&target->type) & (LZ_KIND_INT | LZ_KIND_BOOL)) == 0 ||
+            (lz_type_possible_kinds(&value->type) & (LZ_KIND_INT | LZ_KIND_BOOL)) == 0) {
             error_bitwise(parser, &op, &target->type, &value->type);
         }
         return expr_of(lz_type_of_kinds(LZ_KIND_INT));

@@ -7,11 +7,15 @@
 #include <math.h>
 
 static bool is_number(const LzValue *value) {
-    return value->type == LZ_VAL_INT || value->type == LZ_VAL_FLOAT;
+    return value->type == LZ_VAL_INT || value->type == LZ_VAL_FLOAT || value->type == LZ_VAL_BOOL;
+}
+
+static int64_t as_integer(const LzValue *value) {
+    return value->type == LZ_VAL_BOOL ? (int64_t)value->as.boolean : value->as.integer;
 }
 
 static double as_double(const LzValue *value) {
-    return value->type == LZ_VAL_INT ? (double)value->as.integer : value->as.number;
+    return value->type == LZ_VAL_FLOAT ? value->as.number : (double)as_integer(value);
 }
 
 static bool is_string(const LzValue *value) {
@@ -173,15 +177,8 @@ LzStatus lz_arith_bit_type_error(LzVM *vm, LzOpCode op, const LzValue *left, con
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operator '%s' needs an int, got %s", symbol,
                                lz_value_kind_name(left));
     }
-    const char *hint = "";
-    if (left->type == LZ_VAL_BOOL || right->type == LZ_VAL_BOOL) {
-        hint = op == LZ_OP_BIT_AND ? " (use 'and' for logic)"
-               : op == LZ_OP_BIT_OR ? " (use 'or' for logic)"
-                                    : "";
-    }
-    return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operator '%s' needs two ints, got %s and %s%s",
-                           symbol, lz_value_kind_name(left), lz_value_kind_name(right),
-                           hint);
+    return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operator '%s' needs two ints, got %s and %s",
+                           symbol, lz_value_kind_name(left), lz_value_kind_name(right));
 }
 
 LzStatus lz_arith_shift_count_error(LzVM *vm, int64_t count) {
@@ -191,11 +188,12 @@ LzStatus lz_arith_shift_count_error(LzVM *vm, int64_t count) {
 
 static LzStatus bitwise(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right,
                         LzValue *result) {
-    if (left->type != LZ_VAL_INT || right->type != LZ_VAL_INT) {
+    if ((left->type != LZ_VAL_INT && left->type != LZ_VAL_BOOL) ||
+        (right->type != LZ_VAL_INT && right->type != LZ_VAL_BOOL)) {
         return lz_arith_bit_type_error(vm, op, left, right);
     }
-    int64_t a = left->as.integer;
-    int64_t b = right->as.integer;
+    int64_t a = as_integer(left);
+    int64_t b = as_integer(right);
     switch (op) {
     case LZ_OP_BIT_AND:
         *result = lz_value_int(a & b);
@@ -219,10 +217,10 @@ static LzStatus bitwise(LzVM *vm, LzOpCode op, const LzValue *left, const LzValu
 }
 
 LzStatus lz_arith_bit_not(LzVM *vm, const LzValue *operand, LzValue *result) {
-    if (operand->type != LZ_VAL_INT) {
+    if (operand->type != LZ_VAL_INT && operand->type != LZ_VAL_BOOL) {
         return lz_arith_bit_type_error(vm, LZ_OP_BIT_NOT, operand, NULL);
     }
-    *result = lz_value_int(~operand->as.integer);
+    *result = lz_value_int(~as_integer(operand));
     return LZ_OK;
 }
 
@@ -284,8 +282,8 @@ LzStatus lz_arith_binary(LzVM *vm, LzOpCode op, const LzValue *left, const LzVal
         return LZ_OK;
     }
 
-    if (left->type == LZ_VAL_INT && right->type == LZ_VAL_INT) {
-        return integer_arith(vm, op, left->as.integer, right->as.integer, result);
+    if (left->type != LZ_VAL_FLOAT && right->type != LZ_VAL_FLOAT) {
+        return integer_arith(vm, op, as_integer(left), as_integer(right), result);
     }
     return float_arith(vm, op, as_double(left), as_double(right), result);
 }
@@ -307,6 +305,10 @@ LzStatus lz_arith_negate(LzVM *vm, const LzValue *operand, LzValue *result) {
     }
     if (operand->type == LZ_VAL_FLOAT) {
         *result = lz_value_float(-operand->as.number);
+        return LZ_OK;
+    }
+    if (operand->type == LZ_VAL_BOOL) {
+        *result = lz_value_int(-(int64_t)operand->as.boolean);
         return LZ_OK;
     }
     if (lz_value_is_link(operand)) {

@@ -1,0 +1,2 @@
+let z: any = false
+println(1 / z)

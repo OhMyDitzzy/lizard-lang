@@ -1,0 +1,8 @@
+error: operands must be two numbers or two strings (or two arrays)
+ --> bad_nil.lz:2:14
+  |
+2 | println(true + n)
+  |              ^
+  |
+  = help: a value is nil here; check it first: if x != nil { ... }
+

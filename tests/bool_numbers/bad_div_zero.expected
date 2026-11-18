@@ -1,0 +1,8 @@
+error: division by zero
+ --> bad_div_zero.lz:2:11
+  |
+2 | println(1 / z)
+  |           ^
+  |
+  = help: check the divisor before dividing: if b != 0 { ... }
+

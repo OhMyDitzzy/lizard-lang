@@ -117,4 +117,5 @@ sources_sync tools/check-sync.sh script - @srcdir
 test_typesys test_typesys plain - -
 bench_scripts tests/bench_scripts_check.sh script - @lizard
 modules_cli tests/run-modules.sh script - @lizard
+bool_numbers_cli tests/run-bool-numbers.sh script - @lizard
 native_standalone tests/native/check-standalone.sh script - @srcdir

@@ -1,0 +1,6 @@
+error: range(): expected an int, got bool
+ --> bad_range.lz:1:15
+  |
+1 | for i in range(true, 3) { println(i) }
+  |               ^
+

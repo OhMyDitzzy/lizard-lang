@@ -167,7 +167,8 @@ Because of this, `flags & 4 == 4` means `(flags & 4) == 4` — unlike C, where `
 binds looser than `==`. And `1 + 2 << 3` is `24`, not `16`.
 
 `not`, `equal`, `and`, and `or` are keywords, so they cannot be used as names.
-Bitwise operators work on `int` only and always produce an `int`.
+Bitwise operators work on `int` (and `bool`, as 0 or 1) and always produce an `int`. See
+[Bool in number operations](TYPES.md#bool-in-number-operations).
 
 ## `in`, `not in` and `??`
 

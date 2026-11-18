@@ -4,7 +4,7 @@
 #include "lizard/link.h"
 
 static bool is_number(const LzValue *value) {
-    return value->type == LZ_VAL_INT || value->type == LZ_VAL_FLOAT;
+    return value->type == LZ_VAL_INT || value->type == LZ_VAL_FLOAT || value->type == LZ_VAL_BOOL;
 }
 
 LzStatus lz_compare_order(LzVM *vm, LzOpCode op, const LzValue *left, const LzValue *right,
@@ -23,7 +23,16 @@ LzStatus lz_compare_order(LzVM *vm, LzOpCode op, const LzValue *left, const LzVa
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "operands must be numbers");
     }
 
-    LzOrder order = lz_number_order(left, right);
+    /* Normalize only ordering operands so equality and dict keys stay distinct. */
+    LzValue a = *left;
+    LzValue b = *right;
+    if (a.type == LZ_VAL_BOOL) {
+        a = lz_value_int((int64_t)a.as.boolean);
+    }
+    if (b.type == LZ_VAL_BOOL) {
+        b = lz_value_int((int64_t)b.as.boolean);
+    }
+    LzOrder order = lz_number_order(&a, &b);
     switch (op) {
     case LZ_OP_LESS:
         *result = lz_value_bool(order == LZ_ORDER_LESS);

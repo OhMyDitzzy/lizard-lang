@@ -1,0 +1,3 @@
+let s: any = "a"
+let b: any = true
+println(b + s)

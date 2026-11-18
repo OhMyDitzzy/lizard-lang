@@ -140,8 +140,23 @@ static void test_ordering_operators(void) {
     check_compare(LZ_OP_GREATER_EQUAL, number(2.5), integer(2), true);
     check_compare(LZ_OP_GREATER_EQUAL, number(NAN), number(NAN), false);
 
+    const LzOpCode ops[] = {LZ_OP_LESS, LZ_OP_LESS_EQUAL, LZ_OP_GREATER, LZ_OP_GREATER_EQUAL};
+    const LzValue values[] = {lz_value_bool(false), lz_value_bool(true), integer(2), number(2.5),
+                              integer(INT64_MAX), number(NAN)};
+    for (size_t op = 0; op < sizeof ops / sizeof *ops; op++) {
+        for (size_t i = 0; i < sizeof values / sizeof *values; i++) {
+            for (size_t j = 0; j < sizeof values / sizeof *values; j++) {
+                LzValue a = i < 2 ? integer((int64_t)i) : values[i];
+                LzValue b = j < 2 ? integer((int64_t)j) : values[j];
+                LzValue expected;
+                LZ_CHECK(lz_compare_order(&vm, ops[op], &a, &b, &expected) == LZ_OK);
+                check_compare(ops[op], values[i], values[j], expected.as.boolean);
+            }
+        }
+    }
+
     LzValue result = lz_value_nil();
-    LzValue text = lz_value_bool(true);
+    LzValue text = lz_value_nil();
     LzValue one = integer(1);
     LZ_CHECK(lz_compare_order(&vm, LZ_OP_LESS, &one, &text, &result) == LZ_ERR_RUNTIME);
     LZ_CHECK(strstr(vm.error, "operands must be numbers") != NULL);

@@ -1,0 +1,57 @@
+# A bool is 0 or 1 in number operations, and the result is a plain number.
+println(true + 1, 1 + true, true + true, false + false)
+println(true - 3, 3 - true, true * 7, false * 99, true * 2.5, 2.5 * false)
+println(true // 2, 7 // true, 7 % true, true % 3, true / 2, 3 / true, false / 4)
+println(-true, -false, - -true)
+println(true & 3, 6 | true, true ^ true, true << 3, 8 >> true, ~true, ~false)
+println(true > 0, false < 1, true < 2.5, 0.5 <= false, true >= true, false > true)
+println(true < 2, 1 > true, true <= 1, 1 >= true)
+println(int(true), int(false), float(true), float(false), true.to_int(), false.to_float())
+
+# The result is a number, not a bool.
+println(typeof(true + 1), typeof(true + 1.5), typeof(-true), typeof(true / true))
+
+# Through typed variables, any, and function parameters.
+let flag: bool = true
+let anything: any = false
+fn add_any(x: any, y: any) => x + y
+fn neg(x: bool) => -x
+println(flag + 1, anything + 1, add_any(true, true), add_any(true, 0.5), neg(flag))
+const folded = (true + true) * 3 - ~false
+println(folded)
+
+# Counting conditions.
+let nums = [1, 5, 2, 8, 3, 9, 4]
+let total = 0
+for x in nums {
+  total = total + (x > 3)
+}
+println("above 3:", total)
+let below = 0
+let i = 0
+while i < len(nums) {
+  below += nums[i] <= 3
+  i = i + 1
+}
+println("at most 3:", below)
+
+# A hot loop, long enough for the JIT.
+let hits = 0
+let k = 0
+while k < 5000 {
+  hits = hits + (k % 3 == 0) + (k % 7 == 0) * 2
+  k = k + 1
+}
+println("hits:", hits)
+
+# Callbacks and coroutines.
+println(nums.map(fn(n) => (n > 4) + 10))
+println(nums.filter(fn(n) => (n % 2 == 0) + (n > 3) >= 2))
+println(nums.reduce(fn(acc, n) => acc + (n > 3), 0))
+fn count_above(limit) {
+  let c = 0
+  for n in nums { c = c + (n > limit) }
+  return c * true
+}
+let co = coroutine(fn() => count_above(2))
+println(co.resume())

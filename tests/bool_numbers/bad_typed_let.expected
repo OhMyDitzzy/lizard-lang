@@ -1,0 +1,7 @@
+error: type mismatch: expected int, got true
+ --> bad_typed_let.lz:1:14
+  |
+1 | let n: int = true
+  |              ^^^^
+
+error: aborting due to 1 previous error

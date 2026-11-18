@@ -119,6 +119,7 @@ check_SCRIPTS = \
 	sources_sync \
 	bench_scripts \
 	modules_cli \
+	bool_numbers_cli \
 	native_standalone
 
 TESTS = \
@@ -237,6 +238,7 @@ TESTS = \
 	test_typesys \
 	bench_scripts \
 	modules_cli \
+	bool_numbers_cli \
 	native_standalone
 
 test_memory_SOURCES = tests/test_memory.c
@@ -499,6 +501,8 @@ sources_sync:
 bench_scripts:
 	@$(lz_make_stub)
 modules_cli:
+	@$(lz_make_stub)
+bool_numbers_cli:
 	@$(lz_make_stub)
 native_standalone:
 	@$(lz_make_stub)

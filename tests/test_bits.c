@@ -167,19 +167,18 @@ static void test_types(void) {
     check_compile_error("let x = nil ^ 1\n", "operator '^' needs two ints, got nil and int", 1);
     check_compile_error("let x = [1] << 1\n", "operator '<<' needs two ints, got array and int", 1);
     check_compile_error("let x = 1 >> 2.0\n", "operator '>>' needs two ints, got int and float", 1);
-    check_compile_error("let x = true & false\n", "(use 'and' for logic)", 1);
-    check_compile_error("let x = true | false\n", "(use 'or' for logic)", 1);
+    check_output("let x: int = true & false\nprintln(x)\n", "0\n");
+    check_output("let x: int = true | false\nprintln(x)\n", "1\n");
     check_compile_error("let x = ~1.5\n", "operator '~' needs an int, got float", 1);
     check_compile_error("let x = ~\"s\"\n", "operator '~' needs an int, got string", 1);
-    check_compile_error("let a = 1\nlet x = ~true\n", "operator '~' needs an int, got bool", 2);
+    check_output("let x: int = ~true\nprintln(x)\n", "-2\n");
 
     /* With no static type (any) the same message comes at run time, at the operator's line. */
     check_fails("let a = 1.5\nlet b = 2\nprintln(a & b)\n", LZ_ERR_RUNTIME,
                 "operator '&' needs two ints, got float and int", 3);
     check_fails("let a = \"x\"\nprintln(1 | a)\n", LZ_ERR_RUNTIME,
                 "operator '|' needs two ints, got int and string", 2);
-    check_fails("let a = true\nlet b = false\nprintln(a & b)\n", LZ_ERR_RUNTIME,
-                "operator '&' needs two ints, got bool and bool (use 'and' for logic)", 3);
+    check_output("let a = true\nlet b = false\nprintln(a & b)\n", "0\n");
     check_fails("let a = nil\nprintln(a ^ 1)\n", LZ_ERR_RUNTIME,
                 "operator '^' needs two ints, got nil and int", 2);
     check_fails("let a = [1]\nprintln(a << 1)\n", LZ_ERR_RUNTIME,

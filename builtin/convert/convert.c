@@ -47,6 +47,10 @@ LzStatus lz_builtin_int(LzVM *vm, int argc, const LzValue *argv, LzValue *result
         *result = lz_value_int((int64_t)number);
         return LZ_OK;
     }
+    if (value->type == LZ_VAL_BOOL) {
+        *result = lz_value_int((int64_t)value->as.boolean);
+        return LZ_OK;
+    }
     if (is_string(value)) {
         const LzString *text = (const LzString *)value->as.object;
         int64_t parsed = 0;
@@ -74,6 +78,10 @@ LzStatus lz_builtin_float(LzVM *vm, int argc, const LzValue *argv, LzValue *resu
     }
     if (value->type == LZ_VAL_INT) {
         *result = lz_value_float((double)value->as.integer);
+        return LZ_OK;
+    }
+    if (value->type == LZ_VAL_BOOL) {
+        *result = lz_value_float((double)value->as.boolean);
         return LZ_OK;
     }
     if (is_string(value)) {

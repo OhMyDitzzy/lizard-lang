@@ -76,11 +76,14 @@ static void test_int(void) {
     check_failure("int", lz_value_float(1e30), "out of range");
     check_failure("int", lz_value_float(-9223372036854777856.0), "out of range");
     check_failure("int", lz_value_nil(), "cannot convert nil");
-    check_failure("int", lz_value_bool(true), "cannot convert bool");
+    check_int("int", lz_value_bool(true), 1);
+    check_int("int", lz_value_bool(false), 0);
     check_failure("int", text("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "...") ;
 }
 
 static void test_float(void) {
+    check_float(lz_value_bool(true), 1.0);
+    check_float(lz_value_bool(false), 0.0);
     check_float(lz_value_int(3), 3.0);
     check_float(lz_value_float(2.5), 2.5);
     check_float(text("1.5"), 1.5);

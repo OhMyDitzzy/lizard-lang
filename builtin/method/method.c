@@ -121,7 +121,7 @@ LzStatus lz_method_last(LzVM *vm, int argc, const LzValue *argv, LzValue *result
 
 #define K_TEXT LZ_KIND_STRING
 #define K_NUMBER LZ_KINDS_NUMBER
-#define K_CONVERTIBLE (LZ_KIND_INT | LZ_KIND_FLOAT | LZ_KIND_STRING)
+#define K_CONVERTIBLE (LZ_KIND_BOOL | LZ_KIND_INT | LZ_KIND_FLOAT | LZ_KIND_STRING)
 
 /*
  * Rows of one name must be next to each other: they form one group.

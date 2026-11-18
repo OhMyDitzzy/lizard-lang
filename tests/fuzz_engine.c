@@ -358,7 +358,7 @@ static void gen_stmt(Gen *g, int depth) {
         gen_expr(g, 2);
         emit(g, ")\n");
     } else if (r < 54 && !g->safe) {
-        /* a bool kept in a variable: later arithmetic on it is a run-time type error the compiler cannot see */
+        /* A bool kept in a variable exercises numeric operators through any. */
         emit(g, "%s = ", pick_name(g));
         gen_cond(g, 1);
         emit(g, "\n");

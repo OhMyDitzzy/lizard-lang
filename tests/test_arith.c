@@ -71,7 +71,7 @@ static void test_overflow(void) {
 }
 
 static void test_type_errors(void) {
-    check_error(LZ_OP_ADD, lz_value_bool(true), lz_value_int(1), "two numbers or two strings");
+    check_error(LZ_OP_ADD, lz_value_bool(true), lz_value_nil(), "two numbers or two strings");
     check_error(LZ_OP_SUBTRACT, lz_value_int(1), lz_value_nil(), "operands must be numbers");
     check_error(LZ_OP_DIVIDE, lz_value_nil(), lz_value_nil(), "operands must be numbers");
 }
@@ -170,14 +170,53 @@ static void test_negate(void) {
     LZ_CHECK(strstr(vm.error, "integer overflow") != NULL);
 
     LzValue flag = lz_value_bool(false);
-    LZ_CHECK(lz_arith_negate(&vm, &flag, &result) == LZ_ERR_RUNTIME);
-    LZ_CHECK(strstr(vm.error, "operand must be a number") != NULL);
+    LZ_CHECK(lz_arith_negate(&vm, &flag, &result) == LZ_OK);
+    LZ_CHECK(result.type == LZ_VAL_INT && result.as.integer == 0);
+    flag = lz_value_bool(true);
+    LZ_CHECK(lz_arith_negate(&vm, &flag, &result) == LZ_OK);
+    LZ_CHECK(result.type == LZ_VAL_INT && result.as.integer == -1);
+    LZ_CHECK(lz_arith_bit_not(&vm, &flag, &result) == LZ_OK);
+    LZ_CHECK(result.type == LZ_VAL_INT && result.as.integer == -2);
+}
+
+/* Each bool pairing must follow the existing int rules, including errors. */
+static void test_bool_operators(void) {
+    const LzOpCode ops[] = {LZ_OP_ADD, LZ_OP_SUBTRACT, LZ_OP_MULTIPLY, LZ_OP_DIVIDE,
+                            LZ_OP_FLOOR_DIVIDE, LZ_OP_MODULO, LZ_OP_BIT_AND, LZ_OP_BIT_OR,
+                            LZ_OP_BIT_XOR, LZ_OP_SHL, LZ_OP_SHR};
+    const LzValue values[] = {lz_value_bool(false), lz_value_bool(true), lz_value_int(-3),
+                              lz_value_int(2), lz_value_float(2.5)};
+    for (size_t op = 0; op < sizeof ops / sizeof *ops; op++) {
+        for (size_t i = 0; i < sizeof values / sizeof *values; i++) {
+            for (size_t j = 0; j < sizeof values / sizeof *values; j++) {
+                if (i > 1 && j > 1) {
+                    continue;
+                }
+                LzValue a = i < 2 ? lz_value_int((int64_t)i) : values[i];
+                LzValue b = j < 2 ? lz_value_int((int64_t)j) : values[j];
+                LzValue expected = lz_value_nil();
+                LzValue actual = lz_value_nil();
+                LzStatus status = run_binary(ops[op], a, b, &expected);
+                LzStatus got = run_binary(ops[op], values[i], values[j], &actual);
+                LZ_CHECK(got == status);
+                if (status == LZ_OK) {
+                    LZ_CHECK(actual.type == expected.type);
+                    LZ_CHECK(actual.type == LZ_VAL_FLOAT ? actual.as.number == expected.as.number
+                                                        : actual.as.integer == expected.as.integer);
+                }
+            }
+        }
+    }
+    check_error(LZ_OP_ADD, lz_value_int(INT64_MAX), lz_value_bool(true), "integer overflow");
+    check_error(LZ_OP_SUBTRACT, lz_value_int(INT64_MIN), lz_value_bool(true), "integer overflow");
+    check_error(LZ_OP_SHL, lz_value_bool(true), lz_value_int(64), "shift count");
 }
 
 int main(void) {
     LzBuffer out = {0};
     lz_vm_init(&vm, lz_writer_from_buffer(&out), lz_writer_from_buffer(&out));
 
+    test_bool_operators();
     test_integers();
     test_floats_and_mixing();
     test_division();

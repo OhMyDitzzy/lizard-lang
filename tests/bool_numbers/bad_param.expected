@@ -1,0 +1,7 @@
+error: type mismatch: argument 'x' of f() expects int, got true
+ --> bad_param.lz:2:11
+  |
+2 | println(f(true))
+  |           ^^^^
+
+error: aborting due to 1 previous error

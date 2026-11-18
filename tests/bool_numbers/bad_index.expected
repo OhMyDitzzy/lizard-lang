@@ -1,0 +1,7 @@
+error: an array index must be an int, got true
+ --> bad_index.lz:1:15
+  |
+1 | println([1, 2][true])
+  |               ^
+
+error: aborting due to 1 previous error

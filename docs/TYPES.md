@@ -50,6 +50,67 @@ number fails with a `ValueError` when the text is not a number. Conversions the
 compiler can prove wrong are compile-time errors; conversions through `any` are
 checked when the program runs.
 
+## Bool in number operations
+
+In number operations `true` is 1 and `false` is 0. This is what makes it easy to
+count how many items pass a test:
+
+```lizard
+let nums = [1, 5, 2, 8, 3]
+let total = 0
+for x in nums {
+  total = total + (x > 3)
+}
+println("above 3:", total)
+println(true + 1, true + true, -true, true * 2.5)
+println(int(true), float(false), true < 2)
+```
+
+```text
+above 3: 2
+2 2 -1 2.5
+1 0.0 true
+```
+
+What counts as a number operation:
+
+- `int(b)` and `float(b)`, and the `to_int()` and `to_float()` methods.
+- The arithmetic and bitwise operators `+ - * / // % & | ^ << >>`, and the unary `-` and `~`.
+- The order operators `< <= > >=`.
+
+The result of an arithmetic or bitwise operator is a plain number, never a bool: `int`
+when no operand is a `float`, `float` otherwise. Everything else about the operator is
+the same as for an `int`, including division by zero, overflow, and `/` always giving a
+float.
+
+What stays as it was, on purpose:
+
+- Equality is strict about kinds. `true == 1` is `false` and `true != 1` is `true`.
+  Equality, dict keys, `in` and `identical` have to agree with each other, so `{true: "a", 1: "b"}`
+  has two keys and `true in [1]` is `false`.
+- Static types still tell `bool` from `int`. `let n: int = true` is an error, and
+  `fn f(x: int)` rejects `f(true)`. The type of `true + 1` is `int` (`float` when a float
+  is involved), so `let n: int = true + 1` is fine. A parameter typed `any` takes both.
+- Only the operators above take a bool. An index, a slice bound, or a `range` bound
+  that is a bool is still an error: `[1, 2][true]` fails.
+- `true + "a"` and `true + nil` are still errors.
+- Truth is unchanged: `if x`, `and`, `or` and `not`. `string(true)` is `"true"` and
+  `bool(0)` is `false`.
+
+```lizard fail
+let n: int = true
+```
+
+```text
+error: type mismatch: expected int, got true
+ --> n.lz:1:14
+  |
+1 | let n: int = true
+  |              ^^^^
+
+error: aborting due to 1 previous error
+```
+
 If you store the wrong kind in a typed variable, Lizard stops you:
 
 ```lizard fail

@@ -14,7 +14,7 @@
 
 - [docs/VISION.md](docs/VISION.md) — the design: Simple. Strict. Kind.
 - [docs/SYNTAX.md](docs/SYNTAX.md) — programs, comments, let/const, blocks, operators, precedence
-- [docs/TYPES.md](docs/TYPES.md) — type system: int, float, bool, nil, string, optionals, unions
+- [docs/TYPES.md](docs/TYPES.md) — type system: int, float, bool (0 and 1 in number operations), nil, string, optionals, unions
 - [docs/CONTROL_FLOW.md](docs/CONTROL_FLOW.md) — if, while, for, break, continue
 - [docs/FUNCTIONS.md](docs/FUNCTIONS.md) — functions, parameters, named arguments, closures
 - [docs/COLLECTIONS.md](docs/COLLECTIONS.md) — arrays and dicts

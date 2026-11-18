@@ -38,7 +38,7 @@ Strings, numbers, and arrays each have their own methods, called like
 | For | Methods |
 | --- | --- |
 | every value | `to_string()`, `to_bool()` |
-| int, float, string | `to_int()`, `to_float()` (a string is parsed) |
+| bool, int, float, string | `to_int()`, `to_float()` (a string is parsed, a bool is 1 or 0) |
 | string | `to_upper(), `to_lower()`, `trim()`, `trim_start()`, `trim_end()`, `split(sep)`, `contains(s)`, `starts_with(s)`, `ends_with(s)`, `replace(old, new)`, `repeat(n)`, `index_of(s)`, `chars()`, `slice(from, to)`, `is_empty()` |
 | string | `len()` (besides the ones above) |
 | array | `first()`, `last()` (`nil` when empty), `is_empty()`, `len()`, `push(v)`, `pop()`, `insert(i, v)`, `remove(i)`, `clear()`, `copy()`, `contains(v)`, `index_of(v)`, `reverse()`, `sort()`, `join(sep)`, `sum()`, `min()`, `max()`, `map(f)`, `filter(f)`, `reduce(f, start)`, `each(f)`, `find(f)`, `any(f)`, `all(f)` |

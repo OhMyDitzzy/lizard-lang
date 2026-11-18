@@ -204,7 +204,7 @@ static void test_compound_assignment(void) {
     check_compile_error("let n: int = 1\nn += 0.5\n", "type mismatch: expected int, got float");
     check_compile_error("const k = 1\nk += 1\n", "cannot assign to constant 'k'");
     check_compile_error("push += 1\n", "cannot assign to builtin 'push'");
-    check_compile_error("let b: bool = true\nb &= 1\n", "needs two ints");
+    check_compile_error("let b: bool = true\nb &= 1\n", "type mismatch: expected bool, got int");
     check_compile_error("1 += 2\n", "invalid assignment target");
 }
 
@@ -839,7 +839,7 @@ static void test_static_operator_types(void) {
     check_compile_error("println(1 + \"a\")\n", "operator '+' cannot be applied to 1 and \"a\"");
     check_compile_error("println(-\"x\")\n", "operator '-' cannot be applied to \"x\"");
     check_compile_error("println(nil < 1)\n", "operator '<' cannot be applied to nil and 1");
-    check_compile_error("println(true * 2)\n", "operator '*' cannot be applied");
+    check_compile_error("println(nil * 2)\n", "operator '*' cannot be applied to nil and 2");
     check_compile_error("println(1())\n", "cannot call a value of type 1");
     check_compile_error("let s: string = \"x\"\ns()\n", "cannot call a value of type string");
     check_output("let u: int | string = 1\nprintln(u + 1)\n", "2\n");
@@ -957,7 +957,23 @@ static void test_checks_show_up_in_the_disassembly(void) {
     finish(&program);
 }
 
+static void test_bool_numbers(void) {
+    check_output("fn f(b: bool) -> int => b + true\n"
+                 "fn g(b: bool) -> float => b * 2.5\n"
+                 "fn h(b: bool) -> int => -b\n"
+                 "let n: int = true + true\n"
+                 "let k: int = 3\nk &= true\nk += true\n"
+                 "const folded = (true + true) * 3 - ~false\n"
+                 "println(f(true), g(true), h(true), n, k, folded)\n",
+                 "2 2.5 -1 2 2 7\n");
+    check_compile_error("let n: int = true\n", "type mismatch: expected int, got true");
+    check_compile_error("fn f(x: int) => x\nf(true)\n", "argument 'x' of f() expects int, got true");
+    check_compile_error("println([1, 2][true])\n", "int");
+    check_compile_error("println(true + \"a\")\n", "operator '+' cannot be applied to true and \"a\"");
+}
+
 int main(void) {
+    test_bool_numbers();
     test_annotations_accept_valid_programs();
     test_type_names_do_not_collide_with_variables();
     test_annotation_errors();
