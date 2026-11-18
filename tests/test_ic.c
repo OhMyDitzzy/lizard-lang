@@ -407,7 +407,7 @@ static const char fast_expected[] =
     "error: len(): expected an array or string, got nil\n"
     "error: a link has to be read with .target first, got link\n"
     "P4 P4 7 2.5 nil x\n"
-    "int P 15 2.0 true true\n"
+    "int P 15 2.0 false true\n"
     "error: int(): invalid integer \"zz\"\n"
     "true\n"
     "error: pop(): array is empty\n"

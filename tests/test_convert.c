@@ -131,9 +131,13 @@ static void test_bool(void) {
     LzValue result;
     LZ_CHECK(call("bool", lz_value_nil(), &result) == LZ_OK && !result.as.boolean);
     LZ_CHECK(call("bool", lz_value_bool(false), &result) == LZ_OK && !result.as.boolean);
-    LZ_CHECK(call("bool", lz_value_int(0), &result) == LZ_OK && result.as.boolean);
+    LZ_CHECK(call("bool", lz_value_int(0), &result) == LZ_OK && !result.as.boolean);
+    LZ_CHECK(call("bool", lz_value_int(1), &result) == LZ_OK && result.as.boolean);
+    LZ_CHECK(call("bool", lz_value_int(INT64_MIN), &result) == LZ_OK && result.as.boolean);
     LZ_CHECK(call("bool", text(""), &result) == LZ_OK && result.as.boolean);
-    LZ_CHECK(call("bool", lz_value_float(0.0), &result) == LZ_OK && result.as.boolean);
+    LZ_CHECK(call("bool", lz_value_float(0.0), &result) == LZ_OK && !result.as.boolean);
+    LZ_CHECK(call("bool", lz_value_float(-0.0), &result) == LZ_OK && !result.as.boolean);
+    LZ_CHECK(call("bool", lz_value_float(0.5), &result) == LZ_OK && result.as.boolean);
 }
 
 static void test_result_kinds(void) {

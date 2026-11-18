@@ -75,7 +75,7 @@ LzString *lz_string_concat(LzHeap *heap, const LzString *a, const LzString *b);
 void lz_value_retain(const LzValue *value);
 void lz_value_release(LzHeap *heap, const LzValue *value);
 
-/* Only nil and false are falsy. */
+/* nil, false, the int 0 and the float 0.0 (or -0.0) are falsy. Everything else is truthy, including "" and []. */
 bool lz_value_is_truthy(const LzValue *value);
 
 /*

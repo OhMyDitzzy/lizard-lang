@@ -164,7 +164,7 @@ static void test_values(void) {
     /* Multi-line: a newline after '{' and before '}' is fine. */
     check_output("let a = true\nlet v = if a {\n    1\n} else {\n    2\n}\nprintln(v)\n", "1\n");
     /* A false condition of any falsy value takes the else. */
-    check_output("println(if nil { 1 } else { 2 }, if 0 { 3 } else { 4 })\n", "2 3\n");
+    check_output("println(if nil { 1 } else { 2 }, if 0 { 3 } else { 4 })\n", "2 4\n");
     check_output("println(if [] { 1 } else { 2 }, if \"\" { 3 } else { 4 })\n", "1 3\n");
 }
 

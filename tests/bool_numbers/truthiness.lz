@@ -1,0 +1,53 @@
+# nil, false, 0 and 0.0 are false. Everything else is true, including "" and [].
+println(bool(0), bool(1), bool(-1), bool(0.0), bool(-0.0), bool(0.5), bool(""), bool([]), bool(nil))
+println(not 0, not 1, not 0.0, not -0.0, not "", not nil, not false)
+println(0 or "d", 0 and "d", 1 and "d", 0.0 or 7, nil or 3, 5 or 6, false and 1)
+println(0.to_bool(), 1.to_bool(), 0.0.to_bool(), "".to_bool())
+println(0 ?? 5, 0.0 ?? 5)
+
+# The same through variables, so the compiler cannot fold anything.
+let z: any = 0
+let zf: any = 0.0
+let big: any = -9223372036854775807 - 1
+println(bool(z), bool(zf), bool(big), not z, not zf, not big)
+
+# Conditions in a hot loop, long enough for the JIT to compile them.
+let n = 3000
+let twice = 0
+let zeros = 0
+let nots = 0
+let f = 2.0
+while n {
+  if n % 2 { twice = twice + 1 }
+  if n % 3 == 0 and not (n % 2) { zeros = zeros + 1 }
+  if not (n % 5) { nots = nots + 1 }
+  if f { f = f - 1.0 }
+  n = n - 1
+}
+println(twice, zeros, nots, f, bool(f))
+
+# if, and, or, not, ?? with an int or float in the condition, inside a function.
+fn pick(x) {
+  if x { return "yes" }
+  return "no"
+}
+fn both(a, b) => a and b
+fn either(a, b) => a or b
+println(pick(0), pick(1), pick(0.0), pick(0.25), pick(-0.0), pick(""), pick(nil), pick(false))
+println(both(0, 1), both(2, 3), either(0, 4), either(0, 0.0), either(nil, 0))
+
+# Callbacks and coroutines.
+println([0, 1, 2, 0, 3].filter(fn(x) => x))
+println([0, 1, 0.0, 2.5].map(fn(x) => not x))
+println([0, 0].any(fn(x) => x), [1, 2].all(fn(x) => x), [1, 0].all(fn(x) => x))
+fn first_nonzero(xs) {
+  for x in xs { if x { return x } }
+  return nil
+}
+let co = coroutine(fn() => first_nonzero([0, 0.0, 7, 8]))
+println(co.resume())
+
+# A bool is still 0 or 1 in number operations, and a count of conditions is false when it is 0.
+let hits = 0
+for x in [1, 2, 3] { hits = hits + (x > 5) }
+println(hits, bool(hits), not hits)

@@ -830,6 +830,34 @@ static void emit_constant(Cx *c, uint16_t index) {
     }
 }
 
+/*
+ * Out of line, for a value that is neither nil nor a bool (its type is in eax): an int is falsy
+ * when it is 0 and a float when it is +0.0 or -0.0, so shifting the sign bit out leaves 0. Every
+ * other value is truthy. Taken only after the bool test, so a bool never pays for it.
+ */
+static int number_falsy_stub(Cx *c, int32_t at, int falsy, int truthy) {
+    int l = x_label(X);
+    int not_int = x_label(X);
+    int saved = X->sec;
+    x_section(X, SEC_COLD);
+    x_bind(X, l);
+    alu_ri(X, 0, ALU_CMP, RAX, LZ_VAL_INT);
+    jcc_l(X, CC_NE, not_int);
+    alu_mi(X, 1, ALU_CMP, R14, at + 8, 0);
+    jcc_l(X, CC_E, falsy);
+    jmp_l(X, truthy);
+    x_bind(X, not_int);
+    alu_ri(X, 0, ALU_CMP, RAX, LZ_VAL_FLOAT);
+    jcc_l(X, CC_NE, truthy);
+    mov_rm(X, RCX, R14, at + 8);
+    alu_rr(X, ALU_ADD, RCX, RCX);
+    jcc_l(X, CC_E, falsy);
+    jmp_l(X, truthy);
+    x_section(X, saved);
+    (void)c;
+    return l;
+}
+
 static void emit_truthiness_jump(Cx *c, bool jump_if_true, uint32_t target) {
     int32_t at = 16 * (c->d - 1);
     int l = c->lab[target];
@@ -840,13 +868,13 @@ static void emit_truthiness_jump(Cx *c, bool jump_if_true, uint32_t target) {
     if (jump_if_true) {
         jcc_l(X, CC_E, next); /* nil: falsy */
         alu_ri(X, 0, ALU_CMP, RAX, LZ_VAL_BOOL);
-        jcc_l(X, CC_NE, l);
+        jcc_l(X, CC_NE, number_falsy_stub(c, at, next, l));
         cmp_mi8(X, R14, at + 8, 0);
         jcc_l(X, CC_NE, l);
     } else {
         jcc_l(X, CC_E, l);
         alu_ri(X, 0, ALU_CMP, RAX, LZ_VAL_BOOL);
-        jcc_l(X, CC_NE, next);
+        jcc_l(X, CC_NE, number_falsy_stub(c, at, l, next));
         cmp_mi8(X, R14, at + 8, 0);
         jcc_l(X, CC_E, l);
     }
@@ -865,7 +893,7 @@ static void emit_not(Cx *c) {
     test_rr(X, RAX, RAX);
     jcc_l(X, CC_E, store);
     alu_ri(X, 0, ALU_CMP, RAX, LZ_VAL_BOOL);
-    jcc_l(X, CC_NE, truthy);
+    jcc_l(X, CC_NE, number_falsy_stub(c, at, store, truthy));
     cmp_mi8(X, R14, at + 8, 0);
     jcc_l(X, CC_E, store);
     x_bind(X, truthy);

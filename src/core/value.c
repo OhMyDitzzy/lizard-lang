@@ -415,10 +415,18 @@ void lz_object_finalize(LzHeap *heap, LzObject *object) {
 }
 
 bool lz_value_is_truthy(const LzValue *value) {
-    if (value->type == LZ_VAL_NIL) {
+    switch (value->type) {
+    case LZ_VAL_BOOL:
+        return value->as.boolean;
+    case LZ_VAL_NIL:
         return false;
+    case LZ_VAL_INT:
+        return value->as.integer != 0;
+    case LZ_VAL_FLOAT:
+        return value->as.number != 0.0;
+    default:
+        return true;
     }
-    return value->type != LZ_VAL_BOOL || value->as.boolean;
 }
 
 static LzOrder order_doubles(double a, double b) {

@@ -160,7 +160,7 @@ static void test_number_methods(void) {
 static void test_universal_and_array_methods(void) {
     check_output("println(42.to_string(), 3.5.to_string(), true.to_string(), nil.to_string())\n",
                  "42 3.5 true nil\n");
-    check_output("println([1, \"a\"].to_string(), 0.to_bool(), nil.to_bool())\n", "[1, \"a\"] true false\n");
+    check_output("println([1, \"a\"].to_string(), 0.to_bool(), nil.to_bool())\n", "[1, \"a\"] false false\n");
     check_output("println(5.to_string().len(), 5.to_string() + \"!\")\n", "1 5!\n");
     check_output("println([1, 2].first(), [1, 2].last(), [].first(), [].is_empty(), [1].is_empty())\n",
                  "1 2 nil true false\n");

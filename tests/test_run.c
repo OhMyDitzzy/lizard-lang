@@ -341,7 +341,7 @@ static void test_comparison_program(void) {
     emit(&chunk, LZ_OP_RETURN, 2);
 
     LZ_CHECK(lz_vm_run(&vm, &chunk) == LZ_OK);
-    LZ_CHECK(output_is(&out, "true false true true false true false\n"));
+    LZ_CHECK(output_is(&out, "true false true true true true false\n"));
     LZ_CHECK(vm.stack_count == 0);
 
     teardown(&vm, &chunk, &out, &err);

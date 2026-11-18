@@ -50,6 +50,31 @@ number fails with a `ValueError` when the text is not a number. Conversions the
 compiler can prove wrong are compile-time errors; conversions through `any` are
 checked when the program runs.
 
+## Truth
+
+A condition (`if x`, `while x`, `and`, `or`, `not`, `bool(x)`) is false for `nil`, `false`,
+the int `0` and the float `0.0` (or `-0.0`), and true for every other value. That includes
+`""`, `[]`, `{}`, `NaN` and any non-zero number.
+
+```lizard
+println(bool(0), bool(0.0), bool(1), bool(""), bool([]), bool(nil))
+println(0 or "default", 0 and "other", not 0)
+let left = 3
+while left {
+  left = left - 1
+}
+println(left)
+```
+
+```text
+false false true true true false
+default 0 true
+0
+```
+
+`and` and `or` give back one of their operands, not a bool, so `0 and "other"` is `0`.
+A zero count is false, which is why `if count { ... }` works for "any left".
+
 ## Bool in number operations
 
 In number operations `true` is 1 and `false` is 0. This is what makes it easy to
@@ -94,8 +119,8 @@ What stays as it was, on purpose:
 - Only the operators above take a bool. An index, a slice bound, or a `range` bound
   that is a bool is still an error: `[1, 2][true]` fails.
 - `true + "a"` and `true + nil` are still errors.
-- Truth is unchanged: `if x`, `and`, `or` and `not`. `string(true)` is `"true"` and
-  `bool(0)` is `false`.
+- `string(true)` is `"true"`, and what a bool does in `if`, `and`, `or` and `not` is
+  unchanged.
 
 ```lizard fail
 let n: int = true

@@ -139,7 +139,7 @@ static void test_expressions(void) {
     check_output("println(10 - 4 - 3, 2 * (3 + 4), -5 + 2, - -3)\n", "3 14 -3 3\n");
     check_output("println(7 / 2, 7 // 2, -7 // 2, -7 % 3, 7 % -3)\n", "3.5 3 -4 2 -2\n");
     check_output("println(1 < 2, 2 <= 2, 3 > 4, 4 >= 5, 1 == 1.0, 1 != 2, !nil, !0)\n",
-                 "true true false false true true true false\n");
+                 "true true false false true true true true\n");
     check_output("println(\"a\" + \"b\" + \"c\", \"x\" == \"x\", nil == false)\n", "abc true false\n");
     check_output("println(nil or 5, 1 and 2, false or nil, nil and 1)\n", "5 2 nil nil\n");
     check_output("println(1 < 2 and 2 < 3, 1 > 2 or 2 > 1)\n", "true true\n");
@@ -237,7 +237,7 @@ static void test_control_flow(void) {
     check_output("if false {\n  println(\"a\")\n}\nelse {\n  println(\"b\")\n}\n", "b\n");
     check_output("if true { println(\"yes\") }\nprintln(\"after\")\n", "yes\nafter\n");
     check_output("if nil { println(\"no\") }\nprintln(\"after\")\n", "after\n");
-    check_output("if 0 { println(\"zero is truthy\") }\n", "zero is truthy\n");
+    check_output("if 0 { println(\"zero\") }\nif 1 { println(\"one\") }\nif 0.0 { println(\"zero float\") }\n", "one\n");
 
     check_output("let i = 1\nlet sum = 0\nwhile i <= 10 {\n  sum = sum + i\n  i = i + 1\n}\n"
                  "println(sum)\n",
@@ -474,7 +474,7 @@ static void test_long_boolean_chains(void) {
 
     /* Parsing a chain as a loop must not change which operand is returned. */
     check_output("println(nil or 2 and 3, 1 and nil or 5, 0 and \"s\", nil and 1 or 2 and 3)\n",
-                 "3 5 s 3\n");
+                 "3 5 0 3\n");
     check_output("println(false or false or 4, 1 and 2 and nil and 3, nil or nil or nil)\n",
                  "4 nil nil\n");
 }
@@ -797,7 +797,7 @@ static void test_annotations_accept_valid_programs(void) {
     check_output("const K: int = 1 + 2\nprintln(K)\n", "3\n");
     check_output("let t: string = string(5) + \"!\"\nprintln(t)\n", "5!\n");
     check_output("let n: int = int(\"12\") + 1\nprintln(n)\n", "13\n");
-    check_output("println(float(\"1.5\") * 2, bool(0), int(3.9))\n", "3.0 true 3\n");
+    check_output("println(float(\"1.5\") * 2, bool(0), int(3.9))\n", "3.0 false 3\n");
     check_output("let any_value: any = 1\nany_value = \"s\"\nprintln(any_value)\n", "s\n");
 }
 

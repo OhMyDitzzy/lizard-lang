@@ -43,8 +43,16 @@ static void test_truthiness(void) {
     LZ_CHECK(!lz_value_is_truthy(&nil));
     LZ_CHECK(!lz_value_is_truthy(&no));
     LZ_CHECK(lz_value_is_truthy(&yes));
-    LZ_CHECK(lz_value_is_truthy(&zero));
-    LZ_CHECK(lz_value_is_truthy(&zero_float));
+    LZ_CHECK(!lz_value_is_truthy(&zero));
+    LZ_CHECK(!lz_value_is_truthy(&zero_float));
+    LzValue negative_zero = number(-0.0);
+    LzValue one = integer(1);
+    LzValue half = number(0.5);
+    LzValue min_int = integer(INT64_MIN);
+    LZ_CHECK(!lz_value_is_truthy(&negative_zero));
+    LZ_CHECK(lz_value_is_truthy(&one));
+    LZ_CHECK(lz_value_is_truthy(&half));
+    LZ_CHECK(lz_value_is_truthy(&min_int));
 
     LzString *empty = lz_string_new(&vm.heap, "", 0);
     LzValue empty_value = lz_value_object(&empty->base);

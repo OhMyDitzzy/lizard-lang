@@ -4,6 +4,6 @@ let d = {true: "a", 1: "b", false: "c", 0: "d"}
 println(len(d), d[true], d[1], d[false], d[0])
 println(true in [1, 2], 1 in [true], true in [true])
 println(identical(true, 1), identical(true, true))
-println(string(true), bool(0), bool(1), string(false))
-println(true and 1, 0 or false, not true, not 0)
+println(string(true), bool(1), string(false))
+println(true and 1, nil or false, not true, not nil)
 if true { println("truthy") }

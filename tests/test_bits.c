@@ -142,7 +142,7 @@ static void test_precedence(void) {
     check_output("println(1 | 2 < 4, 8 >> 1 == 4, 1 << 1 < 3)\n", "true true true\n");
     check_output("println(8 >> 1 >> 1, 1 << 1 << 2, 7 ^ 2 ^ 2, 6 - 3 - 1 << 1)\n", "2 8 7 4\n");
     check_output("println(1 |\n 2 &\n 3 <<\n 1)\n", "3\n");
-    check_output("println(1 and 2 | 4, 0 or 3 & 1)\n", "6 0\n");
+    check_output("println(1 and 2 | 4, 0 or 3 & 1)\n", "6 1\n");
 }
 
 static void test_shifts(void) {
@@ -195,7 +195,7 @@ static void test_types(void) {
 
 static void test_other_operators_unaffected(void) {
     check_output("println(true && false, true || false, 1 and 2, nil or 5, 0 && 1, 0 || 3)\n",
-                 "false true 2 5 1 0\n");
+                 "false true 2 5 0 3\n");
     check_output("fn f(x: int | string) {\n    return x\n}\nprintln(f(1), f(\"a\"))\n", "1 a\n");
     check_output("fn g(x: int | nil) => x\nprintln(g(nil), g(2))\n", "nil 2\n");
     check_compile_error("let x: int || string = 1\n", "needs an initial value", 1); /* '||' is not a type union */

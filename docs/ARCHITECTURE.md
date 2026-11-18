@@ -429,7 +429,7 @@ Decided rules, implemented in stages.
 | `/` always produces a float | done |
 | int64 overflow is a runtime error, never a silent wrap | done |
 | Division by zero is a runtime error, for ints and floats | done |
-| Only `nil` and `false` are falsy | done |
+| `nil`, `false`, `0` and `0.0` (also `-0.0`) are falsy, everything else is truthy | done |
 | `1 == 1.0` is true, strings compare by content, other mixed types are unequal | done |
 | `<` and `>` order numbers only; int against float is compared exactly, and anything involving NaN is false | done |
 | `+` on two strings concatenates; there is no implicit conversion (`"a" + 1` is an error) | done |

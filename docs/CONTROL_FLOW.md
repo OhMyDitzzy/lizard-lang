@@ -3,8 +3,10 @@
 A Lizard program runs top to bottom, and control flow is what changes that order.
 `if` chooses between branches, `while` repeats while a condition holds, and `for`
 walks over a collection or a range. `break` leaves a loop early; `continue` skips
-to the next round. Only `nil` and `false` are falsy, so an empty array `[]` and an
-empty dict `{}` are both truthy — a useful detail when you write conditions.
+to the next round. A condition is false for `nil`, `false`, the int `0` and the float `0.0`
+(or `-0.0`), and true for everything else. So `if count { ... }` runs when `count` is
+not zero, while an empty string `""`, an empty array `[]` and an empty dict `{}` are
+all truthy — a useful detail when you write conditions.
 
 `switch` is also control flow; see [Syntax](SYNTAX.md) for the `switch` statement.
 

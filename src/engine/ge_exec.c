@@ -122,11 +122,21 @@ GE_INLINE bool exact_as_double(const LzValue *value) {
             value->as.integer <= GE_TWO_53);
 }
 
+/* Mirrors lz_value_is_truthy. The bool case comes first, since it is the usual condition. */
 GE_INLINE bool is_truthy(const LzValue *value) {
+    if (value->type == LZ_VAL_BOOL) {
+        return value->as.boolean;
+    }
     if (value->type == LZ_VAL_NIL) {
         return false;
     }
-    return value->type != LZ_VAL_BOOL || value->as.boolean;
+    if (value->type == LZ_VAL_INT) {
+        return value->as.integer != 0;
+    }
+    if (value->type == LZ_VAL_FLOAT) {
+        return value->as.number != 0.0;
+    }
+    return true;
 }
 
 GE_INLINE void grab(const LzValue *value) {

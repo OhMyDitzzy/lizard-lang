@@ -865,6 +865,34 @@ static void emit_constant(Cx *c, uint16_t index) {
     }
 }
 
+/*
+ * Out of line, for a value that is neither nil nor a bool (its type is in w0): an int is falsy
+ * when it is 0 and a float when it is +0.0 or -0.0, so shifting the sign bit out leaves 0. Every
+ * other value is truthy. Taken only after the bool test, so a bool never pays for it.
+ */
+static int number_falsy_stub(Cx *c, int32_t at, int falsy, int truthy) {
+    int l = a_label(X);
+    int not_int = a_label(X);
+    int saved = X->sec;
+    a_section(X, SEC_COLD);
+    a_bind(X, l);
+    cmp_iw(X, 0, LZ_VAL_INT);
+    bcond_l(X, CD_NE, not_int);
+    ldr_x(X, 1, R_BPTR, at + 8);
+    cbz_l(X, 1, falsy);
+    b_l(X, truthy);
+    a_bind(X, not_int);
+    cmp_iw(X, 0, LZ_VAL_FLOAT);
+    bcond_l(X, CD_NE, truthy);
+    ldr_x(X, 1, R_BPTR, at + 8);
+    lsl_i(X, 1, 1, 1);
+    cbz_l(X, 1, falsy);
+    b_l(X, truthy);
+    a_section(X, saved);
+    (void)c;
+    return l;
+}
+
 static void emit_truthiness_jump(Cx *c, bool jump_if_true, uint32_t target) {
     int32_t at = 16 * (c->d - 1);
     int l = c->lab[target];
@@ -874,13 +902,13 @@ static void emit_truthiness_jump(Cx *c, bool jump_if_true, uint32_t target) {
     if (jump_if_true) {
         cbz_wl(X, 0, next); /* nil: falsy */
         cmp_iw(X, 0, LZ_VAL_BOOL);
-        bcond_l(X, CD_NE, l);
+        bcond_l(X, CD_NE, number_falsy_stub(c, at, next, l));
         ldr_b(X, 1, R_BPTR, at + 8);
         cbnz_wl(X, 1, l);
     } else {
         cbz_wl(X, 0, l);
         cmp_iw(X, 0, LZ_VAL_BOOL);
-        bcond_l(X, CD_NE, next);
+        bcond_l(X, CD_NE, number_falsy_stub(c, at, l, next));
         ldr_b(X, 1, R_BPTR, at + 8);
         cbz_wl(X, 1, l);
     }
@@ -898,7 +926,7 @@ static void emit_not(Cx *c) {
     mov_imm(X, 2, 1);
     cbz_wl(X, 0, store);
     cmp_iw(X, 0, LZ_VAL_BOOL);
-    bcond_l(X, CD_NE, truthy);
+    bcond_l(X, CD_NE, number_falsy_stub(c, at, store, truthy));
     ldr_b(X, 1, R_BPTR, at + 8);
     cbz_wl(X, 1, store);
     a_bind(X, truthy);
