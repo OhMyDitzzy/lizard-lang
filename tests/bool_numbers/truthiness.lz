@@ -51,3 +51,68 @@ println(co.resume())
 let hits = 0
 for x in [1, 2, 3] { hits = hits + (x > 5) }
 println(hits, bool(hits), not hits)
+
+# Strings, arrays and dicts are false when empty, true otherwise.
+println(bool(""), bool("a"), bool([]), bool([0]), bool([[]]), bool({}), bool({"a": 0}), bool(" "))
+println(not "", not [], not {}, not "a", not [nil], not {1: 2})
+println("" or "fallback", [] or "fallback", {} or "fallback", "x" or "fallback", [0] and "both")
+fn label(x) {
+  if x { return "full" }
+  return "empty"
+}
+println(label(""), label("a"), label([]), label([1]), label({}), label({"k": 1}), label(label))
+
+# A loop that empties an array and a string, so the JIT compiles the conditions.
+let queue = [1, 2, 3, 4, 5, 6, 7, 8]
+let taken = 0
+while queue {
+  queue.pop()
+  taken = taken + 1
+}
+let text = "abcdef"
+let left = 0
+while text {
+  text = text.slice(1, len(text))
+  left = left + 1
+}
+let registry = {"a": 1, "b": 2, "c": 3}
+let names = ["a", "b", "c"]
+let rounds = 0
+while registry {
+  registry.remove(names[rounds])
+  rounds = rounds + 1
+}
+println(taken, left, rounds, queue, text, registry)
+
+let empties = 0
+let fulls = 0
+let items = [[], [1], "", "z", {}, {"a": 1}, 0, 5, 0.0, 2.5, nil, false, true]
+for round in [1, 2, 3, 4, 5] {
+  for item in items {
+    if item { fulls = fulls + 1 }
+    if not item { empties = empties + 1 }
+  }
+}
+println(fulls, empties)
+
+# A node is truthy, so a loop over a linked list still stops at nil.
+class Node {
+  pub value: int
+  pub next: any
+}
+let list = Node(1, Node(2, Node(3, nil)))
+let sum = 0
+let cur = list
+while cur {
+  sum = sum + cur.value
+  cur = cur.next
+}
+println(sum)
+
+# The same through a typed optional, which `if` still narrows.
+fn describe(s: string?) {
+  if s { return "has " + s }
+  if s == nil { return "nil" }
+  return "empty"
+}
+println(describe("hi"), describe(""), describe(nil))

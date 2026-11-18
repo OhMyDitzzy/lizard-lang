@@ -2,9 +2,8 @@
 
 Arrays and dicts are mutable and passed by reference. An array owns each element; a
 dict owns each key and value. Copying a value into a container adds a reference;
-dropping a value removes one. `[]` and `{}` are truthy, because only `nil`, `false`, `0` and `0.0` are
-falsy — an empty collection is still "something" as far as conditions are
-concerned. Test `len(xs) == 0` or `xs.is_empty()` to ask whether it is empty.
+dropping a value removes one. `[]` and `{}` are falsy and a non-empty array or dict is truthy, so `if xs { ... }`
+means "xs has something in it". `xs.is_empty()` says the same thing out loud.
 
 ```lizard
 let xs = [1, 2, 3]

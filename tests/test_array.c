@@ -181,8 +181,8 @@ static void test_operators(void) {
     check_output("let a = [1]\nprintln(a == a, a == [1], a == a + [])\n", "true true true\n");
     check_output("println([\"a\"] == [\"a\"], [\"a\"] == [\"b\"])\n", "true false\n");
     /* Only nil and false are falsy, as everywhere else. */
-    check_output("if [] { println(\"truthy\") }\nprintln(![], [] and 1, bool([]))\n",
-                 "truthy\nfalse 1 true\n");
+    check_output("if [] { println(\"empty\") }\nif [0] { println(\"one item\") }\nprintln(![], [] and 1, bool([]), bool([0]))\n",
+                 "one item\ntrue [] false true\n");
     check_runtime_error("let a = [1]\nlet n = 1\nprintln(a + n)\n", LZ_ERR_RUNTIME,
                         "two numbers or two strings");
     check_runtime_error("let a = [1]\nlet b = 2\nprintln(a - a)\n", LZ_ERR_RUNTIME,

@@ -424,9 +424,19 @@ bool lz_value_is_truthy(const LzValue *value) {
         return value->as.integer != 0;
     case LZ_VAL_FLOAT:
         return value->as.number != 0.0;
-    default:
-        return true;
+    case LZ_VAL_OBJECT:
+        switch (value->as.object->type) {
+        case LZ_OBJ_STRING:
+            return ((const LzString *)value->as.object)->length != 0;
+        case LZ_OBJ_ARRAY:
+            return ((const LzArray *)value->as.object)->count != 0;
+        case LZ_OBJ_DICT:
+            return ((const LzDict *)value->as.object)->count != 0;
+        default:
+            return true;
+        }
     }
+    return true;
 }
 
 static LzOrder order_doubles(double a, double b) {

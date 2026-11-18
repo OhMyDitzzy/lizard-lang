@@ -15,6 +15,7 @@
 #include "ge_jit.h"
 #include "lizard/module.h"
 #include "lizard/array.h"
+#include "lizard/dict.h"
 #include "lizard/native.h"
 
 #define OFFS(type, field) ((int32_t)offsetof(type, field))

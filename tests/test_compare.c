@@ -56,8 +56,13 @@ static void test_truthiness(void) {
 
     LzString *empty = lz_string_new(&vm.heap, "", 0);
     LzValue empty_value = lz_value_object(&empty->base);
-    LZ_CHECK(lz_value_is_truthy(&empty_value));
+    LZ_CHECK(!lz_value_is_truthy(&empty_value));
     lz_object_release(&vm.heap, &empty->base);
+
+    LzString *word = lz_string_new(&vm.heap, "x", 1);
+    LzValue word_value = lz_value_object(&word->base);
+    LZ_CHECK(lz_value_is_truthy(&word_value));
+    lz_object_release(&vm.heap, &word->base);
 }
 
 static void test_equality(void) {

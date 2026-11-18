@@ -136,6 +136,18 @@ GE_INLINE bool is_truthy(const LzValue *value) {
     if (value->type == LZ_VAL_FLOAT) {
         return value->as.number != 0.0;
     }
+    if (value->type == LZ_VAL_OBJECT) {
+        switch (value->as.object->type) {
+        case LZ_OBJ_STRING:
+            return ((const LzString *)value->as.object)->length != 0;
+        case LZ_OBJ_ARRAY:
+            return ((const LzArray *)value->as.object)->count != 0;
+        case LZ_OBJ_DICT:
+            return ((const LzDict *)value->as.object)->count != 0;
+        default:
+            return true;
+        }
+    }
     return true;
 }
 

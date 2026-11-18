@@ -53,27 +53,30 @@ checked when the program runs.
 ## Truth
 
 A condition (`if x`, `while x`, `and`, `or`, `not`, `bool(x)`) is false for `nil`, `false`,
-the int `0` and the float `0.0` (or `-0.0`), and true for every other value. That includes
-`""`, `[]`, `{}`, `NaN` and any non-zero number.
+the int `0`, the float `0.0` (or `-0.0`), and an empty string, array or dict. Every other
+value is true: `NaN`, any other number, a non-empty string, array or dict, an instance, a
+function. `bool(42)` and `bool(-1)` are `true`.
 
 ```lizard
-println(bool(0), bool(0.0), bool(1), bool(""), bool([]), bool(nil))
-println(0 or "default", 0 and "other", not 0)
-let left = 3
-while left {
-  left = left - 1
+println(bool(0), bool(0.0), bool(1), bool(-1), bool(42))
+println(bool(""), bool("a"), bool([]), bool([0]), bool({}), bool(nil))
+println(0 or "default", [] or "empty", [] and "other", not "")
+let queue = [1, 2, 3]
+while queue {
+  queue.pop()
 }
-println(left)
+println(queue)
 ```
 
 ```text
-false false true true true false
-default 0 true
-0
+false false true true true
+false true false true false false
+default empty [] true
+[]
 ```
 
-`and` and `or` give back one of their operands, not a bool, so `0 and "other"` is `0`.
-A zero count is false, which is why `if count { ... }` works for "any left".
+`and` and `or` give back one of their operands, not a bool, so `[] and "other"` is `[]`.
+`??` is different: it only looks at `nil`, so `0 ?? 5` is `0`.
 
 ## Bool in number operations
 

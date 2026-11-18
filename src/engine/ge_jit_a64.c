@@ -867,12 +867,16 @@ static void emit_constant(Cx *c, uint16_t index) {
 
 /*
  * Out of line, for a value that is neither nil nor a bool (its type is in w0): an int is falsy
- * when it is 0 and a float when it is +0.0 or -0.0, so shifting the sign bit out leaves 0. Every
- * other value is truthy. Taken only after the bool test, so a bool never pays for it.
+ * when it is 0 and a float when it is +0.0 or -0.0, so shifting the sign bit out leaves 0. With
+ * `objects`, an empty string, array or dict is falsy too. Every other value is truthy. Taken only
+ * after the bool test, so a bool never pays for it. Mirrors lz_value_is_truthy.
  */
-static int number_falsy_stub(Cx *c, int32_t at, int falsy, int truthy) {
+static int number_falsy_stub(Cx *c, int32_t at, int falsy, int truthy, bool objects) {
     int l = a_label(X);
     int not_int = a_label(X);
+    int not_float = a_label(X);
+    int not_string = a_label(X);
+    int not_array = a_label(X);
     int saved = X->sec;
     a_section(X, SEC_COLD);
     a_bind(X, l);
@@ -883,11 +887,37 @@ static int number_falsy_stub(Cx *c, int32_t at, int falsy, int truthy) {
     b_l(X, truthy);
     a_bind(X, not_int);
     cmp_iw(X, 0, LZ_VAL_FLOAT);
-    bcond_l(X, CD_NE, truthy);
+    bcond_l(X, CD_NE, not_float);
     ldr_x(X, 1, R_BPTR, at + 8);
     lsl_i(X, 1, 1, 1);
     cbz_l(X, 1, falsy);
     b_l(X, truthy);
+    a_bind(X, not_float);
+    if (!objects) {
+        b_l(X, truthy);
+    } else {
+        cmp_iw(X, 0, LZ_VAL_OBJECT);
+        bcond_l(X, CD_NE, truthy);
+        ldr_x(X, 1, R_BPTR, at + 8);
+        ldr_w(X, 0, 1, OFFS(LzObject, type));
+        cmp_iw(X, 0, LZ_OBJ_STRING);
+        bcond_l(X, CD_NE, not_string);
+        ldr_x(X, 2, 1, OFFS(LzString, length));
+        cbz_l(X, 2, falsy);
+        b_l(X, truthy);
+        a_bind(X, not_string);
+        cmp_iw(X, 0, LZ_OBJ_ARRAY);
+        bcond_l(X, CD_NE, not_array);
+        ldr_x(X, 2, 1, OFFS(LzArray, count));
+        cbz_l(X, 2, falsy);
+        b_l(X, truthy);
+        a_bind(X, not_array);
+        cmp_iw(X, 0, LZ_OBJ_DICT);
+        bcond_l(X, CD_NE, truthy);
+        ldr_x(X, 2, 1, OFFS(LzDict, count));
+        cbz_l(X, 2, falsy);
+        b_l(X, truthy);
+    }
     a_section(X, saved);
     (void)c;
     return l;
@@ -902,13 +932,13 @@ static void emit_truthiness_jump(Cx *c, bool jump_if_true, uint32_t target) {
     if (jump_if_true) {
         cbz_wl(X, 0, next); /* nil: falsy */
         cmp_iw(X, 0, LZ_VAL_BOOL);
-        bcond_l(X, CD_NE, number_falsy_stub(c, at, next, l));
+        bcond_l(X, CD_NE, number_falsy_stub(c, at, next, l, true));
         ldr_b(X, 1, R_BPTR, at + 8);
         cbnz_wl(X, 1, l);
     } else {
         cbz_wl(X, 0, l);
         cmp_iw(X, 0, LZ_VAL_BOOL);
-        bcond_l(X, CD_NE, number_falsy_stub(c, at, l, next));
+        bcond_l(X, CD_NE, number_falsy_stub(c, at, l, next, true));
         ldr_b(X, 1, R_BPTR, at + 8);
         cbz_wl(X, 1, l);
     }
@@ -926,7 +956,7 @@ static void emit_not(Cx *c) {
     mov_imm(X, 2, 1);
     cbz_wl(X, 0, store);
     cmp_iw(X, 0, LZ_VAL_BOOL);
-    bcond_l(X, CD_NE, number_falsy_stub(c, at, store, truthy));
+    bcond_l(X, CD_NE, number_falsy_stub(c, at, store, truthy, false));
     ldr_b(X, 1, R_BPTR, at + 8);
     cbz_wl(X, 1, store);
     a_bind(X, truthy);

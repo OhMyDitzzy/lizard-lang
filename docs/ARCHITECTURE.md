@@ -429,11 +429,11 @@ Decided rules, implemented in stages.
 | `/` always produces a float | done |
 | int64 overflow is a runtime error, never a silent wrap | done |
 | Division by zero is a runtime error, for ints and floats | done |
-| `nil`, `false`, `0` and `0.0` (also `-0.0`) are falsy, everything else is truthy | done |
+| `nil`, `false`, `0`, `0.0` (also `-0.0`) and an empty string, array or dict are falsy, everything else is truthy | done |
 | `1 == 1.0` is true, strings compare by content, other mixed types are unequal | done |
 | `<` and `>` order numbers only; int against float is compared exactly, and anything involving NaN is false | done |
 | `+` on two strings concatenates; there is no implicit conversion (`"a" + 1` is an error) | done |
-| `+` on two arrays builds a new array; arrays compare by content, other objects by identity; `[]` is truthy | done |
+| `+` on two arrays builds a new array; arrays compare by content, other objects by identity; `[]` is falsy | done |
 | NaN prints as `nan` and the infinities as `inf` and `-inf` on every platform | done |
 | `//` rounds toward negative infinity and `%` takes the sign of the divisor (as in Python); with a float operand both give floats; a zero divisor is an error | done |
 

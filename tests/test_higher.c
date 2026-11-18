@@ -152,7 +152,7 @@ static void test_higher_order(void) {
     check_output("println(reduce([], fn(a, n) => a + n, 7), any([], fn(n) => n), all([], fn(n) => n))\n",
                  "7 false true\n");
     /* Only nil and false are false. */
-    check_output("println(filter([0, nil, false, \"\", []], fn(x) => x))\n", "[\"\", []]\n");
+    check_output("println(filter([0, nil, false, \"\", [], {}, [0], \"a\", 0.0, 1], fn(x) => x))\n", "[[0], \"a\", 1]\n");
     /* A named function, a builtin and a closure are all callbacks. */
     check_output("fn double(n) { return n * 2 }\nprintln(map([1, 2], double), map([1, 2], string))\n",
                  "[2, 4] [\"1\", \"2\"]\n");

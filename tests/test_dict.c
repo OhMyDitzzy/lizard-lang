@@ -326,8 +326,8 @@ static void test_equality(void) {
     check_output("println({\"a\": [1, {\"b\": 2}]} == {\"a\": [1, {\"b\": 2}]})\n", "true\n");
     check_output("println({\"a\": 1} == {\"a\": 1.0}, {\"a\": 1} == {\"a\": 2.0})\n", "true false\n");
     check_output("let d = {\"a\": 1}\nlet e = d\nprintln(d == e, d != e)\n", "true false\n");
-    /* Truthiness is like an array: only nil and false are falsy. */
-    check_output("println(if {} { \"yes\" } else { \"no\" })\n", "yes\n");
+    /* An empty dict is falsy, like an empty array. */
+    check_output("println(if {} { \"yes\" } else { \"no\" }, if {\"a\": 1} { \"yes\" } else { \"no\" })\n", "no yes\n");
 }
 
 static void test_annotations(void) {
