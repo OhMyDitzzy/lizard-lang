@@ -92,25 +92,41 @@ void lz_array_note_store(LzArray *array, const LzValue *value) {
     }
 }
 
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
 static bool grow_for_one_more(LzHeap *heap, LzArray *array) {
     if (array->count < array->capacity) {
         return true;
     }
-    size_t wanted = array->capacity == 0 ? 4 : array->capacity * 2;
+    size_t wanted;
+    if (array->capacity == 0) {
+        wanted = 4;
+    } else if (heap->limit_bytes != LZ_HEAP_UNLIMITED || array->capacity < 1024) {
+        wanted = array->capacity * 2;
+    } else {
+        wanted = array->capacity + array->capacity / 2;
+    }
     if (wanted > LZ_ARRAY_MAX_LENGTH) {
         wanted = LZ_ARRAY_MAX_LENGTH;
     }
     return array->count < wanted && lz_array_reserve(heap, array, wanted);
 }
 
-bool lz_array_append(LzHeap *heap, LzArray *array, const LzValue *value) {
-    if (!grow_for_one_more(heap, array)) {
-        return false;
-    }
+static inline void append_slot(LzArray *array, const LzValue *value) {
     lz_value_retain(value);
     array->items[array->count++] = *value;
     lz_array_note_store(array, value);
+}
+
+static inline bool append_grown(LzHeap *heap, LzArray *array, const LzValue *value) {
+    if (!grow_for_one_more(heap, array)) return false;
+    append_slot(array, value);
     return true;
+}
+
+bool lz_array_append(LzHeap *heap, LzArray *array, const LzValue *value) {
+    return append_grown(heap, array, value);
 }
 
 bool lz_array_insert_at(LzHeap *heap, LzArray *array, size_t index, const LzValue *value) {
@@ -180,6 +196,26 @@ bool lz_array_admit(const LzArray *container, const LzValue *value) {
             return false;
         }
         return lz_array_conform(lz_value_as_array(value), wanted->element);
+    }
+    if (wanted->literal_count == 0 && wanted->kinds == LZ_KINDS_ANY &&
+        wanted->element == NULL && wanted->value_element == NULL && wanted->class_id == 0 &&
+        wanted->fn == NULL) {
+        return true;
+    }
+    /* For scalar-only tags, lz_type_matches accepts exactly the matching kind bits. */
+    if (wanted->literal_count == 0 &&
+        (wanted->kinds & ~(LZ_KINDS_NUMBER | LZ_KIND_BOOL | LZ_KIND_NIL | LZ_KIND_STRING)) == 0) {
+        uint16_t kind = 0;
+        switch (value->type) {
+        case LZ_VAL_NIL: kind = LZ_KIND_NIL; break;
+        case LZ_VAL_BOOL: kind = LZ_KIND_BOOL; break;
+        case LZ_VAL_INT: kind = LZ_KIND_INT; break;
+        case LZ_VAL_FLOAT: kind = LZ_KIND_FLOAT; break;
+        case LZ_VAL_OBJECT:
+            if (value->as.object->type == LZ_OBJ_STRING) kind = LZ_KIND_STRING;
+            break;
+        }
+        return (wanted->kinds & kind) != 0;
     }
     return lz_type_matches(wanted, value);
 }
@@ -414,7 +450,11 @@ LzStatus lz_array_push(LzVM *vm, LzArray *array, const LzValue *value) {
     if (array->count >= LZ_ARRAY_MAX_LENGTH) {
         return too_large(vm);
     }
-    return lz_array_append(&vm->heap, array, value) ? LZ_OK : lz_vm_out_of_memory(vm);
+    if (array->count >= array->capacity && !grow_for_one_more(&vm->heap, array)) {
+        return lz_vm_out_of_memory(vm);
+    }
+    append_slot(array, value);
+    return LZ_OK;
 }
 
 LzStatus lz_array_resolve_index(LzVM *vm, const LzValue *index, size_t count, size_t *out) {

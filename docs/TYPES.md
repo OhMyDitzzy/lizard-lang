@@ -55,7 +55,9 @@ checked when the program runs.
 A condition (`if x`, `while x`, `and`, `or`, `not`, `bool(x)`) is false for `nil`, `false`,
 the int `0`, the float `0.0` (or `-0.0`), and an empty string, array or dict. Every other
 value is true: `NaN`, any other number, a non-empty string, array or dict, an instance, a
-function. `bool(42)` and `bool(-1)` are `true`.
+function, closure, coroutine or link. A link is true even after its target dies.
+`bool(42)` and `bool(-1)` are `true`. The callback results in `filter`, `any` and
+`all` use these same rules.
 
 ```lizard
 println(bool(0), bool(0.0), bool(1), bool(-1), bool(42))

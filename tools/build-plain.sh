@@ -5,7 +5,7 @@
 # tools/buildinfo.sh, so `lizard --version` is identical.
 #
 #   sh tools/build-plain.sh [build|check|install|clean] [--builddir=DIR] [--jobs=N] [--prefix=DIR]
-#       [--debug] [--no-jit] [--lto] [--sanitizers] [--poison] [--static] [--werror]
+#       [--debug] [--no-jit] [--no-pool] [--lto] [--sanitizers] [--poison] [--static] [--werror]
 #       [--official --signing-key=FPR] [CC=clang] [CFLAGS=...] [LDFLAGS=...]
 #
 # See docs/building/plain.md.
@@ -21,6 +21,7 @@ builddir=$PWD/build-plain
 jobs=
 prefix=/usr/local
 debug=no; jit=auto; lto=no; sanitizers=no; poison=no; static=no; werror=no
+pool=yes
 official=no; signing_key=
 user_cflags=; user_cflags_set=no; user_ldflags=
 CC=${CC:-cc}
@@ -45,6 +46,7 @@ for arg in "$@"; do
         --prefix=*) prefix=${arg#*=} ;;
         --debug) debug=yes ;;
         --no-jit) jit=no ;;
+        --no-pool) pool=no ;;
         --jit) jit=yes ;;
         --lto) lto=yes ;;
         --sanitizers) sanitizers=yes ;;
@@ -136,6 +138,7 @@ cflags="-std=c11$warn_flags $opt"
 ldflags=$user_ldflags
 cppflags="-I$src/include -I$src/builtin/include -I$src/builtin -I$builddir/generated"
 [ "$poison" = yes ] && cppflags="$cppflags -DLZ_POISON"
+[ "$pool" = no ] && cppflags="$cppflags -DLZ_NO_POOL"
 if [ "$sanitizers" = yes ]; then
     san="-fsanitize=address,undefined"
     try_flag "$san" || die "--sanitizers: $CC cannot build with ASan and UBSan here"
@@ -164,6 +167,12 @@ sh "$here/buildinfo.sh" --srcdir="$src" --builddir="$builddir" --version="$versi
     --sanitizers="$sanitizers" --static="$static" || exit 1
 
 # ---- compiling (parallel, incremental) -------------------------------------------------------------
+printf '%s\n' "$CC" "$cflags" "$cppflags" "$engine_cppflags" >"$builddir/.compile-flags.new"
+if ! cmp -s "$builddir/.compile-flags.new" "$builddir/.compile-flags"; then
+    mv "$builddir/.compile-flags.new" "$builddir/.compile-flags"
+else
+    rm -f "$builddir/.compile-flags.new"
+fi
 objdir=$builddir/obj
 mkdir -p "$objdir" "$builddir/.status"
 rm -f "$builddir/.status/"* 2>/dev/null
@@ -172,6 +181,7 @@ rm -f "$builddir/.status/"* 2>/dev/null
 # -MMD -MP writes next to it), is newer. No .d file means the object is built again.
 stale() { # object source
     [ -f "$1" ] || return 0
+    [ "$builddir/.compile-flags" -nt "$1" ] && return 0
     [ "$2" -nt "$1" ] 2>/dev/null && return 0
     [ -f "$1.d" ] || return 0
     for dep in $(sed -e 's/^[^:]*://' -e 's/\\$//' "$1.d" | tr -s ' \n' '\n\n'); do

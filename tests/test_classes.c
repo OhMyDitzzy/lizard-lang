@@ -128,6 +128,18 @@ static void check_fails(const char *text, uint64_t fuel, size_t heap_limit, LzSt
 }
 
 static void test_programs(void) {
+    check_output("class Row {pub i:int;pub f:float;pub b:bool;pub s:string;pub a:any}\n"
+                 "fn row(i:any,f:any,b:any,s:any,a:any)=>Row(i,f,b,s,a)\n"
+                 "let r=row(3,2.5,true,\"x\",nil)\nprintln(r.i,r.f,r.b,r.s,r.a)\n",
+                 "3 2.5 true x nil\n");
+    check_run_error("class Row {pub i:int}\nfn make(v:any)=>Row(v)\nmake(true)\n",
+                    "Row.i expects int, got bool");
+    check_run_error("class Row {pub f:float}\nfn make(v:any)=>Row(v)\nmake(3)\n",
+                    "Row.f expects float, got int");
+    check_run_error("class Row {pub b:bool}\nfn make(v:any)=>Row(v)\nmake(1)\n",
+                    "Row.b expects bool, got int");
+    check_run_error("class Row {pub s:string}\nfn make(v:any)=>Row(v)\nmake(nil)\n",
+                    "Row.s expects string, got nil");
     check_output("class Point {\n    pub x: int\n    pub y: int = 0\n    pub fn sum(self) => self.x + self.y\n    pub fn move(self, dx, dy) {\n        self.x += dx\n        self.y += dy\n    }\n    pub fn origin() => Point(0, 0)\n    pub get len2(self) => self.x * self.x + self.y * self.y\n}\nlet p = Point(3, 4)\nprintln(p.sum())\np.move(1, 1)\nprintln(p)\nprintln(Point(x: 3))\nprintln(p == Point(4, 5), identical(p, Point(4, 5)))\nprintln(p.with(x: 10))\n",
                  "7\nPoint(x: 4, y: 5)\nPoint(x: 3, y: 0)\ntrue false\nPoint(x: 10, y: 5)\n");
     check_output("class Point {\n    pub x: int\n    pub y: int = 0\n    pub fn sum(self) => self.x + self.y\n    pub fn move(self, dx, dy) {\n        self.x += dx\n        self.y += dy\n    }\n    pub fn origin() => Point(0, 0)\n    pub get len2(self) => self.x * self.x + self.y * self.y\n}\nlet f = Point(1, 2).sum\nprintln(f(), Point.origin(), Point(3, 4).len2)\nprintln([Point(1, 2), Point(3, 4)].map(Point.sum), Point)\nprintln(f)\n",
@@ -680,6 +692,11 @@ static void test_operators(void) {
     check_output("class Bad { pub x: int\n pub operator <(self, o) => 1 / 0 }\nlet b = [Bad(1), Bad(2)]\n"
                  "try { sort(b) } catch e { println(e.message) }\nprintln(b)\n",
                  "division by zero\n[Bad(x: 1), Bad(x: 2)]\n");
+    check_output("let target: any = []\nclass Mut { pub x: int\n"
+                 " pub operator <(self, o) { clear(target); return self.x < o.x } }\n"
+                 "target = [Mut(2), Mut(1)]\n"
+                 "try { sort(target) } catch e { println(e.message) }\nprintln(target)\n",
+                 "sort(): the array changed while it was being sorted\n[]\n");
     check_run_error("class A { pub x: int }\nsort([A(2), A(1)])\n", "operator '<' is not defined for A");
 }
 

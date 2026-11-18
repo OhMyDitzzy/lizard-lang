@@ -3,6 +3,7 @@
 
 #include "lizard/type.h"
 #include "lizard/value.h"
+#include "lizard/format.h"
 
 /*
  * Instructions are a byte stream with a one-byte opcode followed by its operands. 16-bit operands
@@ -134,10 +135,15 @@ of `error Name : Parent { ... }` to its kind */
     LZ_OP_EXTEND,      /* u16 constant for an extend block, which is a hidden class, u16 constant for the name of the
 target, u8 mode. Registers the block. Mode 0 is a builtin kind and the block says which, and
 mode 1 means the target is the class that the global of that name holds */
-    LZ_OP_IMPORT       /* u16 constant for the module id, u16 constant for the bound name, u16 constant for the
+    LZ_OP_IMPORT,      /* u16 constant for the module id, u16 constant for the bound name, u16 constant for the
 name in the module, u8 mode. Runs the module once and copies its `pub` values into this module's globals.
 Mode 0 is `import m`: every export is stored as "bound.name". Mode 1 is `from m import a as b`: the export
 `a` is stored as `b` */
+    LZ_OP_STRING_BEGIN, /* u16 build plan, executes the first load and chooses the guarded builder */
+    LZ_OP_STRING_FALLBACK, /* u16 build plan, executes the last legacy ADD and skips the builder */
+    LZ_OP_STRING_CHECK, /* u16 build plan, u16 piece, validates formatting and pushes its byte length */
+    LZ_OP_BUILD_STRING, /* u16 build plan, consumes its pieces and creates one result string */
+    LZ_OP_COUNT
 } LzOpCode;
 
 #define LZ_CONSTANTS_MAX 65536
@@ -154,6 +160,46 @@ typedef struct LzGlobalSite {
     uint32_t builtins_shape;
     bool builtin;            /* found in the builtins because the module's globals lack the name */
 } LzGlobalSite;
+
+/* Shared by the reference interpreter and GE. No cached pointer owns a value. */
+typedef struct LzMemberCache {
+    uint64_t ic_class;
+    const struct LzMember *ic_member;
+    uint32_t ic_run;
+    uint16_t ic_extensions;
+    uint8_t ic_bad;
+    uint8_t ic_stuck;
+} LzMemberCache;
+
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(sizeof(LzMemberCache) == 24, "member cache must keep the GE layout budget");
+#endif
+
+#define LZ_MEMBER_CACHE_MIN_RUN 4u
+#define LZ_MEMBER_CACHE_BAD_MAX 8u
+#define LZ_MEMBER_SITES_MAX 128u
+
+/* One bounded, direct-mapped cache per bytecode site. NULL keeps the slow path. */
+struct LzChunk;
+LzMemberCache *lz_chunk_member_site(const struct LzChunk *chunk, size_t offset);
+
+enum { LZ_STRING_PIECE_TEXT, LZ_STRING_PIECE_DEBUG, LZ_STRING_PIECE_FORMAT };
+
+typedef struct LzStringPiece {
+    LzFormatSpec format;
+    uint8_t mode;
+} LzStringPiece;
+
+typedef struct LzStringBuild {
+    LzStringPiece *pieces;
+    size_t count;
+    size_t slots;
+    size_t peak;
+    size_t fast;
+    size_t end;
+    uint16_t first_arg;
+    uint8_t first_op;
+} LzStringBuild;
 
 typedef struct LzChunk {
     uint8_t *code;
@@ -197,6 +243,10 @@ bool lz_chunk_add_type(LzChunk *chunk, const LzType *type, uint16_t *index);
  * so a const chunk may fill it.
  */
 LzGlobalSite *lz_chunk_global_site(const LzChunk *chunk, uint16_t index);
+
+/* Build plans share the uncharged cache allocation so LzChunk and function sizes stay stable. */
+bool lz_chunk_add_string_build(LzChunk *chunk, const LzStringBuild *build, uint16_t *index);
+const LzStringBuild *lz_chunk_string_build(const LzChunk *chunk, uint16_t index);
 
 const char *lz_opcode_name(uint8_t opcode);
 

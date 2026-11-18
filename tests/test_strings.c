@@ -6,6 +6,7 @@
 #include "lizard/builtin.h"
 #include "lizard/compiler.h"
 #include "lizard/debug.h"
+#include "lizard/stack_plan.h"
 #include "test_util.h"
 
 typedef struct Program {
@@ -17,6 +18,7 @@ typedef struct Program {
     LzSource source;
     LzStatus compile_status;
     LzStatus run_status;
+    size_t runtime_allocations;
 } Program;
 
 /* Fuel and heap limit of 0 mean unlimited. */
@@ -38,7 +40,9 @@ static void run(Program *program, const char *text, uint64_t fuel, size_t heap_l
         lz_vm_set_heap_limit(&program->vm, heap_limit);
     }
     if (program->compile_status == LZ_OK) {
+        size_t before = program->vm.heap.total_allocations;
         program->run_status = lz_vm_run(&program->vm, &program->chunk);
+        program->runtime_allocations = program->vm.heap.total_allocations - before;
     }
 }
 
@@ -242,10 +246,106 @@ static void test_format_specs(void) {
     check_fails("let w = \"q\"\nprintln($\"{5:{w}}\")\n", LZ_ERR_RUNTIME, "invalid spec", 2);
 }
 
+static void test_string_builder(void) {
+    const char *programs[] = {
+        "let n = 7\nlet s = \"hi\"\nprintln($\"a{n}b{n * 2}c{s}\")\n",
+        "let n = 7\nprintln($\"{n:06d}|{n % 97:>4}\")\n",
+        "let s = \"hi\"\nlet n = 7\nprintln($\"{s=} {n=}\")\n",
+        "let n: any = nil\nlet b: any = true\nlet f: any = 1.5\nprintln($\"a{n}b{b}c{f}\")\n"
+    };
+    const char *outputs[] = {"a7b14chi\n", "000007|   7\n", "s=\"hi\" n=7\n", "anilbtruec1.5\n"};
+    for (size_t i = 0; i < sizeof programs / sizeof programs[0]; i++) {
+        Program program;
+        run(&program, programs[i], 0, 0);
+        LZ_CHECK(program.compile_status == LZ_OK && program.run_status == LZ_OK);
+        LZ_CHECK(strcmp(program.out.data != NULL ? program.out.data : "", outputs[i]) == 0);
+        LZ_CHECK(program.runtime_allocations == 1);
+        LzStackPlan plan;
+        LZ_CHECK(lz_chunk_stack_plan(&program.chunk, 0, &plan) == LZ_OK);
+        bool found = false;
+        for (size_t at = 0; at < program.chunk.count;) {
+            uint8_t op = program.chunk.code[at];
+            found |= op == LZ_OP_BUILD_STRING;
+            size_t length = lz_opcode_length(op);
+            LZ_CHECK(length != 0);
+            if (length == 0) break;
+            at += length;
+        }
+        LZ_CHECK(found);
+        finish(&program);
+    }
+    const char *limited = "let n = 7\nprintln($\"a{n}b{n}c\")\n";
+    Program baseline;
+    run(&baseline, limited, 0, 0);
+    size_t limit = baseline.vm.heap.live_bytes + sizeof(LzString) + 6;
+    finish(&baseline);
+    Program bounded;
+    run(&bounded, limited, 0, limit);
+    LZ_CHECK(bounded.run_status == LZ_ERR_HEAP_LIMIT);
+    LZ_CHECK(bounded.runtime_allocations == 1);
+    LZ_CHECK(bounded.vm.error_offset == (uint32_t)(strchr(limited, '$') - limited));
+    finish(&bounded);
+    run(&bounded, limited, 8, 0);
+    LZ_CHECK(bounded.run_status == LZ_ERR_FUEL);
+    LZ_CHECK(bounded.runtime_allocations == 1);
+    LZ_CHECK(bounded.vm.error_offset == (uint32_t)(strchr(limited, '$') - limited));
+    finish(&bounded);
+    /* A primitive-looking expression may still load an object with a text hook. */
+    check_fails("class Bad { pub fn to_string(self) { throw ValueError(\"first conversion\") } }\n"
+                "let b = Bad()\nlet zero = 0\nprintln($\"before{b}after{1 // zero}\")\n",
+                 LZ_ERR_RUNTIME, "first conversion", 1);
+    check_output("let s = \"x\"\nlet i = 0\nwhile i < 18 { s += s; i += 1 }\n"
+                 "println(len($\"a{s}b{s}\"))\n", "524290\n");
+    check_output("fn tight(n) => $\"a{n}b{n}c{n}d{n}e{n}f{n}g{n}h{n}i{n}j{n}k{n}l{n}\"\n"
+                 "let co = coroutine(tight, 2)\nprintln(co.resume(7))\n",
+                 "a7b7c7d7e7f7g7h7i7j7k7l7\n");
+    /* Constant folding must keep seeing the original pure expression. */
+    check_output("const a = $\"{\"a\"}{\"b\"}\"\nprintln(a, $\"<{a}>\")\n", "ab <ab>\n");
+    /* Object conversions and calls keep their position relative to later effects. */
+    check_output("let count = 0\nclass C { pub fn to_string(self) { count += 1; return string(count) } }\n"
+                 "let c = C()\nfn tick() { count += 10; return count }\n"
+                 "println($\"{c}|{tick()}|{c}\", count)\n", "1|11|12 12\n");
+    check_fails("let n = -1\nprintln($\"before{n:c}after{1 // 0}\")\n",
+                 LZ_ERR_RUNTIME, "not a valid code point", 2);
+    check_fails("let c: any = \"x\"\nprintln($\"before{c:f}after{1 // 0}\")\n",
+                 LZ_ERR_RUNTIME, "needs a number", 2);
+    check_output("fn render(n) => $\"[{n:04d}]\"\nprintln(map([1, 2], render))\n"
+                 "let co = coroutine(render, 2)\nprintln(co.resume(3))\n", "[\"[0001]\", \"[0002]\"]\n[0003]\n");
+}
+
+static void test_template_jump_range(void) {
+    LzBuffer text = {0};
+    LzWriter out = lz_writer_from_buffer(&text);
+    LZ_CHECK(lz_writer_write_cstr(&out, "let i = 1\nwhile false {\n"));
+    for (size_t i = 0; i < 5000; i++) {
+        LZ_CHECK(lz_writer_write_cstr(&out, "i = i + 1\n"));
+    }
+    for (size_t i = 0; i < 500; i++) {
+        LZ_CHECK(lz_writer_write_cstr(&out, "println($\"a{i}b\")\n"));
+    }
+    LZ_CHECK(lz_writer_write_cstr(&out, "}\nprintln(\"done\")\n"));
+    check_output(text.data, "done\n");
+    text.length = 0;
+    LZ_CHECK(lz_writer_write_cstr(&out, "let i = 1\nwhile false {\n"));
+    for (size_t i = 0; i < 9; i++) {
+        LZ_CHECK(lz_writer_write_cstr(&out, "try {} finally {\n"));
+    }
+    for (size_t i = 0; i < 9; i++) {
+        LZ_CHECK(lz_writer_write_cstr(&out, "i = i + 1\n"));
+    }
+    LZ_CHECK(lz_writer_write_cstr(&out, "println($\"a{i}b\")\n"));
+    for (size_t i = 0; i < 9; i++) LZ_CHECK(lz_writer_write_cstr(&out, "}\n"));
+    LZ_CHECK(lz_writer_write_cstr(&out, "}\nprintln(\"done\")\n"));
+    check_output(text.data, "done\n");
+    lz_buffer_free(&text);
+}
+
 int main(void) {
     test_raw_and_fences();
     test_multiline();
     test_templates();
+    test_string_builder();
+    test_template_jump_range();
     test_format_specs();
     return LZ_TEST_RESULT();
 }

@@ -1,0 +1,41 @@
+# Recursion keeps several frames live while the innermost function suspends.
+fn recurse(n) {
+  if n == 0 { yield(7); return 3 }
+  return recurse(n - 1) + 1
+}
+let recursive = coroutine(fn() => recurse(40))
+println(recursive.resume(), recursive.resume(), recursive.status())
+
+# Each caller must recover its locals after a nested resume or a failed callee.
+fn inner_body() {
+  let sum = 0
+  let i = 0
+  while i < 10000 {
+    sum = sum + i
+    i = i + 1
+    if i % 2000 == 0 { yield(sum) }
+  }
+  let zero: any = 0
+  return 1 // zero
+}
+let inner = coroutine(inner_body)
+fn middle_body() {
+  let total = 100
+  try {
+    while true { total = total + inner.resume(); yield(total) }
+  } catch e { println(e.kind, total) }
+  return total + 1
+}
+let middle = coroutine(middle_body)
+fn outer_body() {
+  let saved = 10
+  while middle.status() == "suspended" {
+    let value = middle.resume()
+    yield(value + saved)
+    saved = saved + 1
+  }
+  return saved
+}
+let outer = coroutine(outer_body)
+while outer.status() == "suspended" { println(outer.resume()) }
+println(inner.status(), middle.status(), outer.status())

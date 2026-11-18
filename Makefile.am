@@ -9,7 +9,7 @@ noinst_LIBRARIES = liblizard_core.a liblizard_frontend.a liblizard_engine.a \
 	liblizard_builtin.a liblizard_utils.a
 
 AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/builtin/include -I$(top_srcdir)/builtin \
-	-Igenerated @LZ_POISON_CPPFLAGS@
+	-Igenerated @LZ_POISON_CPPFLAGS@ @LZ_POOL_CPPFLAGS@
 # warnings and the language level go in AM_CFLAGS, so the user's CFLAGS stay untouched
 AM_CFLAGS = @LZ_STD_CFLAGS@ @LZ_WARN_CFLAGS@ @LZ_SAN_CFLAGS@ @LZ_LTO_CFLAGS@
 AM_LDFLAGS = @LZ_SAN_LDFLAGS@ @LZ_LTO_LDFLAGS@

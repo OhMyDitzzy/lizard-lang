@@ -249,6 +249,14 @@ LzStatus lz_builtin_reverse(LzVM *vm, int argc, const LzValue *argv, LzValue *re
 /* sort */
 
 static int compare_items(const LzValue *a, const LzValue *b) {
+    if (a->type == LZ_VAL_INT && b->type == LZ_VAL_INT) {
+        int64_t x = a->as.integer, y = b->as.integer;
+        return (x > y) - (x < y);
+    }
+    if (a->type == LZ_VAL_FLOAT && b->type == LZ_VAL_FLOAT) {
+        double x = a->as.number, y = b->as.number;
+        return x < y ? -1 : x > y ? 1 : x == y ? 0 : (int)LZ_ORDER_UNORDERED;
+    }
     if (is_string(a)) {
         const LzString *x = (const LzString *)a->as.object;
         const LzString *y = (const LzString *)b->as.object;

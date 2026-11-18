@@ -505,75 +505,10 @@ GE_INLINE bool kind_accepted(const LzType *type, const LzValue *value) {
     return (kind & type->kinds) != 0;
 }
 
-/*
- * Fills the inline cache of a member instruction for the class of `instance`, when the member is
- * one the fast paths treat: a plain field (not a link) for what is 0 (read) or 1 (write), a
- * method for 2. The name is looked up with the reference's own lookup, and the checks that depend
- * only on the class and on the code that owns the instruction (visibility, `pub read`) are made
- * here once. Anything else leaves the cache empty, and the reference reports it.
- */
+/* Validate a name before asking the shared cache to resolve it. */
 static bool const_is_string(const LzChunk *chunk, size_t index) {
     return index < chunk->constant_count && chunk->constants[index].type == LZ_VAL_OBJECT &&
            chunk->constants[index].as.object->type == LZ_OBJ_STRING;
-}
-
-static void ic_fill(LzVM *vm, GeIns *ins, const LzInstance *instance, const LzString *name, int what) {
-    const LzClass *cls = instance->cls;
-    LzFound hit;
-    if (!lz_class_lookup(cls, name, &hit)) {
-        return;
-    }
-    const LzMember *member = hit.member;
-    /* A hit from an `extend` block is not in the chain and may be shadowed later: not cached. */
-    bool in_chain = false;
-    for (const LzClass *c = cls; c != NULL && !in_chain; c = c->parent) {
-        in_chain = c == hit.declared_in && member >= c->members && member < c->members + c->member_count;
-    }
-    if (!in_chain) {
-        return;
-    }
-    const LzCallFrame *frame = &vm->main_frames[vm->frame_count - 1];
-    uint64_t owner = frame->closure != NULL ? frame->closure->function->owner_id : 0;
-    bool sees = lz_class_sees(vm, owner, hit.declared_in);
-    if (member->vis == LZ_VIS_PRIVATE && !sees) {
-        return;
-    }
-    if (what == 2) {
-        if (member->kind != LZ_MEMBER_METHOD || strcmp(name->data, "init") == 0) {
-            return;
-        }
-    } else {
-        if (member->kind != LZ_MEMBER_FIELD || member->is_link) {
-            return;
-        }
-        if (what == 1 && member->vis == LZ_VIS_PUB_READ && !sees) {
-            return;
-        }
-    }
-    ins->ic_class = cls->id;
-    ins->ic_member = member;
-}
-
-/*
- * The class of the instance is not the cached one: tries to fill the cache for it. False when the
- * site gave up on its cache or the member is not one the cache takes, and the caller then hands
- * the instruction to the reference.
- */
-static bool ic_miss(LzVM *vm, GeIns *ins, const LzInstance *instance, const LzString *name, int what) {
-    if (ins->ic_stuck != 0) {
-        return false;
-    }
-    if (ins->ic_run < IC_MIN_RUN) {
-        if (++ins->ic_bad >= IC_BAD_MAX) {
-            ins->ic_stuck = 1;
-            return false;
-        }
-    } else {
-        ins->ic_bad = 0;
-    }
-    ins->ic_run = 0;
-    ic_fill(vm, ins, instance, name, what);
-    return instance->cls->id == ins->ic_class;
 }
 
 /*
@@ -675,13 +610,31 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
         goto native_try;
     }
 
+resume:
     for (;;) {
         ins = &code[pc];
         dispatches++;
         switch (ins->op) {
+        case LZ_OP_STRING_BEGIN:
+        case LZ_OP_STRING_FALLBACK: {
+            TICK(1);
+            size_t offset = ins->offset;
+            bool halted = false;
+            SYNC_OUT();
+            status = lz_vm_exec_one(vm, chunk, &offset, &halted);
+            SYNC_IN();
+            delegated++;
+            if (status != LZ_OK) goto fail;
+            pc = offset == (size_t)ins->offset + 3 ? pc + 1 : ins->target;
+            nt_count = 0;
+            goto native_try;
+        }
+
         case GE_OP_END:
             /* Ran off the end of the chunk. The reference reports it before charging fuel. */
-            goto run_plain;
+            *failed_at = ins->offset;
+            status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "malformed bytecode: chunk ended without OP_RETURN");
+            goto done;
 
         case LZ_OP_CONSTANT: {
             TICK(1);
@@ -869,7 +822,21 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             COMPARE_CASE(LZ_OP_GREATER)
             COMPARE_CASE(LZ_OP_LESS_EQUAL)
             COMPARE_CASE(LZ_OP_GREATER_EQUAL)
-            COMPARE_CASE(LZ_OP_EQUAL)
+        case LZ_OP_EQUAL: {
+            TICK(1);
+            bool same = false;
+            if (sp >= 2 && compare(LZ_OP_EQUAL, &stack[sp - 2], &stack[sp - 1], &same)) {
+                stack[sp - 2] = make_bool(same);
+                sp--;
+            } else {
+                SYNC_OUT();
+                status = lz_vm_equal_op(vm);
+                SYNC_IN();
+                if (status != LZ_OK) goto fail;
+            }
+            pc++;
+            break;
+        }
 
         case LZ_OP_NOT:
             TICK(1);
@@ -1110,6 +1077,25 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                      : pc + 1;
             break;
 
+        case LZ_OP_TRY_BEGIN: {
+            TICK(1);
+            if (vm->handler_count >= vm->handler_cap) {
+                status = lz_vm_handler_overflow(vm);
+                goto fail;
+            }
+            LzHandler *handler = &vm->handlers[vm->handler_count++];
+            handler->frame = vm->frame_count - 1;
+            handler->target = code[ins->target].offset;
+            handler->stack_height = sp;
+            pc++;
+            break;
+        }
+        case LZ_OP_TRY_END:
+            TICK(1);
+            if (vm->handler_count > 0) vm->handler_count--;
+            pc++;
+            break;
+
         case LZ_OP_RETURN: {
             TICK(1);
             if (vm->frame_count <= 1) {
@@ -1121,6 +1107,10 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                           (vm->open_upvalues == NULL || vm->open_upvalues->location < &stack[base]))) {
                 /* No variable of this frame was captured, so drop the frame and keep the result. */
                 LzValue result = stack[--sp];
+                while (vm->handler_count > 0 &&
+                       vm->handlers[vm->handler_count - 1].frame >= vm->frame_count - 1) {
+                    vm->handler_count--;
+                }
                 while (sp > base - 1) {
                     sp--;
                     drop(vm, &stack[sp]);
@@ -1302,23 +1292,15 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
         case LZ_OP_METHOD_LOOKUP:
         case GE_OP_DELEGATE:
             /*
-             * Instructions that stay marked for the reference (the JIT keys on that mark) but
-             * that the interpreter can finish itself when every check passes. Each case checks
-             * before it charges or changes anything, and anything else is plain_tick.
+             * Keep the delegate mark used by the JIT while GE handles these instructions.
+             * Guarded shortcuts check before charging. Shared semantic helpers run after one
+             * charge and a state sync, preserving their existing diagnostics and callbacks.
              */
             switch (ins->plain) {
             case LZ_OP_CHECK_TYPE:
             case LZ_OP_CHECK_RETURN:
                 if (GE_UNLIKELY(sp == 0 || ins->a >= chunk->type_count ||
                                 !kind_accepted(&chunk->types[ins->a], &stack[sp - 1]))) {
-                    goto plain_tick;
-                }
-                TICK(1);
-                pc++;
-                continue;
-            case LZ_OP_CHECK_PARAM:
-                if (GE_UNLIKELY(base + ins->a >= sp || ins->b >= chunk->type_count ||
-                                !kind_accepted(&chunk->types[ins->b], &stack[base + ins->a]))) {
                     goto plain_tick;
                 }
                 TICK(1);
@@ -1381,25 +1363,39 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 pc++;
                 continue;
             }
+            case LZ_OP_CHECK_PARAM: {
+                TICK(1);
+                if (base + ins->a < sp && ins->b < chunk->type_count &&
+                    kind_accepted(&chunk->types[ins->b], &stack[base + ins->a])) {
+                    pc++;
+                    continue;
+                }
+                SYNC_OUT();
+                status = lz_vm_check_param(vm, chunk, ins->a, ins->b);
+                SYNC_IN();
+                if (status != LZ_OK) goto fail;
+                pc++;
+                continue;
+            }
             case LZ_OP_GET_FIELD:
             case LZ_OP_GET_FIELD_W:
             case LZ_OP_GET_FIELD_KEEP: {
                 if (GE_UNLIKELY(sp == 0 || !lz_value_is_instance(&stack[sp - 1]))) {
-                    goto plain_tick;
+                    goto field_slow;
                 }
                 LzInstance *object = lz_value_as_instance(&stack[sp - 1]);
-                if (GE_UNLIKELY(object->cls->id != ins->ic_class)) {
-                    if (ins->ic_stuck != 0 || !const_is_string(chunk, ins->a) ||
-                        !ic_miss(vm, ins, object, (const LzString *)chunk->constants[ins->a].as.object,
+                if (GE_UNLIKELY(!lz_member_cache_matches(vm, &ins->member_cache, object))) {
+                    if (ins->member_cache.ic_stuck != 0 || !const_is_string(chunk, ins->a) ||
+                        !lz_member_cache_miss(vm, &ins->member_cache, object, (const LzString *)chunk->constants[ins->a].as.object,
                                  ins->plain == LZ_OP_GET_FIELD ? 0 : 1)) {
-                        goto plain_tick;
+                        goto field_slow;
                     }
                 }
-                ins->ic_run++;
-                const LzMember *member = ins->ic_member;
+                ins->member_cache.ic_run++;
+                const LzMember *member = ins->member_cache.ic_member;
                 bool keep = ins->plain == LZ_OP_GET_FIELD_KEEP;
                 if (GE_UNLIKELY(((object->unset >> member->slot) & 1u) != 0 || (keep && sp >= LZ_STACK_MAX))) {
-                    goto plain_tick;
+                    goto field_slow;
                 }
                 TICK(1);
                 LzValue field = object->fields[member->slot];
@@ -1413,25 +1409,36 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 }
                 pc++;
                 continue;
+            field_slow: {
+                TICK(1);
+                if (ins->plain == LZ_OP_GET_FIELD_KEEP) goto run_plain;
+                size_t offset = (size_t)ins->offset + 1;
+                SYNC_OUT();
+                status = lz_vm_get_field_op(vm, chunk, &offset, ins->plain == LZ_OP_GET_FIELD_W);
+                SYNC_IN();
+                if (status != LZ_OK) goto fail;
+                pc++;
+                continue;
+            }
             }
             case LZ_OP_SET_FIELD: {
                 if (GE_UNLIKELY(sp < 2 || !lz_value_is_instance(&stack[sp - 2]))) {
                     goto plain_tick;
                 }
                 LzInstance *object = lz_value_as_instance(&stack[sp - 2]);
-                if (GE_UNLIKELY(object->cls->id != ins->ic_class)) {
-                    if (ins->ic_stuck != 0 || !const_is_string(chunk, ins->a) ||
-                        !ic_miss(vm, ins, object, (const LzString *)chunk->constants[ins->a].as.object, 1)) {
+                if (GE_UNLIKELY(!lz_member_cache_matches(vm, &ins->member_cache, object))) {
+                    if (ins->member_cache.ic_stuck != 0 || !const_is_string(chunk, ins->a) ||
+                        !lz_member_cache_miss(vm, &ins->member_cache, object, (const LzString *)chunk->constants[ins->a].as.object, 1)) {
                         goto plain_tick;
                     }
                 }
-                ins->ic_run++;
+                ins->member_cache.ic_run++;
                 /*
                  * Only a value that the declared type accepts by kind and that holds no container
                  * (nil, bool, int, float, string), so there is no cycle check and no fuel to
                  * charge. The rest is the reference's.
                  */
-                const LzMember *member = ins->ic_member;
+                const LzMember *member = ins->member_cache.ic_member;
                 if (GE_UNLIKELY(!kind_accepted(&member->type, &stack[sp - 1]))) {
                     goto plain_tick;
                 }
@@ -1448,30 +1455,43 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
                 continue;
             }
             case LZ_OP_METHOD_LOOKUP: {
-                if (GE_UNLIKELY(sp < 2 || !lz_value_is_instance(&stack[sp - 2]))) {
-                    goto plain_tick;
+                size_t name_index = ((size_t)chunk->code[ins->offset + 1] << 8) | chunk->code[ins->offset + 2];
+                if (sp < 2 || !const_is_string(chunk, name_index)) goto plain_tick;
+                if (GE_UNLIKELY(!lz_value_is_instance(&stack[sp - 2]))) {
+                    goto method_slow;
                 }
                 const LzInstance *object = lz_value_as_instance(&stack[sp - 2]);
-                if (GE_UNLIKELY(object->cls->id != ins->ic_class)) {
-                    if (ins->ic_stuck != 0) {
-                        goto plain_tick;
+                if (GE_UNLIKELY(!lz_member_cache_matches(vm, &ins->member_cache, object))) {
+                    if (ins->member_cache.ic_stuck != 0) {
+                        goto method_slow;
                     }
                     /* Three bytes: the name constant and the mode. The translator's operands do not cover them. */
-                    size_t name_index = ((size_t)chunk->code[ins->offset + 1] << 8) | chunk->code[ins->offset + 2];
                     if (!const_is_string(chunk, name_index) ||
-                        !ic_miss(vm, ins, object, (const LzString *)chunk->constants[name_index].as.object, 2)) {
-                        goto plain_tick;
+                        !lz_member_cache_miss(vm, &ins->member_cache, object, (const LzString *)chunk->constants[name_index].as.object, 2)) {
+                        goto method_slow;
                     }
                 }
-                ins->ic_run++;
+                ins->member_cache.ic_run++;
                 TICK(1);
-                LzValue callee = ins->ic_member->value;
+                LzValue callee = ins->member_cache.ic_member->value;
                 grab(&callee);
                 LzValue fallback = stack[sp - 1];
                 stack[sp - 1] = callee;
                 drop(vm, &fallback);
                 pc++;
                 continue;
+            method_slow: {
+                TICK(1);
+                SYNC_OUT();
+                const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
+                uint64_t owner = frame->closure == NULL ? 0 : frame->closure->function->owner_id;
+                status = lz_vm_method_lookup(vm, owner, (const LzString *)constants[name_index].as.object,
+                    chunk->code[ins->offset + 3], sp - 2);
+                SYNC_IN();
+                if (status != LZ_OK) goto fail;
+                pc++;
+                continue;
+            }
             }
             default:
                 goto plain_tick;
@@ -1577,6 +1597,9 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
             status = (LzStatus)jx.status;
             goto fail;
         }
+        /* String guards deliberately return to GE to choose a successor. They do not
+         * represent a failed specialization and must not retire an otherwise hot loop. */
+        if (code[pc].plain == LZ_OP_STRING_BEGIN || code[pc].plain == LZ_OP_STRING_FALLBACK) continue;
         /* BAIL means the interpreter runs this instruction. Give up on code that keeps bailing. */
         prog->jit_bails++;
         if (!run->jit_eager && prog->jit_bails > 256 && prog->jit_bails * 2 > prog->jit_enters) {
@@ -1611,6 +1634,34 @@ LzStatus ge_execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void
 
 fail:
     *failed_at = forced_fail != SIZE_MAX ? forced_fail : code[pc].offset;
+    if (forced_fail != SIZE_MAX && forced_fail >= vm->frames[vm->frame_count - 1].chunk->count) {
+        goto done; /* The reference loop reports a missing return outside its catch path. */
+    }
+    SYNC_OUT();
+    size_t target = 0;
+    if (lz_vm_unwind_to_handler(vm, &status, 0, *failed_at, &chunk, &target)) {
+        SYNC_IN();
+        /* Dropping an anonymous callee may have freed its program. Only inspect the surviving
+         * handler frame from here. Reference callbacks already enforce their own frame floor. */
+        const LzCallFrame *frame = &vm->main_frames[vm->frame_count - 1];
+        base = frame->base;
+        prog = frame->closure == NULL ? run->program : frame->closure->function->engine_cache;
+        code = prog->ins;
+        constants = chunk->constants;
+        globals = lz_chunk_globals(vm, chunk);
+        size_t low = 0;
+        size_t high = prog->count - 1;
+        while (low < high) {
+            size_t mid = low + (high - low) / 2;
+            if (code[mid].offset < target) low = mid + 1;
+            else high = mid;
+        }
+        pc = low;
+        forced_fail = SIZE_MAX;
+        status = LZ_OK;
+        nt_count = 0;
+        goto resume;
+    }
 done:
     vm->stack_count = sp;
     vm->instructions += executed;

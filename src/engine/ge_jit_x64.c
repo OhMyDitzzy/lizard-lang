@@ -1580,6 +1580,10 @@ static void emit_instruction(Cx *c) {
         }
         return;
     }
+    if (plain == LZ_OP_STRING_BEGIN || plain == LZ_OP_STRING_FALLBACK) {
+        emit_unconditional_bail(c); /* GE resolves the guarded bytecode destination. */
+        return;
+    }
     if (plain == LZ_OP_CALL_EX) {
         emit_unconditional_bail(c); /* spread and named arguments: the interpreter does the call */
         return;

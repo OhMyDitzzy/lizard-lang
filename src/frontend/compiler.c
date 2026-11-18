@@ -2525,7 +2525,7 @@ static void format_error(Parser *parser, size_t base, const LzFormatError *error
 }
 
 /* The spec of {x:spec} as one string on the stack. {w} parts are filled in at run time. */
-static void compile_spec(Parser *parser, const LzStringPart *part) {
+static void compile_spec(Parser *parser, const LzStringPart *part, bool checked) {
     const char *text = parser->source->text;
     size_t p = part->spec_start;
     size_t end = part->spec_end;
@@ -2533,7 +2533,7 @@ static void compile_spec(Parser *parser, const LzStringPart *part) {
     if (memchr(text + p, '{', end - p) == NULL) {
         LzFormatSpec spec;
         LzFormatError error;
-        if (!lz_format_parse(text + p, end - p, &spec, &error)) {
+        if (!checked && !lz_format_parse(text + p, end - p, &spec, &error)) {
             format_error(parser, p, &error);
         }
         (void)emit_string_value(parser, text + p, end - p);
@@ -2578,17 +2578,176 @@ static void compile_spec(Parser *parser, const LzStringPart *part) {
     }
 }
 
+static bool fragment_is_pure(const LzChunk *chunk, size_t start);
+
+typedef struct TemplatePiece {
+    LzStringPiece text;
+    size_t start;
+    size_t end;
+    uint32_t offset;
+} TemplatePiece;
+
+/* Only straight-line primitive expressions can defer their text conversion. Calls,
+ * temporary locals, branches and member access keep the original execution path. */
+static bool template_expression(const LzChunk *chunk, const TemplatePiece *piece,
+                                size_t locals, size_t *height, size_t *peak) {
+    size_t initial = *height;
+    for (size_t at = piece->start; at < piece->end;) {
+        uint8_t op = chunk->code[at];
+        size_t length = lz_opcode_length(op);
+        if (length == 0 || length > piece->end - at) return false;
+        switch (op) {
+        case LZ_OP_GET_LOCAL:
+            if ((((size_t)chunk->code[at + 1] << 8) | chunk->code[at + 2]) >= locals) return false;
+            /* fall through */
+        case LZ_OP_GET_GLOBAL:
+        case LZ_OP_GET_UPVALUE:
+        case LZ_OP_CONSTANT:
+        case LZ_OP_NIL:
+        case LZ_OP_TRUE:
+        case LZ_OP_FALSE:
+            (*height)++;
+            break;
+        case LZ_OP_NEGATE:
+        case LZ_OP_NOT:
+        case LZ_OP_BIT_NOT:
+            if (*height <= initial) return false;
+            break;
+        case LZ_OP_ADD:
+        case LZ_OP_SUBTRACT:
+        case LZ_OP_MULTIPLY:
+        case LZ_OP_DIVIDE:
+        case LZ_OP_FLOOR_DIVIDE:
+        case LZ_OP_MODULO:
+        case LZ_OP_EQUAL:
+        case LZ_OP_LESS:
+        case LZ_OP_GREATER:
+        case LZ_OP_LESS_EQUAL:
+        case LZ_OP_GREATER_EQUAL:
+        case LZ_OP_BIT_AND:
+        case LZ_OP_BIT_OR:
+        case LZ_OP_BIT_XOR:
+        case LZ_OP_SHL:
+        case LZ_OP_SHR:
+            if (*height < initial + 2) return false;
+            (*height)--;
+            break;
+        default:
+            return false;
+        }
+        if (*height > *peak) *peak = *height;
+        at += length;
+    }
+    return *height == initial + 1;
+}
+
+static void build_template(Parser *parser, TemplatePiece *pieces, size_t count, size_t locals) {
+    if (pieces == NULL || count < 2 || count > 64 || parser->panic || parser->fatal != LZ_OK) return;
+    LzChunk *chunk = parser->chunk;
+    if (fragment_is_pure(chunk, pieces[0].start)) return;
+    size_t height = 0, peak = 0, fast_bytes = 3;
+    for (size_t i = 0; i < count; i++) {
+        if (!template_expression(chunk, &pieces[i], locals, &height, &peak)) return;
+        fast_bytes += pieces[i].end - pieces[i].start;
+        if (pieces[i].text.mode == LZ_STRING_PIECE_FORMAT) {
+            fast_bytes += 5;
+            if (++height > peak) peak = height;
+        }
+    }
+    size_t start = pieces[0].start;
+    size_t first_length = lz_opcode_length(chunk->code[start]);
+    size_t old_end = chunk->count;
+    if (chunk->code[old_end - 1] != LZ_OP_ADD) return;
+    fast_bytes -= first_length;
+    size_t legacy_bytes = old_end - start - first_length - 1;
+    uint8_t *saved = malloc(legacy_bytes);
+    uint32_t *offsets = malloc(legacy_bytes * sizeof *offsets);
+    uint8_t *fast = malloc(fast_bytes);
+    uint32_t *fast_offsets = malloc(fast_bytes * sizeof *fast_offsets);
+    LzStringPiece *specs = malloc(count * sizeof *specs);
+    if (saved == NULL || offsets == NULL || fast == NULL || fast_offsets == NULL || specs == NULL) {
+        free(saved); free(offsets); free(fast); free(fast_offsets); free(specs);
+        return;
+    }
+    memcpy(saved, chunk->code + start + first_length, legacy_bytes);
+    memcpy(offsets, chunk->offsets + start + first_length, legacy_bytes * sizeof *offsets);
+    size_t used = 0;
+    for (size_t i = 0; i < count; i++) {
+        specs[i] = pieces[i].text;
+        size_t begin = pieces[i].start + (i == 0 ? first_length : 0);
+        for (size_t at = begin; at < pieces[i].end; at++) {
+            fast[used] = chunk->code[at];
+            fast_offsets[used++] = chunk->offsets[at];
+        }
+        if (specs[i].mode == LZ_STRING_PIECE_FORMAT) {
+            fast[used] = LZ_OP_STRING_CHECK;
+            fast_offsets[used++] = pieces[i].offset;
+            for (size_t j = 0; j < 4; j++) {
+                fast[used] = j < 2 ? 0 : (uint8_t)(i >> (j == 2 ? 8 : 0));
+                fast_offsets[used++] = pieces[i].offset;
+            }
+        }
+    }
+    uint32_t final_offset = chunk->offsets[old_end - 1];
+    fast[used] = LZ_OP_BUILD_STRING;
+    fast_offsets[used++] = final_offset;
+    for (size_t i = 0; i < 2; i++) { fast[used] = 0; fast_offsets[used++] = final_offset; }
+    LzStringBuild plan = {.pieces = specs, .count = count, .slots = height, .peak = peak,
+        .fast = start + 3 + legacy_bytes + 3, .first_op = chunk->code[start],
+        .first_arg = first_length == 3 ? (uint16_t)((chunk->code[start + 1] << 8) | chunk->code[start + 2]) : 0};
+    plan.end = plan.fast + used;
+    uint16_t index;
+    if (!lz_chunk_add_string_build(chunk, &plan, &index)) {
+        free(saved); free(offsets); free(fast); free(fast_offsets); free(specs);
+        return;
+    }
+    for (size_t at = 0; at < used;) {
+        if (fast[at] == LZ_OP_STRING_CHECK || fast[at] == LZ_OP_BUILD_STRING) {
+            fast[at + 1] = (uint8_t)(index >> 8);
+            fast[at + 2] = (uint8_t)index;
+        }
+        at += lz_opcode_length(fast[at]);
+    }
+    uint32_t first_offset = chunk->offsets[start];
+    chunk->count = start;
+    emit_op_at(parser, LZ_OP_STRING_BEGIN, first_offset);
+    emit_u16_at(parser, index, first_offset);
+    for (size_t i = 0; i < legacy_bytes; i++) emit_byte_at(parser, saved[i], offsets[i]);
+    emit_op_at(parser, LZ_OP_STRING_FALLBACK, final_offset);
+    emit_u16_at(parser, index, final_offset);
+    for (size_t i = 0; i < used; i++) emit_byte_at(parser, fast[i], fast_offsets[i]);
+    free(saved); free(offsets); free(fast); free(fast_offsets);
+}
+
 /* One {...} of a template: leaves its text on the stack. */
-static void interpolation(Parser *parser, const LzStringPart *part) {
+static void interpolation(Parser *parser, const LzStringPart *part, TemplatePiece *piece) {
     const char *text = parser->source->text;
+    bool checked_spec = false;
     if (part->debug) {
         (void)emit_string_value(parser, text + part->open + 1, part->label_end - part->open - 1);
     }
+    size_t start = parser->chunk->count;
     Expr value = embedded_expression(parser, part->expr_start, part->expr_end);
+    if (piece != NULL) {
+        *piece = (TemplatePiece){.start = start, .end = parser->chunk->count,
+            .offset = (uint32_t)part->open};
+        piece->text.mode = part->debug ? LZ_STRING_PIECE_DEBUG : LZ_STRING_PIECE_TEXT;
+        if (part->has_spec) {
+            LzFormatError error;
+            if (memchr(text + part->spec_start, '{', part->spec_end - part->spec_start) != NULL ||
+                !lz_format_parse(text + part->spec_start, part->spec_end - part->spec_start,
+                                 &piece->text.format, &error)) {
+                piece->end = piece->start;
+            } else {
+                checked_spec = true;
+            }
+            piece->text.mode = LZ_STRING_PIECE_FORMAT;
+        }
+    }
 
     if (part->has_spec) {
         if (emit_method_callee(parser, "format", part->open)) {
-            compile_spec(parser, part);
+            compile_spec(parser, part, checked_spec);
             emit_call_count(parser, 2, part->open);
         }
     } else if (part->debug) {
@@ -2603,6 +2762,16 @@ static void interpolation(Parser *parser, const LzStringPart *part) {
     }
 }
 
+static bool template_unit_has_room(const LzSource *source) {
+    if (source->length > 2048) return false;
+    /* Finally bodies can be copied many times even in a short source file.
+     * A spelling check also covers finally inside an embedded expression. */
+    for (size_t i = 0; i + 7 <= source->length; i++) {
+        if (source->text[i] == 'f' && memcmp(source->text + i, "finally", 7) == 0) return false;
+    }
+    return true;
+}
+
 /* $"text {x} text": the pieces are joined left to right. */
 static Expr template_string(Parser *parser) {
     LzStringReader reader;
@@ -2613,6 +2782,11 @@ static Expr template_string(Parser *parser) {
 
     LzBuffer text = {0};
     unsigned pieces = 0;
+    /* Keep the extra path out of large units, where it could push an existing
+     * loop or branch beyond the bytecode's 16-bit jump range. */
+    TemplatePiece *build = template_unit_has_room(parser->source) ? calloc(64, sizeof *build) : NULL;
+    size_t build_count = 0;
+    size_t locals = parser->local_count;
     Expr result = expr_of(lz_type_of_kinds(LZ_KIND_STRING));
     bool pure = true;
     for (;;) {
@@ -2629,10 +2803,22 @@ static Expr template_string(Parser *parser) {
             error_range(parser, part.offset, part.length, part.message);
             break;
         }
+        size_t start = parser->chunk->count;
         if (part.kind == LZ_STRING_TEXT) {
             result = emit_string_value(parser, text.data != NULL ? text.data : "", text.length);
+            if (build != NULL && build_count < 64) {
+                build[build_count] = (TemplatePiece){.start = start, .end = parser->chunk->count};
+            }
+            build_count++;
         } else {
-            interpolation(parser, &part);
+            if (part.debug) {
+                if (build != NULL && build_count < 64) {
+                    build[build_count] = (TemplatePiece){.start = start, .end = start + 3};
+                }
+                build_count++;
+            }
+            interpolation(parser, &part, build != NULL && build_count < 64 ? &build[build_count] : NULL);
+            build_count++;
             pure = false;
         }
         if (pieces++ > 0) {
@@ -2642,6 +2828,8 @@ static Expr template_string(Parser *parser) {
     if (pieces == 0) {
         result = emit_string_value(parser, "", 0);
     }
+    build_template(parser, build, build_count, locals);
+    free(build);
     lz_buffer_free(&text);
     return pure ? result : expr_of(lz_type_of_kinds(LZ_KIND_STRING));
 }

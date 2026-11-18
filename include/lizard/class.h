@@ -44,6 +44,9 @@ typedef enum LzVisibility {
 #define LZ_CLASS_FIELDS_MAX 64
 #define LZ_CLASS_MEMBERS_MAX 256
 
+enum { LZ_FIELD_GENERIC, LZ_FIELD_ANY, LZ_FIELD_INT, LZ_FIELD_FLOAT,
+       LZ_FIELD_BOOL, LZ_FIELD_STRING, LZ_FIELD_CLASS };
+
 typedef struct LzMember {
     LzString *name;   /* interned, retained */
     uint8_t kind;
@@ -51,6 +54,7 @@ typedef struct LzMember {
     uint8_t is_override; /* written with `override` */
     uint8_t is_required; /* in a trait, written without a body, so a class must provide it */
     uint8_t is_link;  /* a field declared `link` holds a link cell, not the object it reads as */
+    uint8_t type_tag; /* construction plan, in the padding before slot */
     uint16_t slot;    /* for a field, its index in the instance */
     LzValue value;    /* the closure for a method, static or getter, and the value once initialised for a const */
     LzValue thunk;    /* a field default or a const initialiser, which is a closure taking no argument, or nil */
@@ -177,6 +181,15 @@ typedef struct LzFound {
 const char *lz_class_module_name(const LzClass *cls);
 
 bool lz_class_lookup(const LzClass *cls, const LzString *name, LzFound *out);
+
+static inline bool lz_member_cache_matches(const LzVM *vm, const LzMemberCache *cache,
+                                          const LzInstance *instance) {
+    return cache->ic_class == instance->cls->id && cache->ic_extensions == vm->ext_count;
+}
+
+/* what is 0 for a read, 1 for a write and 2 for a method call. */
+bool lz_member_cache_miss(LzVM *vm, LzMemberCache *cache, const LzInstance *instance,
+                          const LzString *name, int what);
 
 /*
  * Makes `parent` the parent of `cls` when the `class` statement runs. It lays the fields out after

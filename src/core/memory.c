@@ -11,13 +11,61 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if LZ_POOL_ENABLED
+#define LZ_POOL_CHUNK_BYTES (64u * 1024u)
+
+typedef struct LzPoolChunk {
+    struct LzPoolChunk *next;
+    size_t used;
+    _Alignas(LZ_POOL_STEP) unsigned char data[];
+} LzPoolChunk;
+
+static size_t pool_class(size_t size) {
+    return (size - 1) / LZ_POOL_STEP;
+}
+
+static void *pool_alloc(LzHeap *heap, size_t size) {
+    size_t index = pool_class(size);
+    size_t stride = (index + 1) * LZ_POOL_STEP;
+    LzObject *object = heap->pool_free[index];
+    if (object != NULL) {
+#ifdef LZ_POISON
+        /* The first pointer links free blocks. The rest must still be poisoned. */
+        const unsigned char *bytes = (const unsigned char *)object;
+        for (size_t i = sizeof object->prev; i < stride; i++) {
+            if (bytes[i] != 0xDD) {
+                fputs("pooled object modified after free\n", stderr);
+                abort();
+            }
+        }
+#endif
+        heap->pool_free[index] = object->prev;
+        return object;
+    }
+    LzPoolChunk *chunk = heap->pool_chunks;
+    const size_t capacity = LZ_POOL_CHUNK_BYTES - offsetof(LzPoolChunk, data);
+    if (chunk == NULL || stride > capacity - chunk->used) {
+        chunk = malloc(LZ_POOL_CHUNK_BYTES);
+        if (chunk == NULL) {
+            return NULL;
+        }
+        chunk->next = heap->pool_chunks;
+        chunk->used = 0;
+        heap->pool_chunks = chunk;
+    }
+    void *block = chunk->data + chunk->used;
+    chunk->used += stride;
+    return block;
+}
+#endif
+
 /*
- * Poison mode is enabled with cmake -DLZ_ENABLE_POISON=ON, which defines LZ_POISON. A block that
+ * Poison mode is enabled with --enable-poison or --poison, which defines LZ_POISON. A raw block that
  * is freed is first filled with 0xDD and parked in a quarantine ring instead of going back to
  * malloc, so that its address is not reused and a stale pointer reads 0xDD. That means refcount
  * 0xDDDDDDDD and a type out of range, which the asserts in lz_object_retain, lz_object_release
  * and lz_link_deref catch. This finds use-after-free without ASan. The ring is flushed by
- * lz_heap_destroy.
+ * lz_heap_destroy. Pooled blocks are checked before reuse instead, in pool_alloc.
  */
 #ifdef LZ_POISON
 #define LZ_QUARANTINE_SIZE 4096
@@ -52,6 +100,24 @@ void lz_free_sized(void *block, size_t size) {
 #endif
 }
 
+/* Only heap objects use the pool. Owned buffers keep their original allocator. */
+static void free_object(LzHeap *heap, LzObject *object) {
+#if LZ_POOL_ENABLED
+    if (object->size <= LZ_POOL_MAX) {
+        size_t index = pool_class(object->size);
+#ifdef LZ_POISON
+        memset(object, 0xDD, (index + 1) * LZ_POOL_STEP);
+#endif
+        object->prev = heap->pool_free[index];
+        heap->pool_free[index] = object;
+        return;
+    }
+#else
+    (void)heap;
+#endif
+    lz_free_sized(object, object->size);
+}
+
 void lz_heap_init(LzHeap *heap) {
     heap->head = NULL;
     heap->live_objects = 0;
@@ -73,6 +139,8 @@ void lz_heap_init(LzHeap *heap) {
     heap->in_hook = false;
     heap->on_link_freed = NULL;
     heap->on_link_freed_context = NULL;
+    heap->pool_chunks = NULL;
+    memset(heap->pool_free, 0, sizeof heap->pool_free);
 }
 
 /*
@@ -100,12 +168,17 @@ void lz_heap_destroy(LzHeap *heap) {
             lz_free_sized(context->frames, context->frame_capacity * sizeof *context->frames);
             lz_free_sized(context->handlers, context->handler_capacity * sizeof *context->handlers);
         }
-#ifdef LZ_POISON
-        memset(object, 0xDD, object->size);
-#endif
-        free(object);
+        free_object(heap, object);
         object = next;
     }
+#if LZ_POOL_ENABLED
+    while (heap->pool_chunks != NULL) {
+        LzPoolChunk *chunk = heap->pool_chunks;
+        heap->pool_chunks = chunk->next;
+        free(chunk);
+    }
+#endif
+    memset(heap->pool_free, 0, sizeof heap->pool_free);
 #ifdef LZ_POISON
     quarantine_flush();
 #endif
@@ -155,7 +228,12 @@ void *lz_heap_alloc(LzHeap *heap, LzObjType type, size_t size) {
         return NULL;
     }
 
-    LzObject *object = malloc(size);
+    LzObject *object;
+#if LZ_POOL_ENABLED
+    object = size <= LZ_POOL_MAX ? pool_alloc(heap, size) : malloc(size);
+#else
+    object = malloc(size);
+#endif
     if (object == NULL) {
         return NULL;
     }
@@ -287,12 +365,12 @@ void lz_object_release(LzHeap *heap, LzObject *object) {
 #endif
     heap->draining = true;
     lz_object_finalize(heap, object);
-    lz_free_sized(object, object->size);
+    free_object(heap, object);
     while (heap->pending != NULL) {
         LzObject *dead = heap->pending;
         heap->pending = dead->next;
         lz_object_finalize(heap, dead);
-        lz_free_sized(dead, dead->size);
+        free_object(heap, dead);
     }
     heap->draining = false;
 }

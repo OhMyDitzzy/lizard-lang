@@ -8,9 +8,310 @@ language and differ only in speed.
 | `ref` | `src/core/run.c` | The reference interpreter: one `switch`, no tricks. It *defines* what every instruction does. |
 | `ge` (default) | `src/engine/` | The Gecko Engine: a faster interpreter for the same bytecode. |
 
+The reference dispatch loops keep the active value and frame buffer pointers in local
+variables for their whole activation. A nested coroutine resume runs a separate loop and
+restores the caller's context before returning, including on failure. Yield exits its loop,
+so a later resume reads fresh pointers. A new context-switching path must preserve this
+contract. Helpers outside the loop still resolve the active pointers when called. Handler
+storage is only read on the slow try and unwind paths. Fuel and instruction counts remain
+in the VM and are updated exactly once per bytecode instruction.
+
+### Reference dispatch audit on AArch64
+
+A local audit used Clang 21.1.8 with `-std=c11 -O2 -DNDEBUG -g -S`, without LTO.
+It compared `f392115` (before coroutines), `7b04970` (the stage 3 starting point),
+and the activation-local pointers. These are instruction counts along the successful
+int path from the opcode's switch target to the shared status check. They exclude
+dispatch, error branches and the bodies of called helpers. `INDEX` uses a positive
+array index, `CALL` enters an ordinary closure, and `RETURN` leaves a function.
+
+| Handler | Before coroutines | Stage 3 starting point | Local pointers and scalar stores |
+| --- | ---: | ---: | ---: |
+| ADD | 30 | 30 | 25 |
+| LESS | 28 | 28 | 29 |
+| GET_LOCAL | 23 | 22 | 23 |
+| SET_LOCAL | 34 | 32 | 33 |
+| JUMP_IF_FALSE | 26 | 25 | 25 |
+| LOOP | 11 | 11 | 11 |
+| INDEX | 41 | 43 | 41 |
+| CALL | 28 | 27 | 27 |
+| RETURN | 15 | 14 | 13 |
+
+At the starting point, these paths load the active buffer pointers from the VM
+2, 1, 2, 3, 1, 0, 1, 1 and 1 times respectively. The local-pointer paths load none
+of them. Register allocation still spills some locals, so eliminating a pointer
+load does not always shorten the handler. The old ADD path also calls a three
+instruction `lz_value_int`, and LESS calls a four instruction `lz_value_bool`.
+The new scalar stores remove those calls. Bool arithmetic and ordering still use
+the slow semantic helpers, after the int and float fast paths have failed.
+
+These counts explain the local change, but do not establish an end-to-end Ir
+percentage. These audits use assembly counts. Do not run Valgrind on this phone, where its memory use caused a kernel panic. The target of returning
+within 1% of stage 2b still needs the deterministic CI measurement.
+
+### Building template strings
+
+`BUILD_STRING` consumes a chunk-owned plan and its evaluated pieces. It counts
+their bytes, allocates one result string, writes into that allocation and hashes
+the completed bytes once. Statically written format specs are stored parsed in
+the plan. `STRING_CHECK` validates a formatted piece at its original conversion
+point and keeps its length on the value stack. A later expression cannot mask an
+earlier format error. There is no separate heap string for a primitive conversion.
+
+The compiler also keeps the original concatenation sequence. `STRING_BEGIN`
+performs its first load and chooses the builder only with unlimited fuel and
+heap, enough value-stack capacity, and primitive or string operands. The legacy
+sequence ends with `STRING_FALLBACK`, which performs its original last ADD and
+skips the builder. These instructions replace existing operations, so taking the
+legacy branch adds no VM instructions. Finite budgets keep the old allocation
+sequence, failure location and fuel accounting, including budgets set after
+compilation. A small coroutine can take this branch without reserving more stack.
+
+Only straight-line expressions made from loads and primitive operators are
+eligible. Calls, temporary locals, branches, nested template builders, member
+access, dynamic format specs and templates with more than 64 pieces retain the
+original code. Units larger than 2 KiB also keep the original code, so duplicating
+template paths does not exhaust the existing 16-bit branch range in large loops.
+Units containing `finally` also retain the legacy code because the compiler can
+copy those bodies many times even from a short source file. The spelling check
+is conservative and can also disable the builder for a comment or literal.
+Loading an object, array, dict, function or link also selects the
+legacy branch before any conversion runs. This preserves custom text hooks and
+their order relative to later effects. Ordinary string `+` chains are unchanged.
+Pure constant expressions remain available to the existing constant folder.
+
+Plans live beside the global-site cache in an uncharged chunk sidecar. This
+preserves `sizeof(LzChunk)` and `sizeof(LzFunction)`, which matter to heap limits
+and the object pool. Truncating bytecode drops plans that no longer fit and clears
+cached global cells. Chunk destruction frees all plans and their piece arrays.
+
+GE resolves both builder successors when translating. The JIT delegates the
+conversion and final build semantics and hands the two control-flow boundaries
+back to GE. Expected guard exits do not retire a hot JIT loop. Synthetic GE
+opcodes start at 128, with static assertions separating them from bytecode.
+
+On `bench/str_interp.lz` with `N = 1000`, the local allocation audit recorded
+10,196 logical allocations before the builder and 2,196 afterwards. Both printed
+`25335 1,000` and left zero live objects. Eight temporary strings per iteration
+were removed. This is allocation evidence, not a claim about the final CI Ir.
+
+### Calls and callbacks
+
+Ordinary closures take a direct dispatch branch. When all positional parameter
+slots are present and there is no rest parameter, argument arrangement returns
+without building slots or entering the rearrangement helper's C frame. Defaults,
+rest arguments and named arguments keep the shared slow machinery. Every frame
+field is still initialized because resume, default prologues and error traces
+read them. A normal return moves its result directly and only asks to close
+upvalues when the current frame can own an open slot. Skink still runs after the
+frame's values are dropped, preserving the collection and finalization order.
+
+The C stack floor is reused within an execution activation while the callback
+stays in the known thread-stack range. A new top-level activation resets it, a
+different stack causes a fresh lookup, and coroutine resume restores the floor
+measured for its caller. Platforms without known stack bounds keep the original
+fallback measurement at each outer callback. The byte margin and depth limits
+are unchanged.
+
+Map and filter already use stack-local argument values without per-item argument
+allocation. Their retained item copies are necessary because callbacks may remove
+the source item or move its buffer. Sort keeps its stable bottom-up merge sort.
+Its builtin comparison handles int/int and float/float directly and uses the
+exact mixed-number comparison otherwise. Object comparison still works on an
+owned copy and checks for mutation before replacing the array.
+
+With the same local Clang AArch64 flags as the dispatch audit, an ordinary
+two-argument closure call with available capacity took 132 instructions before
+these changes and 81 afterwards. This includes the successful `arrange` and
+`push_frame` helper bodies before the change, and excludes the Lizard function
+body. The old arrangement helper alone took 40 instructions on that path and
+used a 96-byte C frame. The common path now enters neither helper. These are
+machine-code path counts, not an end-to-end benchmark claim.
+
+### Dict key lookup
+
+Strings already carry their FNV hash, computed when their final bytes are written.
+They are immutable after publication, so dict lookup does not rescan string bytes
+to hash them. This eager representation is retained, including a genuine zero
+hash. Changing zero into a lazy sentinel would require changing interning, tables,
+literal types and compiler constant keys together for no lookup benefit.
+
+Each dict mixes that stored hash with its own seed. Insertion now shares the mixed
+hash between the lookup and append, while copying recomputes it for the new dict's
+seed. Int, bool and string hits compare their leaf values directly. String keys
+check pointer identity, length and hash before comparing bytes. A hash collision
+still requires equal bytes. Other probes keep the generic equality fallback, and
+unsupported key errors still use the original diagnostic path. Float keys remain
+invalid, and bool keys remain distinct from int keys.
+
+Deletion still compacts the ordered entries and rebuilds the index. There are no
+tombstones to invalidate. Tests cover a real equal-length FNV collision, a zero
+hash, separately allocated equal strings, growth and repeated removal/reinsertion.
+With the local AArch64 audit flags, a successful first-bucket int lookup takes
+80 instructions instead of 127, including the old equality helpers. A hit using
+the stored string pointer takes 72 instead of 123. These counts include hashing
+and the index helper, without the surrounding VM opcode or caller.
+
+### String methods
+
+Case conversion checks for an entirely ASCII input before entering the Unicode
+decoder. That path maps bytes directly into one newly allocated string and hashes
+the finished bytes. Mixed text and invalid UTF-8 keep the original decoder and
+simple Unicode mapping. Although string identity is value-based, unchanged text
+still gets a new string to preserve allocation accounting and finite heap limits.
+Fuel is charged before either path, using the original byte cost.
+
+Byte searches use `memchr` for a one-byte needle. Linux builds use `memmem` for
+longer needles, while other platforms retain the portable search. Defining
+`LZ_NO_MEMMEM` exercises that fallback locally. Empty separators, trailing empty
+pieces, embedded NUL and invalid UTF-8 keep their previous behavior. Split still
+counts pieces first, allocates the same array capacity and charges the same fuel.
+
+The writer already doubles its buffer capacity. That policy is retained, with a
+direct store for a one-byte write. An ASCII case conversion now needs no temporary
+writer buffer, removing one allocation/free pair for nonempty text up to 63
+bytes, or more reallocations for longer text. Its one logical string allocation
+is unchanged.
+Generated case and byte-search corpora are also run against the saved pre-change
+text implementation, including the exact output bytes and string hashes.
+In a wrapper audit of 1,000 conversions of a 15-byte ASCII string, temporary
+`realloc` calls fell from 1,000 to zero. Both paths made 1,000 logical string
+allocations and left zero live heap bytes.
+
     lizard script.lz                   # Gecko Engine
     lizard --engine=ref script.lz      # the reference interpreter
     lizard --engine-stats script.lz    # what the engine did, on stderr
+
+
+### Object construction and member sites
+
+Instances already store their field slots and native payload in one allocation.
+The class already resolves inherited fields into `field_refs` during layout.
+That plan now also gives each field a small type tag, using existing padding in
+`LzMember`. Primitive positive matches avoid the generic type matcher. An exact
+class match also returns directly, while inheritance, literal types, unions and
+other complex matches use the original rules. Arrays keep the original type
+conformance and fuel charge. Every miss retains the original type diagnostic.
+The slow checker stays out of line so its diagnostic buffers do not create a
+large C frame on each primitive store.
+
+Ref and GE share member-cache lookup, visibility checks and miss health. Ref
+uses a lazy direct-mapped table of at most 128 sites per chunk, occupying 4 KiB
+on this 64-bit build. Entries are keyed by bytecode offset and class id. A table
+collision replaces the old entry. Truncating bytecode clears the table, and
+chunk destruction frees it. The sidecar is uncharged, like the existing global
+cache, so logical heap limits and object sizes do not change.
+
+Only resolved members of the immutable class chain are cached. Getter calls,
+callable fields, `init`, extension members and link fields keep the slow path.
+The active frame's lexical visibility and write access are checked when filling
+an entry. A receiver keeps the declaring class alive, and ids are never reused.
+The existing extension count invalidates entries after registration. A compact
+16-bit snapshot preserves the old GE instruction size. Counts above 65,535
+always miss rather than wrapping into a false hit. As in GE's previous policy,
+four hits make a useful run and eight short misses mark a site stuck. An already
+cached class can still hit at a stuck site.
+
+Class members cannot be replaced through `extend` in this language. Extensions
+are searched after the class chain, and their results are never cached. A future
+feature that permits member-array edits after instances exist must add class-chain
+shape validation before reusing these borrowed member pointers.
+
+The local layout audit found no changes to these sizes: `LzMember` 240 bytes,
+`LzClass` 1,360, `LzInstance` 80, `LzChunk` 128 and `GeIns` 56. The accepted,
+non-link int-field admission path takes 11 AArch64 instructions instead of 59,
+including the old type-check callees and excluding the eventual slot write.
+The old nested checkers needed another 400 bytes of C stack at their peak.
+With caches disabled in an external probe, 1,000 get/store/method iterations
+made 4,001 class lookups. Enabling the caches reduced that to five. Both probes
+printed `999`. No profiling tool was used.
+
+
+### GE delegation audit
+
+A temporary opcode counter counted calls to `lz_vm_exec_one` on `dict_ops`,
+`link_tree`, `obj_methods`, `obj_create`, `str_split_upper`, `mixed_wordfreq`,
+`str_interp` and `array_hof`. Each size line was divided by 20, with a minimum
+of one, and programs ran sequentially with `--engine=ge --jit=off`. This used
+ordinary C counters, without Valgrind or benchmark CI.
+
+The four most frequent delegated opcodes now have complete GE semantic paths:
+
+| Opcode | Before | After |
+| --- | ---: | ---: |
+| `GET_FIELD` | 171,147 | 0 |
+| `CHECK_PARAM` | 125,000 | 0 |
+| `METHOD_LOOKUP` | 106,758 | 0 |
+| `EQUAL` | 89,322 | 0 |
+
+The total counted calls fell from 719,319 to 227,092, with identical checksums.
+Guarded class and numeric shortcuts remain in place. Other values call the
+shared VM field, parameter, method or equality semantics directly, after
+charging one instruction and synchronizing the stack and instruction count.
+Callbacks, type conformance and their extra fuel charges use the same code as
+ref. GE still creates no independent diagnostic text. Link fields use the shared
+link implementation and are never inserted into the member cache.
+
+Field-name decoding stays in the common field helper, while parameter operands
+are already decoded in the IR. Keeping the JIT's delegate marks lets native
+code keep its existing bailout behavior. The temporary counters are absent from
+the runtime sources. Four small VM chunks assert both the result and zero
+reference dispatches. Routing any of those paths back through the old dispatcher
+makes that test fail even though the resulting language value is still correct.
+
+### Array growth and leaf builtins
+
+An array with no explicit heap limit doubles capacity below 1,024 items and grows
+by half above that point. Doubling small buffers avoids frequent early copies;
+the smaller steps for large buffers reduce unused space. A VM with a finite heap
+limit keeps the previous doubling rule, so every capacity charge and the point at
+which `--max-heap` refuses a push stay unchanged. Array storage still counts its
+full capacity against the logical limit.
+
+`lz_array_push` validates the type and cycle, then writes into the grown array
+directly. It no longer calls the separate public append helper for that same
+write. Arrays with no item type skip type matching for scalars, while still
+running cycle checks for containers. A simple primitive tag check handles
+matching scalar types. Compound types, array items and all cycle rules retain
+their existing checks. `insert`, `remove`, `clear`, `copy` and `reverse` now use
+the leaf-native route already used by `push` and `len`; it keeps their validation
+and failure paths, while avoiding the general frame setup for a native call.
+
+On the local AArch64 build, `lz_array_push` called `lz_array_check_store` and
+then the separate `lz_array_append`. It now calls the checker once and writes
+the retained value in its own path. The old `lz_array_push` had 43 instructions
+and called both helpers; the final inline path has 96 instructions including
+the successful store and one checker call. Capacity growth stays in a 51
+instruction helper, reached only when the array is full. This counts static
+instructions in the object file, not dynamic Ir or wall time.
+
+For the existing large inputs, the item-buffer capacity estimate drops from
+32 MiB to about 23.1 MiB for 1.2 million values, 16 MiB to about 15.4 MiB
+for one million values, and 16 MiB to about 10.3 MiB for 600,000 values.
+Those estimates cover the array item buffers, not whole-process peak memory.
+
+### Catching failures in GE
+
+GE translates `TRY_BEGIN` and `TRY_END`. A handler keeps the same frame index,
+stack height and bytecode target as ref. On failure GE first publishes its stack
+height and instruction count, then calls `lz_vm_unwind_to_handler`, the original
+VM unwinder. Error construction, trace capture, upvalue closing and value release
+therefore have one implementation. Fuel, heap and stack limits remain uncatchable.
+
+After a catch, GE reloads the surviving frame's program and finds the handler's
+IR position by binary search over the instruction offsets. Fusion keeps every
+original instruction in the IR, including instructions inside fused sequences,
+so the handler always has a resumable position. The search is on the error path
+and requires no persistent byte-to-IR table. No pointer into the failed callee's
+program is used after unwinding, since releasing that callee can free its cache.
+Normal returns also discard handlers belonging to the departing frame.
+
+Reference callbacks still unwind only frames above their own activation floor.
+An error that escapes one returns through its native caller before GE can catch
+it. Coroutines keep their reference loop and their own handler storage. Native
+compilation is disabled for chunks containing either try opcode, since the JIT
+does not model exceptional control-flow edges. Such chunks stay in GE, including
+the catch body. Translated callees without handlers may still use the JIT.
 
 ## What GE is, and what it is not
 

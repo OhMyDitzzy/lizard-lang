@@ -180,7 +180,7 @@ static void test_operators(void) {
                  "true true false\n");
     check_output("let a = [1]\nprintln(a == a, a == [1], a == a + [])\n", "true true true\n");
     check_output("println([\"a\"] == [\"a\"], [\"a\"] == [\"b\"])\n", "true false\n");
-    /* Only nil and false are falsy, as everywhere else. */
+    /* Empty collections are falsy, like zero, nil, false and empty strings. */
     check_output("if [] { println(\"empty\") }\nif [0] { println(\"one item\") }\nprintln(![], [] and 1, bool([]), bool([0]))\n",
                  "one item\ntrue [] false true\n");
     check_runtime_error("let a = [1]\nlet n = 1\nprintln(a + n)\n", LZ_ERR_RUNTIME,
@@ -712,6 +712,40 @@ static void test_c_api(void) {
     lz_buffer_free(&err);
 }
 
+static void test_growth_policy(void) {
+    LzBuffer out = {0};
+    LzBuffer err = {0};
+    LzVM vm;
+    lz_vm_init(&vm, lz_writer_from_buffer(&out), lz_writer_from_buffer(&err));
+    LzArray *array = lz_array_new(&vm.heap, 0);
+    LZ_CHECK(array != NULL);
+    for (int i = 0; i < 2048; i++) {
+        LzValue value = lz_value_int(i);
+        LZ_CHECK(lz_array_append(&vm.heap, array, &value));
+    }
+    LZ_CHECK(array->count == 2048 && array->capacity == 2304);
+    lz_object_release(&vm.heap, &array->base);
+    lz_vm_free(&vm);
+
+    memset(&vm, 0, sizeof vm);
+    memset(&out, 0, sizeof out);
+    memset(&err, 0, sizeof err);
+    lz_vm_init(&vm, lz_writer_from_buffer(&out), lz_writer_from_buffer(&err));
+    lz_vm_set_heap_limit(&vm, 1u << 20);
+    array = lz_array_new(&vm.heap, 0);
+    LZ_CHECK(array != NULL);
+    for (int i = 0; i < 2048; i++) {
+        LzValue value = lz_value_int(i);
+        LZ_CHECK(lz_array_append(&vm.heap, array, &value));
+    }
+    LZ_CHECK(array->count == 2048 && array->capacity == 2048);
+    LZ_CHECK(vm.heap.live_bytes <= vm.heap.limit_bytes);
+    lz_object_release(&vm.heap, &array->base);
+    lz_vm_free(&vm);
+    lz_buffer_free(&out);
+    lz_buffer_free(&err);
+}
+
 int main(void) {
     test_literals_and_printing();
     test_indexing();
@@ -732,5 +766,6 @@ int main(void) {
     test_disassembly();
     test_malformed_bytecode();
     test_c_api();
+    test_growth_policy();
     return LZ_TEST_RESULT();
 }

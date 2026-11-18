@@ -68,6 +68,45 @@ The rule is that nothing is optimized without numbers: a change that claims to m
 faster comes with a `bench-report` that shows it, and one that shows only `noise` in time and no
 change in `Ir` is not an optimization.
 
+## Stage 3 checkpoint
+
+Do not run Valgrind, Callgrind or DHAT on this phone. The user prohibited them
+because their memory use caused a kernel panic. Installation does not revoke
+that restriction. Use assembly counts or bounded allocation probes instead,
+and run builds and test configurations sequentially with `--jobs=1`.
+
+The current worktree implements parts 0 through 9 of the stage 3 optimization
+work. Parts 0 through 10 are complete. The GE try handlers share the reference
+unwinder and resume through the translated handler block; chunks with try
+opcodes stay out of native JIT code. Delegation counters are kept out of the
+runtime sources.
+
+The completed work has regression coverage in `truth_table.lz`,
+`hot_contexts.lz`, `test_memory.c`, `test_strings.c`, `test_chunk.c`,
+`test_higher.c`, `test_classes.c`, `test_dict.c`, `test_methods.c` and
+`test_jit.c` and `test_ic.c`. The normal test list already runs these on ref, GE and eager JIT
+where applicable. Local checks also use
+pool-disabled and poison builds. ASan cannot run on this Termux host, so its
+pool-disable detection was checked by preprocessing and compilation. Targeted
+UBSan runs cover the allocator, string builder, call helpers, dict, text methods
+and buffer writer. Mutation checks cover the new guards and fast paths. The
+template compiler also has large-loop and copied-finally jump-range regressions.
+
+At this checkpoint, all 117 tests pass in each of the normal, no-pool, poison
+and no-pool-plus-poison builds. Differential checks compare 4,844 runs against
+saved binaries across engine modes, fuel limits and heap limits. Another 96
+checks compare error text and heap statistics. All 91 example, module and small
+benchmark programs match across the four engine/JIT choices, for 364 comparisons.
+The GE try/catch tests also compare fuel and heap boundaries directly, run the
+full existing try suite on GE with eager JIT, and mutate unwinding and handler
+target paths to ensure the regression tests detect them.
+
+The dispatch, template allocation, call and dict instruction audits are in
+[ENGINE.md](ENGINE.md). Pool allocation evidence and exact-size accounting are in
+[MEMORY.md](MEMORY.md). The stage 2b Ir target for ref still needs the user's
+deterministic CI measurement. Local checks run small benchmark inputs only to
+compare outputs and allocation counts, without running the benchmark CI.
+
 ## Sanitizers
 
     mkdir build-san && cd build-san

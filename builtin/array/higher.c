@@ -9,7 +9,7 @@
  *    walking cannot make the loop endless. If the callback shrinks the array, the loop
  *    stops where the array now ends.
  *  - Every item is retained while its callback runs: the callback may change the array.
- *  - The callback gets the item only. Truthiness is the language's: only nil and false are false.
+ *  - The callback gets the item only. Predicates use the same truth rules as conditions, including empty collections.
  */
 
 static LzStatus want_array_and_function(LzVM *vm, const char *name, const LzValue *argv,

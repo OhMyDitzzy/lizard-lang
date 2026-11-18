@@ -23,13 +23,13 @@ static const LzBuiltin builtins[] = {
     {"len", lz_builtin_len, 1, 1, LZ_KIND_INT, LZ_NATIVE_LEAF | LZ_NATIVE_LEN},
     {"push", lz_builtin_push, 2, 2, LZ_KIND_NIL, LZ_NATIVE_LEAF},
     {"pop", lz_builtin_pop, 1, 1, LZ_KINDS_ANY, LZ_NATIVE_LEAF},
-    {"insert", lz_builtin_insert, 3, 3, LZ_KIND_NIL, 0},
-    {"remove", lz_builtin_remove, 2, 2, LZ_KINDS_ANY, 0},
-    {"clear", lz_builtin_clear, 1, 1, LZ_KIND_NIL, 0},
-    {"copy", lz_builtin_copy, 1, 1, LZ_KIND_ARRAY, 0},
+    {"insert", lz_builtin_insert, 3, 3, LZ_KIND_NIL, LZ_NATIVE_LEAF},
+    {"remove", lz_builtin_remove, 2, 2, LZ_KINDS_ANY, LZ_NATIVE_LEAF},
+    {"clear", lz_builtin_clear, 1, 1, LZ_KIND_NIL, LZ_NATIVE_LEAF},
+    {"copy", lz_builtin_copy, 1, 1, LZ_KIND_ARRAY, LZ_NATIVE_LEAF},
     {"contains", lz_builtin_contains, 2, 2, LZ_KIND_BOOL, 0},
     {"index_of", lz_builtin_index_of, 2, 2, LZ_KIND_INT, 0},
-    {"reverse", lz_builtin_reverse, 1, 1, LZ_KIND_NIL, 0},
+    {"reverse", lz_builtin_reverse, 1, 1, LZ_KIND_NIL, LZ_NATIVE_LEAF},
     {"sort", lz_builtin_sort, 1, 1, LZ_KIND_NIL, 0},
     {"join", lz_builtin_join, 2, 2, LZ_KIND_STRING, 0},
     {"range", lz_builtin_range, 1, 2, LZ_KIND_ARRAY, 0},
@@ -89,7 +89,8 @@ LzStatus lz_builtin_install(LzVM *vm) {
         native->flags = builtin->flags;
         /* The few builtins that are about the cell itself or only print it. */
         native->takes_links = (builtin->fn == lz_builtin_print || builtin->fn == lz_builtin_println ||
-                               builtin->fn == lz_builtin_string || builtin->fn == lz_builtin_identical ||
+                               builtin->fn == lz_builtin_string || builtin->fn == lz_builtin_bool ||
+                               builtin->fn == lz_builtin_identical ||
                                builtin->fn == lz_builtin_link || builtin->fn == lz_builtin_typeof)
                                   ? LZ_LINKS_ANY
                               : (builtin->fn == lz_builtin_push || builtin->fn == lz_builtin_insert)

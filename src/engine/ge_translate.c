@@ -199,12 +199,9 @@ bool ge_translate(const LzChunk *chunk, GeProgram *program) {
         if (length == 0 || offset + length > bytes) {
             return false;
         }
-        /*
-         * A try needs the handlers of the reference interpreter, which cuts the stack and the
-         * frames back, so GE and the JIT leave code that has one to it.
-         */
+        /* GE shares the VM's unwinder. Native code does not model its exceptional edges. */
         if (chunk->code[offset] == LZ_OP_TRY_BEGIN || chunk->code[offset] == LZ_OP_TRY_END) {
-            return false;
+            program->jit_state = GE_JIT_FAILED;
         }
         count++;
         offset += length;
@@ -262,11 +259,15 @@ bool ge_translate(const LzChunk *chunk, GeProgram *program) {
         GeIns *in = &ins[i];
         size_t after = (size_t)in->offset + lz_opcode_length(in->plain);
         size_t destination;
-        if (in->plain == LZ_OP_JUMP || in->plain == LZ_OP_JUMP_IF_FALSE ||
+        if (in->plain == LZ_OP_JUMP || in->plain == LZ_OP_TRY_BEGIN || in->plain == LZ_OP_JUMP_IF_FALSE ||
             in->plain == LZ_OP_JUMP_IF_TRUE) {
             destination = after + in->a;
         } else if (in->plain == LZ_OP_JUMP_IF_SUPPLIED) {
             destination = after + in->b;
+        } else if (in->plain == LZ_OP_STRING_BEGIN || in->plain == LZ_OP_STRING_FALLBACK) {
+            const LzStringBuild *plan = lz_chunk_string_build(chunk, in->a);
+            if (plan == NULL) { ok = false; break; }
+            destination = in->plain == LZ_OP_STRING_BEGIN ? plan->fast : plan->end;
         } else if (in->plain == LZ_OP_LOOP) {
             if (in->a > after) {
                 ok = false;
@@ -304,6 +305,8 @@ bool ge_translate(const LzChunk *chunk, GeProgram *program) {
                 in->op = GE_OP_DELEGATE;
             }
             break;
+        case LZ_OP_BUILD_STRING:
+        case LZ_OP_STRING_CHECK:
         case LZ_OP_DEFINE_GLOBAL:
         case LZ_OP_CHECK_TYPE:
         case LZ_OP_ARRAY_NEW:
@@ -336,7 +339,7 @@ bool ge_translate(const LzChunk *chunk, GeProgram *program) {
         case LZ_OP_THROW:
         case LZ_OP_ERROR_IS:
         case LZ_OP_GET_FIELD:
-        case LZ_OP_GET_FIELD_KEEP: /* 71 is GE_OP_INDEX1 as a raw op, so it has to be marked */
+        case LZ_OP_GET_FIELD_KEEP:
             in->op = GE_OP_DELEGATE;
             break;
         default:

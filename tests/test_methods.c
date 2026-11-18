@@ -6,6 +6,7 @@
 #include "lizard/builtin.h"
 #include "lizard/compiler.h"
 #include "lizard/debug.h"
+#include "method/method.h"
 #include "test_util.h"
 
 typedef struct Program {
@@ -96,6 +97,9 @@ static void check_fails(const char *text, LzStatus status, const char *message, 
 
 
 static void test_text_methods(void) {
+    check_output("println(\",a,\".split(\",\"), \"--a----\".split(\"--\"), \"\".split(\",\"))\n"
+                 "println(\"a\".contains(\"a\"), \"abc\".contains(\"abc\"), \"abcabc\".split(\"abc\"))\n",
+                 "[\"\", \"a\", \"\"] [\"\", \"a\", \"\", \"\"] [\"\"]\ntrue true [\"\", \"\", \"\"]\n");
     check_output("println(\"Hello\".to_upper(), \"Hello\".to_lower())\n", "HELLO hello\n");
     check_output("println(\"  hi  \".trim() + \"|\", \"  hi  \".trim_start() + \"|\", \"  hi  \".trim_end() + \"|\")\n",
                  "hi| hi  |   hi|\n");
@@ -254,6 +258,162 @@ static void test_fuel_and_heap(void) {
     finish(&program);
 }
 
+static uint32_t text_random(uint32_t *state) {
+    *state = *state * 1664525u + 1013904223u;
+    return *state;
+}
+
+static void check_case_bytes(LzVM *vm, const char *bytes, size_t length,
+                             const LzBuffer *upper, const LzBuffer *lower) {
+    LzString *input = lz_string_new(&vm->heap, bytes, length);
+    LZ_CHECK(input != NULL);
+    if (input == NULL) return;
+    LzValue arg = lz_value_object(&input->base);
+    LzNativeFn functions[] = {lz_method_to_upper, lz_method_to_lower};
+    const LzBuffer *expected[] = {upper, lower};
+    for (size_t i = 0; i < 2; i++) {
+        LzValue result = lz_value_nil();
+        size_t before = vm->heap.total_allocations;
+        LZ_CHECK(functions[i](vm, 1, &arg, &result) == LZ_OK);
+        LZ_CHECK(result.type == LZ_VAL_OBJECT && result.as.object->type == LZ_OBJ_STRING);
+        if (result.type == LZ_VAL_OBJECT && result.as.object->type == LZ_OBJ_STRING) {
+            const LzString *got = (const LzString *)result.as.object;
+            LZ_CHECK(got != input);
+            LZ_CHECK(got->length == expected[i]->length);
+            if (got->length == expected[i]->length) {
+                LZ_CHECK(got->length == 0 || memcmp(got->data, expected[i]->data, got->length) == 0);
+            }
+            LZ_CHECK(got->hash == lz_hash_bytes(got->data, got->length));
+            LZ_CHECK(vm->heap.total_allocations == before + 1);
+        }
+        lz_value_release(&vm->heap, &result);
+    }
+    lz_value_release(&vm->heap, &arg);
+}
+
+static void test_case_corpus(void) {
+    LzVM vm;
+    lz_vm_init(&vm, (LzWriter){0}, (LzWriter){0});
+    LzBuffer input = {0}, upper = {0}, lower = {0};
+    LzWriter in = lz_writer_from_buffer(&input), up = lz_writer_from_buffer(&upper);
+    LzWriter low = lz_writer_from_buffer(&lower);
+    /* Include every ASCII byte, including NUL, before generating mixed text. */
+    for (unsigned c = 0; c < 128; c++) {
+        char a = (char)c;
+        char b = (char)(c >= 'a' && c <= 'z' ? c - 32 : c);
+        char d = (char)(c >= 'A' && c <= 'Z' ? c + 32 : c);
+        LZ_CHECK(lz_writer_write(&in, &a, 1));
+        LZ_CHECK(lz_writer_write(&up, &b, 1));
+        LZ_CHECK(lz_writer_write(&low, &d, 1));
+    }
+    check_case_bytes(&vm, input.data, input.length, &upper, &lower);
+    const char *units[][3] = {
+        {"aZ09!", "AZ09!", "az09!"},
+        {"\xC3\xA9", "\xC3\x89", "\xC3\xA9"},
+        {"\xCE\xA3", "\xCE\xA3", "\xCF\x83"},
+        {"\xD0\xAF", "\xD0\xAF", "\xD1\x8F"},
+        {"\xE1\xBA\x9E", "\xE1\xBA\x9E", "\xC3\x9F"},
+        {"\xF0\x90\x90\x80", "\xF0\x90\x90\x80", "\xF0\x90\x90\xA8"},
+        {"\xFF", "\xFF", "\xFF"},
+        {"\xC0\xAF", "\xC0\xAF", "\xC0\xAF"},
+    };
+    uint32_t random = 0x5EED1234u;
+    for (size_t round = 0; round < 128; round++) {
+        input.length = upper.length = lower.length = 0;
+        size_t count = text_random(&random) % 1024;
+        for (size_t i = 0; i < count; i++) {
+            size_t k = round % 3 == 0 ? 0 : text_random(&random) % 8;
+            LZ_CHECK(lz_writer_write_cstr(&in, units[k][0]));
+            LZ_CHECK(lz_writer_write_cstr(&up, units[k][1]));
+            LZ_CHECK(lz_writer_write_cstr(&low, units[k][2]));
+        }
+        check_case_bytes(&vm, input.data, input.length, &upper, &lower);
+    }
+    input.length = upper.length = lower.length = 0;
+    for (size_t i = 0; i < 256 * 1024; i++) {
+        LZ_CHECK(lz_writer_write_cstr(&in, "q"));
+        LZ_CHECK(lz_writer_write_cstr(&up, "Q"));
+        LZ_CHECK(lz_writer_write_cstr(&low, "q"));
+    }
+    check_case_bytes(&vm, input.data, input.length, &upper, &lower);
+    LzString *text = lz_string_new(&vm.heap, "UNCHANGED", 9);
+    LzValue arg = lz_value_object(&text->base), result = lz_value_nil();
+    size_t bytes = sizeof(LzString) + 10;
+    lz_vm_set_heap_limit(&vm, vm.heap.live_bytes + bytes - 1);
+    LZ_CHECK(lz_method_to_upper(&vm, 1, &arg, &result) == LZ_ERR_HEAP_LIMIT);
+    lz_vm_set_heap_limit(&vm, vm.heap.live_bytes + bytes);
+    LZ_CHECK(lz_method_to_upper(&vm, 1, &arg, &result) == LZ_OK);
+    lz_value_release(&vm.heap, &result);
+    lz_value_release(&vm.heap, &arg);
+    lz_buffer_free(&input); lz_buffer_free(&upper); lz_buffer_free(&lower);
+    LZ_CHECK(vm.heap.live_objects == 0 && vm.heap.live_bytes == 0);
+    lz_vm_free(&vm);
+}
+
+static size_t reference_find(const char *text, size_t length, const char *needle,
+                              size_t width, size_t from) {
+    if (from > length || width > length - from) return SIZE_MAX;
+    for (size_t i = from; i <= length - width; i++) {
+        if (width == 0 || memcmp(text + i, needle, width) == 0) return i;
+    }
+    return SIZE_MAX;
+}
+
+static void test_search_corpus(void) {
+    LzVM vm;
+    lz_vm_init(&vm, (LzWriter){0}, (LzWriter){0});
+    uint32_t random = 0x13579BDFu;
+    for (size_t round = 0; round < 256; round++) {
+        char text[512], needle[7];
+        size_t length = text_random(&random) % sizeof text;
+        size_t width = round % sizeof needle;
+        for (size_t i = 0; i < length; i++) text[i] = "ab:\0\xC3\xA9"[text_random(&random) % 6];
+        for (size_t i = 0; i < width; i++) needle[i] = "ab:\0\xC3\xA9"[text_random(&random) % 6];
+        LzString *hay = lz_string_new(&vm.heap, text, length);
+        LzString *key = lz_string_new(&vm.heap, needle, width);
+        LzValue args[] = {lz_value_object(&hay->base), lz_value_object(&key->base)};
+        LzValue result = lz_value_nil();
+        size_t first = reference_find(text, length, needle, width, 0);
+        LZ_CHECK(lz_method_contains(&vm, 2, args, &result) == LZ_OK);
+        LZ_CHECK(result.type == LZ_VAL_BOOL && result.as.boolean == (first != SIZE_MAX));
+        LZ_CHECK(lz_method_index_of(&vm, 2, args, &result) == LZ_OK);
+        int64_t points = -1;
+        if (first != SIZE_MAX) {
+            points = 0;
+            for (size_t i = 0; i < first; i++) points += ((unsigned char)text[i] & 0xC0) != 0x80;
+        }
+        LZ_CHECK(result.type == LZ_VAL_INT && result.as.integer == points);
+        LzStatus status = lz_method_split(&vm, 2, args, &result);
+        if (width == 0) {
+            LZ_CHECK(status == LZ_ERR_RUNTIME && strstr(vm.error, "separator cannot be empty") != NULL);
+        } else {
+            LZ_CHECK(status == LZ_OK && lz_value_is_array(&result));
+            if (status == LZ_OK && lz_value_is_array(&result)) {
+                LzArray *pieces = lz_value_as_array(&result);
+                size_t start = 0, count = 0;
+                for (;;) {
+                    size_t end = reference_find(text, length, needle, width, start);
+                    size_t stop = end == SIZE_MAX ? length : end;
+                    LZ_CHECK(count < pieces->count);
+                    if (count < pieces->count) {
+                        LzString *piece = (LzString *)pieces->items[count].as.object;
+                        LZ_CHECK(piece->length == stop - start);
+                        LZ_CHECK(piece->length != stop - start || memcmp(piece->data, text + start, stop - start) == 0);
+                    }
+                    count++;
+                    if (end == SIZE_MAX) break;
+                    start = end + width;
+                }
+                LZ_CHECK(count == pieces->count);
+                lz_value_release(&vm.heap, &result);
+            }
+        }
+        lz_value_release(&vm.heap, &args[0]); lz_value_release(&vm.heap, &args[1]);
+    }
+    LZ_CHECK(vm.heap.live_objects == 0 && vm.heap.live_bytes == 0);
+    lz_vm_free(&vm);
+}
+
 int main(void) {
     test_text_methods();
     test_unicode_text();
@@ -263,5 +423,7 @@ int main(void) {
     test_no_ufcs();
     test_typeof();
     test_fuel_and_heap();
+    test_case_corpus();
+    test_search_corpus();
     return LZ_TEST_RESULT();
 }

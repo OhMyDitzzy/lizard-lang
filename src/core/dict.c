@@ -141,11 +141,35 @@ LzDict *lz_dict_new(LzHeap *heap, size_t capacity) {
     return dict;
 }
 
-size_t lz_dict_index_of(const LzDict *dict, const LzValue *key) {
+/* Valid keys are leaves, so a hit does not need the container equality walker.
+ * Keep the generic fallback for callers probing an unsupported value. */
+static bool same_key(const LzValue *a, const LzValue *b) {
+    if (a->type == b->type) {
+        switch (a->type) {
+        case LZ_VAL_INT:
+            return a->as.integer == b->as.integer;
+        case LZ_VAL_BOOL:
+            return a->as.boolean == b->as.boolean;
+        case LZ_VAL_OBJECT:
+            if (a->as.object == b->as.object) return true;
+            if (a->as.object->type == LZ_OBJ_STRING && b->as.object->type == LZ_OBJ_STRING) {
+                const LzString *left = (const LzString *)a->as.object;
+                const LzString *right = (const LzString *)b->as.object;
+                return left->length == right->length && left->hash == right->hash &&
+                       memcmp(left->data, right->data, left->length) == 0;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    return lz_value_equal(a, b);
+}
+
+static size_t index_of_hashed(const LzDict *dict, const LzValue *key, uint64_t hash) {
     if (dict->count == 0) {
         return SIZE_MAX;
     }
-    uint64_t hash = hash_key(dict, key);
     size_t mask = dict->slot_capacity - 1;
     size_t at = (size_t)hash & mask;
     for (;;) {
@@ -154,11 +178,15 @@ size_t lz_dict_index_of(const LzDict *dict, const LzValue *key) {
             return SIZE_MAX;
         }
         const LzDictEntry *entry = &dict->entries[slot - 1];
-        if (entry->hash == hash && lz_value_equal(&entry->key, key)) {
+        if (entry->hash == hash && same_key(&entry->key, key)) {
             return (size_t)(slot - 1);
         }
         at = (at + 1) & mask;
     }
+}
+
+size_t lz_dict_index_of(const LzDict *dict, const LzValue *key) {
+    return dict->count == 0 ? SIZE_MAX : index_of_hashed(dict, key, hash_key(dict, key));
 }
 
 LzValue *lz_dict_get(const LzDict *dict, const LzValue *key) {
@@ -208,18 +236,19 @@ LzStatus lz_vm_dict_key_error(LzVM *vm, const LzDict *dict, const LzValue *key,
 }
 
 LzStatus lz_dict_own_key(LzVM *vm, const LzValue *key) {
-    uint16_t kind = lz_kind_of(key);
-    if ((kind & (LZ_KIND_STRING | LZ_KIND_INT | LZ_KIND_BOOL)) != 0) {
+    if (key->type == LZ_VAL_INT || key->type == LZ_VAL_BOOL ||
+        (key->type == LZ_VAL_OBJECT && key->as.object->type == LZ_OBJ_STRING)) {
         return LZ_OK;
     }
+    uint16_t kind = lz_kind_of(key);
     const char *name = lz_value_kind_name(key);
     bool vowel = kind == LZ_KIND_ERROR || (kind == LZ_KIND_INSTANCE && strchr("AEIOU", name[0]) != NULL);
     return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "%s %s cannot be a dict key", vowel ? "an" : "a", name);
 }
 
 bool lz_dict_admit_key(const LzDict *dict, const LzValue *key) {
-    uint16_t kind = lz_kind_of(key);
-    if ((kind & (LZ_KIND_STRING | LZ_KIND_INT | LZ_KIND_BOOL)) == 0) {
+    if (key->type != LZ_VAL_INT && key->type != LZ_VAL_BOOL &&
+        !(key->type == LZ_VAL_OBJECT && key->as.object->type == LZ_OBJ_STRING)) {
         return false;
     }
     return dict->key_type == NULL || lz_type_matches(dict->key_type, key);
@@ -281,11 +310,12 @@ LzStatus lz_dict_check_store(LzVM *vm, LzDict *dict, const LzValue *value) {
     return LZ_OK;
 }
 
-static void append_entry(LzHeap *heap, LzDict *dict, const LzValue *key, const LzValue *value) {
+static void append_entry(LzHeap *heap, LzDict *dict, const LzValue *key, const LzValue *value,
+                         uint64_t hash) {
     LzDictEntry *entry = &dict->entries[dict->count];
     entry->key = *key;
     entry->value = *value;
-    entry->hash = hash_key(dict, key);
+    entry->hash = hash;
     lz_value_retain(&entry->key);
     lz_value_retain(&entry->value);
     lz_note_container_store(heap, &entry->value);
@@ -311,7 +341,8 @@ LzStatus lz_dict_set(LzVM *vm, LzDict *dict, const LzValue *key, const LzValue *
         return status;
     }
 
-    size_t index = lz_dict_index_of(dict, key);
+    uint64_t hash = hash_key(dict, key);
+    size_t index = index_of_hashed(dict, key, hash);
     if (index != SIZE_MAX) {
         /* Overwriting a key keeps its place in the order. */
         LzValue old = dict->entries[index].value;
@@ -328,7 +359,7 @@ LzStatus lz_dict_set(LzVM *vm, LzDict *dict, const LzValue *key, const LzValue *
     if (!reserve(&vm->heap, dict, dict->count + 1)) {
         return lz_vm_out_of_memory(vm);
     }
-    append_entry(&vm->heap, dict, key, value);
+    append_entry(&vm->heap, dict, key, value, hash);
     return LZ_OK;
 }
 
@@ -419,7 +450,8 @@ LzStatus lz_dict_copy(LzVM *vm, const LzDict *dict, LzValue *result) {
         return lz_vm_out_of_memory(vm);
     }
     for (size_t i = 0; i < dict->count; i++) {
-        append_entry(&vm->heap, copy, &dict->entries[i].key, &dict->entries[i].value);
+        const LzDictEntry *entry = &dict->entries[i];
+        append_entry(&vm->heap, copy, &entry->key, &entry->value, hash_key(copy, &entry->key));
     }
     copy->key_type = dict->key_type;
     copy->value_type = dict->value_type;

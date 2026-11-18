@@ -37,6 +37,7 @@ static const Case programs[] = {
     {"not and negate", "{ let i = 0\n let t = 0\n while i < 100 { if !(i % 3 == 0) { t = t - i }\n t = -t\n i = i + 1 }\n println(t, -(2.5), !nil, !0) }\n", true},
     {"negate min", "{ let m = -9223372036854775807 - 1\n let i = 0\n while i < 3 { println(-m)\n i = i + 1 } }\n", true},
     {"division by zero in loop", "{ let i = 5\n while i > -1 { println(10 / i)\n i = i - 1 } }\n", true},
+    {"string builder", "let i = 0\nlet total = 0\nwhile i < 2000 { total += len($\"[{i:04d}]\")\n i += 1 }\nprintln(total)\n", true},
     {"string in loop", "{ let i = 0\n let s = \"a\"\n while i < 5 { s = s + \"b\"\n i = i + 1 }\n println(s) }\n", true},
     {"string arithmetic error", "{ let i = 0\n while i < 5 { println(i + \"x\")\n i = i + 1 } }\n", true},
 
@@ -156,6 +157,13 @@ static void check_hot_policy(void) {
     LZ_CHECK(hot.stats.jit_programs >= 1);
     LZ_CHECK(hot.stats.jit_enters >= 1);
     outcome_free(&hot);
+    Outcome strings;
+    run_source(LZ_ENGINE_GE,
+        "let i = 0\nlet total = 0\nwhile i < 5000 { total += len($\"[{i:04d}]\")\n i += 1 }\nprintln(total)\n",
+        0, 0, &strings);
+    LZ_CHECK(strings.run_status == LZ_OK && strings.stats.jit_programs >= 1);
+    LZ_CHECK(strings.stats.jit_enters > 1000);
+    outcome_free(&strings);
     Outcome cold;
     run_source(LZ_ENGINE_GE, "let i = 0\nwhile i < 5 { i = i + 1 }\nprintln(i)\n", 0, 0, &cold);
     LZ_CHECK(cold.stats.jit_programs == 0);

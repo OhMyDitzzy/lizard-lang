@@ -28,7 +28,9 @@ static bool buffer_write(void *ctx, const char *data, size_t length) {
         buffer->capacity = capacity;
     }
 
-    if (length > 0) {
+    if (length == 1) {
+        buffer->data[buffer->length] = *data;
+    } else if (length > 1) {
         memcpy(buffer->data + buffer->length, data, length);
     }
     buffer->length += length;

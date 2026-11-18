@@ -477,7 +477,79 @@ static void test_disassembly(void) {
     finish(&program);
 }
 
+static void test_key_probes(void) {
+    LzVM vm;
+    lz_vm_init(&vm, (LzWriter){0}, (LzWriter){0});
+    LzDict *dict = lz_dict_new(&vm.heap, 0);
+    LZ_CHECK(dict != NULL);
+    if (dict == NULL) { lz_vm_free(&vm); return; }
+    /* A real FNV collision must still compare bytes, even when the lengths match. */
+    const char *names[] = {"a0616b25638c6d8e", "2a4049d282033ec2", "\xCC\x24\x31\xC4"};
+    LzString *strings[3];
+    for (size_t i = 0; i < 3; i++) {
+        strings[i] = lz_string_new(&vm.heap, names[i], strlen(names[i]));
+        LZ_CHECK(strings[i] != NULL);
+        LzValue key = lz_value_object(&strings[i]->base), value = lz_value_int((int64_t)i);
+        LZ_CHECK(lz_dict_set(&vm, dict, &key, &value) == LZ_OK);
+    }
+    LZ_CHECK(strings[0]->hash == strings[1]->hash);
+    LZ_CHECK(strings[2]->hash == 0);
+    for (size_t i = 0; i < 3; i++) {
+        LzString *copy = lz_string_new(&vm.heap, names[i], strlen(names[i]));
+        LzValue key = lz_value_object(&copy->base);
+        const LzValue *got = lz_dict_get(dict, &key);
+        LZ_CHECK(got != NULL && got->type == LZ_VAL_INT && got->as.integer == (int64_t)i);
+        lz_object_release(&vm.heap, &copy->base);
+        lz_object_release(&vm.heap, &strings[i]->base);
+    }
+    for (int64_t i = 0; i < 2048; i++) {
+        LzValue key = lz_value_int(i), value = lz_value_int(i * 7);
+        LZ_CHECK(lz_dict_set(&vm, dict, &key, &value) == LZ_OK);
+    }
+    for (int64_t i = 0; i < 2048; i += 3) {
+        LzValue key = lz_value_int(i), removed;
+        LZ_CHECK(lz_dict_remove(&vm, dict, &key, &removed) == LZ_OK);
+        LZ_CHECK(lz_dict_get(dict, &key) == NULL);
+        LZ_CHECK(removed.type == LZ_VAL_INT && removed.as.integer == i * 7);
+        LZ_CHECK(lz_dict_set(&vm, dict, &key, &removed) == LZ_OK);
+        LZ_CHECK(lz_dict_index_of(dict, &key) == dict->count - 1);
+    }
+    for (int64_t i = 0; i < 2048; i++) {
+        LzValue key = lz_value_int(i);
+        const LzValue *got = lz_dict_get(dict, &key);
+        LZ_CHECK(got != NULL && got->type == LZ_VAL_INT && got->as.integer == i * 7);
+    }
+    LzValue key = lz_value_bool(true), value = lz_value_int(-1);
+    LZ_CHECK(lz_dict_set(&vm, dict, &key, &value) == LZ_OK);
+    LZ_CHECK(lz_dict_get(dict, &key)->as.integer == -1);
+    key = lz_value_int(1);
+    LZ_CHECK(lz_dict_get(dict, &key)->as.integer == 7);
+    LzValue copy;
+    LZ_CHECK(lz_dict_copy(&vm, dict, &copy) == LZ_OK);
+    LZ_CHECK(lz_value_is_dict(&copy));
+    if (lz_value_is_dict(&copy)) {
+        LzDict *other = lz_value_as_dict(&copy);
+        LZ_CHECK(other->seed != dict->seed);
+        for (size_t i = 0; i < dict->count; i++) {
+            const LzValue *got = lz_dict_get(other, &dict->entries[i].key);
+            LZ_CHECK(got != NULL && lz_value_equal(got, &dict->entries[i].value));
+        }
+        LzValue original = lz_value_object(&dict->base);
+        LZ_CHECK(lz_value_equal(&original, &copy));
+        LZ_CHECK(lz_value_equal(&copy, &original));
+        lz_value_release(&vm.heap, &copy);
+    }
+    lz_object_release(&vm.heap, &dict->base);
+    LZ_CHECK(vm.heap.live_objects == 0 && vm.heap.live_bytes == 0);
+    lz_vm_free(&vm);
+    check_output("let d = {}\nfor i in 0..2000 { d[\"key\" + string(i)] = i }\n"
+                 "let total = 0\nfor i in 0..2000 { total += d[$\"key{i}\"] }\n"
+                 "println(total, len(d), d.copy() == d, d == d.copy())\n",
+                 "1999000 2000 true true\n");
+}
+
 int main(void) {
+    test_key_probes();
     test_literals();
     test_keys();
     test_access();

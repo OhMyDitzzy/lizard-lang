@@ -173,6 +173,22 @@ static void layout(LzClass *cls, size_t base) { /* `base` is added to the own sl
         if (member->kind != LZ_MEMBER_FIELD) {
             continue;
         }
+        const LzType *type = &member->type;
+        member->type_tag = LZ_FIELD_GENERIC;
+        if (type->literal_count == 0) {
+            switch (type->kinds) {
+            case LZ_KIND_INT: member->type_tag = LZ_FIELD_INT; break;
+            case LZ_KIND_FLOAT: member->type_tag = LZ_FIELD_FLOAT; break;
+            case LZ_KIND_BOOL: member->type_tag = LZ_FIELD_BOOL; break;
+            case LZ_KIND_STRING: member->type_tag = LZ_FIELD_STRING; break;
+            case LZ_KIND_INSTANCE: member->type_tag = LZ_FIELD_CLASS; break;
+            case LZ_KINDS_ANY:
+                if (type->class_id == 0 && type->element == NULL &&
+                    type->value_element == NULL && type->fn == NULL) member->type_tag = LZ_FIELD_ANY;
+                break;
+            default: break;
+            }
+        }
         member->slot = (uint16_t)(member->slot + base);
         cls->field_refs[member->slot].cls = cls;
         cls->field_refs[member->slot].index = (uint16_t)i;
@@ -199,6 +215,71 @@ void lz_class_seal(LzClass *cls) {
 static const LzMember *field_at(const LzClass *cls, size_t slot) {
     const LzFieldRef *ref = &cls->field_refs[slot];
     return &ref->cls->members[ref->index];
+}
+
+/* Only immutable members of the class chain can be borrowed by a cache.
+ * Extensions may be shadowed later and always keep the ordinary lookup. */
+static void member_cache_fill(LzVM *vm, LzMemberCache *ins, const LzInstance *instance,
+                               const LzString *name, int what) {
+    if (vm->ext_count > UINT16_MAX) return;
+    const LzClass *cls = instance->cls;
+    LzFound hit;
+    if (!lz_class_lookup(cls, name, &hit)) {
+        return;
+    }
+    const LzMember *member = hit.member;
+    /* A hit from an `extend` block is not in the chain and may be shadowed later: not cached. */
+    bool in_chain = false;
+    for (const LzClass *c = cls; c != NULL && !in_chain; c = c->parent) {
+        in_chain = c == hit.declared_in && member >= c->members && member < c->members + c->member_count;
+    }
+    if (!in_chain) {
+        return;
+    }
+    const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
+    uint64_t owner = frame->closure != NULL ? frame->closure->function->owner_id : 0;
+    bool sees = lz_class_sees(vm, owner, hit.declared_in);
+    if (member->vis == LZ_VIS_PRIVATE && !sees) {
+        return;
+    }
+    if (what == 2) {
+        if (member->kind != LZ_MEMBER_METHOD || strcmp(name->data, "init") == 0) {
+            return;
+        }
+    } else {
+        if (member->kind != LZ_MEMBER_FIELD || member->is_link) {
+            return;
+        }
+        if (what == 1 && member->vis == LZ_VIS_PUB_READ && !sees) {
+            return;
+        }
+    }
+    ins->ic_class = cls->id;
+    ins->ic_member = member;
+    ins->ic_extensions = (uint16_t)vm->ext_count;
+}
+
+/*
+ * The class of the instance is not the cached one: tries to fill the cache for it. False when the
+ * site gave up on its cache or the member is not one the cache takes, and the caller then hands
+ * the instruction to the reference.
+ */
+bool lz_member_cache_miss(LzVM *vm, LzMemberCache *ins, const LzInstance *instance,
+                          const LzString *name, int what) {
+    if (ins->ic_stuck != 0) {
+        return false;
+    }
+    if (ins->ic_run < LZ_MEMBER_CACHE_MIN_RUN) {
+        if (++ins->ic_bad >= LZ_MEMBER_CACHE_BAD_MAX) {
+            ins->ic_stuck = 1;
+            return false;
+        }
+    } else {
+        ins->ic_bad = 0;
+    }
+    ins->ic_run = 0;
+    member_cache_fill(vm, ins, instance, name, what);
+    return lz_member_cache_matches(vm, ins, instance);
 }
 
 /*
@@ -944,7 +1025,10 @@ static void describe_actual(const LzType *type, const LzValue *value, const LzWr
     }
 }
 
-static LzStatus check_field_type(LzVM *vm, const LzClass *cls, const LzMember *member,
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static LzStatus check_field_type_slow(LzVM *vm, const LzClass *cls, const LzMember *member,
                                  const LzValue *value) {
     const LzType *type = &member->type;
     bool fits;
@@ -976,6 +1060,30 @@ static LzStatus check_field_type(LzVM *vm, const LzClass *cls, const LzMember *m
     lz_buffer_free(&expected);
     lz_buffer_free(&actual);
     return status;
+}
+
+static inline LzStatus check_field_type(LzVM *vm, const LzClass *cls,
+                                        const LzMember *member, const LzValue *value) {
+    const LzType *type = &member->type;
+    /* Positive matches leave arrays on the original charged path and preserve
+     * literal, union and diagnostic handling on every miss. */
+    switch (member->type_tag) {
+    case LZ_FIELD_INT: if (value->type == LZ_VAL_INT) return LZ_OK; break;
+    case LZ_FIELD_FLOAT: if (value->type == LZ_VAL_FLOAT) return LZ_OK; break;
+    case LZ_FIELD_BOOL: if (value->type == LZ_VAL_BOOL) return LZ_OK; break;
+    case LZ_FIELD_STRING:
+        if (value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_STRING) return LZ_OK;
+        break;
+    case LZ_FIELD_ANY:
+        if (value->type != LZ_VAL_OBJECT || value->as.object->type == LZ_OBJ_STRING) return LZ_OK;
+        break;
+    case LZ_FIELD_CLASS:
+        if (lz_value_is_instance(value) && (type->class_id == 0 ||
+            lz_value_as_instance(value)->cls->id == type->class_id)) return LZ_OK;
+        break;
+    default: break;
+    }
+    return check_field_type_slow(vm, cls, member, value);
 }
 
 static LzStatus link_value_for(LzVM *vm, const LzValue *value, LzValue *cell, LzValue *made);

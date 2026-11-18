@@ -1,4 +1,4 @@
-# nil, false, 0 and 0.0 are false. Everything else is true, including "" and [].
+# nil, false, zero and empty strings, arrays and dicts are false.
 println(bool(0), bool(1), bool(-1), bool(0.0), bool(-0.0), bool(0.5), bool(""), bool([]), bool(nil))
 println(not 0, not 1, not 0.0, not -0.0, not "", not nil, not false)
 println(0 or "d", 0 and "d", 1 and "d", 0.0 or 7, nil or 3, 5 or 6, false and 1)

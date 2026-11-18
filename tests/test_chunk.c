@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stdlib.h>
 
 #include "lizard/chunk.h"
 #include "test_util.h"
@@ -135,10 +136,36 @@ static void test_type_table(void) {
 }
 
 static void test_opcode_names(void) {
+    LZ_CHECK(lz_opcode_length(LZ_OP_BUILD_STRING) == 3);
+    LZ_CHECK(lz_opcode_length(LZ_OP_STRING_CHECK) == 5);
+    LZ_CHECK(strcmp(lz_opcode_name(LZ_OP_BUILD_STRING), "OP_BUILD_STRING") == 0);
     LZ_CHECK(lz_opcode_length(LZ_OP_CHECK_TYPE) == 3);
     LZ_CHECK(strcmp(lz_opcode_name(LZ_OP_CHECK_TYPE), "OP_CHECK_TYPE") == 0);
     LZ_CHECK(strcmp(lz_opcode_name(LZ_OP_CALL), "OP_CALL") == 0);
     LZ_CHECK(strcmp(lz_opcode_name(200), "OP_UNKNOWN") == 0);
+}
+
+static void test_string_plan_lifetime(void) {
+    LzHeap heap;
+    LzChunk chunk;
+    lz_heap_init(&heap);
+    lz_chunk_init(&chunk);
+    LzStringPiece *pieces = malloc(2 * sizeof *pieces);
+    LZ_CHECK(pieces != NULL);
+    if (pieces == NULL) return;
+    memset(pieces, 0, 2 * sizeof *pieces);
+    LzStringBuild plan = {.pieces = pieces, .count = 2, .slots = 2, .peak = 2, .fast = 3, .end = 10};
+    uint16_t index;
+    LZ_CHECK(lz_chunk_add_string_build(&chunk, &plan, &index));
+    LZ_CHECK(index == 0 && lz_chunk_string_build(&chunk, index)->pieces == pieces);
+    LzGlobalSite *site = lz_chunk_global_site(&chunk, 255);
+    LZ_CHECK(site != NULL && lz_chunk_string_build(&chunk, index)->pieces == pieces);
+    lz_chunk_truncate(&heap, &chunk, 10, 0);
+    LZ_CHECK(lz_chunk_string_build(&chunk, index) != NULL);
+    lz_chunk_truncate(&heap, &chunk, 0, 0);
+    LZ_CHECK(lz_chunk_string_build(&chunk, index) == NULL);
+    lz_chunk_free(&heap, &chunk);
+    lz_heap_destroy(&heap);
 }
 
 int main(void) {
@@ -147,5 +174,6 @@ int main(void) {
     test_constant_limit();
     test_type_table();
     test_opcode_names();
+    test_string_plan_lifetime();
     return LZ_TEST_RESULT();
 }

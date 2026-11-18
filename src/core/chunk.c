@@ -4,6 +4,34 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct MemberSite {
+    size_t offset_plus_one;
+    LzMemberCache cache;
+} MemberSite;
+
+typedef struct ChunkCache {
+    LzStringBuild *builds;
+    size_t build_count;
+    size_t build_capacity;
+    MemberSite *members;
+    LzGlobalSite sites[];
+} ChunkCache;
+
+static ChunkCache *chunk_cache(const LzChunk *chunk) {
+    return chunk->global_sites == NULL ? NULL :
+        (ChunkCache *)((unsigned char *)chunk->global_sites - offsetof(ChunkCache, sites));
+}
+
+static void free_cache(LzChunk *chunk) {
+    ChunkCache *cache = chunk_cache(chunk);
+    if (cache != NULL) {
+        for (size_t i = 0; i < cache->build_count; i++) free(cache->builds[i].pieces);
+        free(cache->builds);
+        free(cache->members);
+        free(cache);
+    }
+}
+
 void lz_chunk_init(LzChunk *chunk) {
     chunk->code = NULL;
     chunk->offsets = NULL;
@@ -29,7 +57,7 @@ void lz_chunk_discard(LzChunk *chunk) {
     free(chunk->constants);
     free(chunk->types);
     free(chunk->type_slots);
-    free(chunk->global_sites);
+    free_cache(chunk);
     lz_interface_free(chunk->iface);
     lz_chunk_init(chunk);
 }
@@ -172,6 +200,10 @@ bool lz_chunk_add_type(LzChunk *chunk, const LzType *type, uint16_t *index) {
 
 const char *lz_opcode_name(uint8_t opcode) {
     switch (opcode) {
+    case LZ_OP_STRING_BEGIN: return "OP_STRING_BEGIN";
+    case LZ_OP_STRING_FALLBACK: return "OP_STRING_FALLBACK";
+    case LZ_OP_STRING_CHECK: return "OP_STRING_CHECK";
+    case LZ_OP_BUILD_STRING: return "OP_BUILD_STRING";
     case LZ_OP_CONSTANT:
         return "OP_CONSTANT";
     case LZ_OP_NIL:
@@ -343,6 +375,9 @@ const char *lz_opcode_name(uint8_t opcode) {
 
 size_t lz_opcode_length(uint8_t opcode) {
     switch (opcode) {
+    case LZ_OP_STRING_BEGIN:
+    case LZ_OP_STRING_FALLBACK:
+    case LZ_OP_BUILD_STRING:
     case LZ_OP_CONSTANT:
     case LZ_OP_GET_GLOBAL:
     case LZ_OP_DEFINE_GLOBAL:
@@ -363,6 +398,7 @@ size_t lz_opcode_length(uint8_t opcode) {
         return 2;
     case LZ_OP_CALL_EX:
         return 4;
+    case LZ_OP_STRING_CHECK:
     case LZ_OP_CHECK_PARAM:
     case LZ_OP_JUMP_IF_SUPPLIED:
         return 5;
@@ -455,23 +491,76 @@ void lz_chunk_truncate(LzHeap *heap, LzChunk *chunk, size_t code_count, size_t c
         chunk->constant_count--;
         lz_value_release(heap, &chunk->constants[chunk->constant_count]);
     }
-    /* A dropped constant index may come back as another name. */
-    free(chunk->global_sites);
-    chunk->global_sites = NULL;
-    chunk->global_site_count = 0;
+    /* Keep live build plans, but no cached cell may refer to a reused constant index. */
+    ChunkCache *cache = chunk_cache(chunk);
+    if (cache != NULL) {
+        while (cache->build_count > 0 && cache->builds[cache->build_count - 1].end > code_count) {
+            free(cache->builds[--cache->build_count].pieces);
+        }
+        memset(chunk->global_sites, 0, chunk->global_site_count * sizeof *chunk->global_sites);
+        if (cache->members != NULL) memset(cache->members, 0, LZ_MEMBER_SITES_MAX * sizeof *cache->members);
+    }
 }
 
 LzGlobalSite *lz_chunk_global_site(const LzChunk *chunk, uint16_t index) {
     LzChunk *cache = (LzChunk *)chunk;
     if (index >= cache->global_site_count) {
         size_t count = cache->constant_count > (size_t)index + 1 ? cache->constant_count : (size_t)index + 1;
-        LzGlobalSite *sites = realloc(cache->global_sites, count * sizeof *sites);
-        if (sites == NULL) {
-            return NULL;
+        ChunkCache *old = chunk_cache(chunk);
+        ChunkCache *grown = realloc(old, offsetof(ChunkCache, sites) + count * sizeof(LzGlobalSite));
+        if (grown == NULL) return NULL;
+        if (old == NULL) {
+            grown->builds = NULL;
+            grown->build_count = grown->build_capacity = 0;
+            grown->members = NULL;
         }
-        memset(sites + cache->global_site_count, 0, (count - cache->global_site_count) * sizeof *sites);
-        cache->global_sites = sites;
+        memset(grown->sites + cache->global_site_count, 0,
+               (count - cache->global_site_count) * sizeof(LzGlobalSite));
+        cache->global_sites = grown->sites;
         cache->global_site_count = count;
     }
     return &cache->global_sites[index];
+}
+
+LzMemberCache *lz_chunk_member_site(const LzChunk *chunk, size_t offset) {
+    if (lz_chunk_global_site(chunk, 0) == NULL) return NULL;
+    ChunkCache *cache = chunk_cache(chunk);
+    if (cache->members == NULL) {
+        cache->members = calloc(LZ_MEMBER_SITES_MAX, sizeof *cache->members);
+        if (cache->members == NULL) return NULL;
+    }
+    MemberSite *site = &cache->members[offset % LZ_MEMBER_SITES_MAX];
+    if (site->offset_plus_one != offset + 1) {
+        memset(site, 0, sizeof *site);
+        site->offset_plus_one = offset + 1;
+    }
+    return &site->cache;
+}
+
+bool lz_chunk_add_string_build(LzChunk *chunk, const LzStringBuild *build, uint16_t *index) {
+    if (build->count == 0 || build->count > 64 || build->pieces == NULL) return false;
+    size_t slots = build->count;
+    for (size_t i = 0; i < build->count; i++) {
+        if (build->pieces[i].mode > LZ_STRING_PIECE_FORMAT) return false;
+        if (build->pieces[i].mode == LZ_STRING_PIECE_FORMAT) slots++;
+    }
+    if (build->slots != slots || build->peak < slots) return false;
+    if (lz_chunk_global_site(chunk, 0) == NULL) return false;
+    ChunkCache *cache = chunk_cache(chunk);
+    if (cache->build_count >= UINT16_MAX) return false;
+    if (cache->build_count == cache->build_capacity) {
+        size_t capacity = cache->build_capacity == 0 ? 4 : cache->build_capacity * 2;
+        LzStringBuild *grown = realloc(cache->builds, capacity * sizeof *grown);
+        if (grown == NULL) return false;
+        cache->builds = grown;
+        cache->build_capacity = capacity;
+    }
+    *index = (uint16_t)cache->build_count;
+    cache->builds[cache->build_count++] = *build;
+    return true;
+}
+
+const LzStringBuild *lz_chunk_string_build(const LzChunk *chunk, uint16_t index) {
+    const ChunkCache *cache = chunk_cache(chunk);
+    return cache != NULL && index < cache->build_count ? &cache->builds[index] : NULL;
 }

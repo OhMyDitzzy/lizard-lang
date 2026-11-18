@@ -114,7 +114,10 @@ static LzStatus push_frame(LzVM *vm, LzClosure *closure, size_t base, uint64_t s
  * too few arguments are an error as well, but named arguments may still fill in the required
  * ones, so that check waits for them.
  */
-static LzStatus arrange(LzVM *vm, const LzFunction *function, size_t argc, bool strict) {
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static LzStatus arrange_slow(LzVM *vm, const LzFunction *function, size_t argc, bool strict) {
     size_t params = function->param_count;
     if (argc > params && !function->has_rest) {
         return arity_error(vm, function, argc);
@@ -159,6 +162,14 @@ static LzStatus arrange(LzVM *vm, const LzFunction *function, size_t argc, bool 
         vm->stack[vm->stack_count++] = lz_value_object(&rest->base);
     }
     return LZ_OK;
+}
+
+/* Keep the ordinary call out of the rest/default path's C frame and register spills. */
+static inline LzStatus arrange(LzVM *vm, const LzFunction *function, size_t argc, bool strict) {
+    if (argc == function->param_count && !function->has_rest && vm->stack_count <= vm->stack_cap) {
+        return LZ_OK;
+    }
+    return arrange_slow(vm, function, argc, strict);
 }
 
 static LzStatus call_native(LzVM *vm, const LzNative *native, size_t argc) {
@@ -236,6 +247,15 @@ static LzStatus construct_on_stack(LzVM *vm, size_t callee_index, size_t argc, s
     return LZ_OK;
 }
 
+static LzStatus call_closure(LzVM *vm, LzClosure *closure, size_t callee_index, size_t argc,
+                             size_t resume_ip, uint32_t call_offset, bool *entered) {
+    LzStatus status = arrange(vm, closure->function, argc, true);
+    if (status != LZ_OK) return status;
+    status = push_frame(vm, closure, callee_index + 1, supplied_mask(argc), resume_ip, call_offset);
+    *entered = status == LZ_OK;
+    return status;
+}
+
 LzStatus lz_vm_call(LzVM *vm, size_t argc, size_t resume_ip, uint32_t call_offset, bool *entered) {
     *entered = false;
     if (vm->stack_count < argc + 1) {
@@ -243,6 +263,11 @@ LzStatus lz_vm_call(LzVM *vm, size_t argc, size_t resume_ip, uint32_t call_offse
     }
 
     size_t callee_index = vm->stack_count - argc - 1;
+    const LzValue *plain = &vm->stack[callee_index];
+    if (lz_value_is_closure(plain)) {
+        return call_closure(vm, lz_value_as_closure(plain), callee_index, argc,
+                            resume_ip, call_offset, entered);
+    }
     if (lz_value_is_bound(&vm->stack[callee_index])) {
         LzStatus unwrapped = unwrap_bound(vm, callee_index, &argc);
         if (unwrapped != LZ_OK) {
@@ -263,14 +288,8 @@ LzStatus lz_vm_call(LzVM *vm, size_t argc, size_t resume_ip, uint32_t call_offse
                                         : not_callable_error(vm);
     }
 
-    LzClosure *closure = lz_value_as_closure(callee);
-    LzStatus status = arrange(vm, closure->function, argc, true);
-    if (status != LZ_OK) {
-        return status;
-    }
-    status = push_frame(vm, closure, callee_index + 1, supplied_mask(argc), resume_ip, call_offset);
-    *entered = status == LZ_OK;
-    return status;
+    return call_closure(vm, lz_value_as_closure(callee), callee_index, argc,
+                        resume_ip, call_offset, entered);
 }
 
 /*
@@ -332,7 +351,12 @@ static bool c_stack_exhausted(LzVM *vm) {
     (void)here;
     uintptr_t now = C_STACK_NOW();
     if (vm->native_depth == 0) {
-        vm->c_stack_floor = c_stack_floor(vm, now);
+        /* A known thread stack has a fixed floor throughout this activation.
+         * Unknown stacks retain the original fallback measurement at each outer callback. */
+        if (vm->c_stack_floor == 0 || vm->c_stack_hi == 0 ||
+            now < vm->c_stack_lo || now >= vm->c_stack_hi) {
+            vm->c_stack_floor = c_stack_floor(vm, now);
+        }
         return false;
     }
     return now < vm->c_stack_floor;
@@ -677,17 +701,22 @@ LzStatus lz_vm_return(LzVM *vm) {
         return malformed(vm, "return outside a function");
     }
     size_t base = vm->frames[vm->frame_count - 1].base;
-    LzValue result = lz_value_nil();
+    LzValue result;
     if (vm->stack_count > base) {
         result = vm->stack[--vm->stack_count];
-    } else if (vm->frames[vm->frame_count - 1].closure != NULL) {
-        return malformed(vm, "stack underflow");
-    } /* else the top-level code of a module loaded from inside a run, which gives back nil */
+    } else {
+        if (vm->frames[vm->frame_count - 1].closure != NULL) {
+            return malformed(vm, "stack underflow");
+        }
+        result = lz_value_nil(); /* a module loaded inside a run gives back nil */
+    }
     /* A try left open in this frame, from a `return` that skipped its end, dies with the frame. */
     while (vm->handler_count > 0 && vm->handlers[vm->handler_count - 1].frame >= vm->frame_count - 1) {
         vm->handler_count--;
     }
-    lz_vm_close_upvalues(vm, base);
+    if (vm->open_upvalues != NULL && vm->open_upvalues->location >= &vm->stack[base]) {
+        lz_vm_close_upvalues(vm, base);
+    }
     while (vm->stack_count > base - 1) {
         drop_top(vm); /* locals, arguments and the callee itself */
     }

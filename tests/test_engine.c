@@ -1148,6 +1148,14 @@ static void build_negate(LzVM *vm, LzChunk *chunk, void *context) {
     bc_op(chunk, LZ_OP_RETURN);
 }
 
+static void build_try_past_return(LzVM *vm, LzChunk *chunk, void *context) {
+    (void)vm;
+    (void)context;
+    bc_u16(chunk, LZ_OP_TRY_BEGIN, 3);
+    bc_u16(chunk, LZ_OP_JUMP, 1);
+    bc_op(chunk, LZ_OP_RETURN);
+}
+
 static void check_bytecode(void) {
     LZ_CHECK(compare_chunk("stack boundary: fused arithmetic", build_stack_boundary_bin, NULL, 0, 1));
     LZ_CHECK(compare_chunk("stack boundary: left operand on the stack", build_stack_boundary_bin1, NULL, 0, 1));
@@ -1164,6 +1172,7 @@ static void check_bytecode(void) {
     LZ_CHECK(compare_chunk("truncated instruction", build_truncated, NULL, 0, 0));
     LZ_CHECK(compare_chunk("unknown opcode", build_unknown_opcode, NULL, 0, 0));
     LZ_CHECK(compare_chunk("jump to the end", build_jump, (void *)(uintptr_t)4, 0, 1));
+    LZ_CHECK(compare_chunk("try with missing return", build_try_past_return, NULL, 0, 1));
     for (uintptr_t distance = 0; distance < 8; distance++) {
         LZ_CHECK(compare_chunk("jump", build_jump, (void *)distance, 0, -1));
         LZ_CHECK(compare_chunk("loop", build_loop, (void *)distance, 3000, -1)); /* may spin: fuel ends it */
@@ -1223,6 +1232,75 @@ static void check_api(void) {
     outcome_free(&ge);
 }
 
+static void check_try_ge(void) {
+    static const struct {
+        const char *name;
+        const char *text;
+        const char *expected;
+    } cases[] = {
+        {"catch resumes GE",
+         "let n = 0\nfor i in 0..8 { try { n += 10 / (i - 3) } catch e { println(e.kind) } }\n"
+         "println(n > 0)\n", "ArithmeticError\ntrue\n"},
+        {"callee unwinds to GE",
+         "fn down(n) { if n == 0 { return 1 / n }\n return down(n - 1) }\n"
+         "try { down(30) } catch e { println(e.kind, len(e.trace)) }\n",
+         "ArithmeticError 16\n"},
+        {"return removes handlers",
+         "fn f(n) { try { if n == 0 { return 7 }\n throw ValueError(\"v\") } catch e { return n } }\n"
+         "for i in 0..20 { f(i) }\ntry { throw RangeError(\"outer\") } catch e { println(f(0), e.kind) }\n",
+         "7 RangeError\n"},
+        {"nested catch and rethrow",
+         "try { try { throw ValueError(\"first\") } catch e { println(e.message)\n throw e }\n"
+         "finally { println(\"done\") } } catch e { println(e.kind) }\n",
+         "first\ndone\nValueError\n"},
+        {"unwind closes upvalues",
+         "let fs = []\ntry { let x = 7\n push(fs, fn() => x)\n throw Error(\"x\") } catch e {}\n"
+         "println(fs[0]())\n", "7\n"},
+        {"callback floor",
+         "fn f(x) { return 10 / x }\ntry { map([1, 0, 2], f) } catch e { println(e.kind) }\n"
+         "println(map([0, 1], fn(x) { try { return 10 / x } catch e { return -1 } }))\n",
+         "ArithmeticError\n[-1, 10.0]\n"},
+        {"coroutine handlers stay local",
+         "fn work() { try { yield(\"start\")\n println(1 / 0) } catch e { yield(e.kind) }\n return 9 }\n"
+         "let co = coroutine(work)\nprintln(co.resume(), co.resume(), co.resume())\n",
+         "start ArithmeticError 9\n"},
+        {"anonymous callee unwinds",
+         "try { (fn() { let x = [1]; return x[2] })() } catch e { println(e.kind) }\n"
+         "println(3 + 4)\n", "RangeError\n7\n"},
+    };
+    LzJitMode saved = lz_engine_jit_mode();
+    for (int mode = 0; mode < 2; mode++) {
+        lz_engine_set_jit(mode == 0 ? LZ_JIT_OFF : LZ_JIT_EAGER);
+        for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            Outcome ref;
+            Outcome ge;
+            run_source(LZ_ENGINE_REFERENCE, cases[i].text, 0, 0, &ref);
+            run_source(LZ_ENGINE_GE, cases[i].text, 0, 0, &ge);
+            if (ref.compile_status != LZ_OK || ref.run_status != LZ_OK ||
+                strcmp(text_or_empty(&ref.out), cases[i].expected) != 0) {
+                fprintf(stderr, "%s: %s %s\noutput: [%s]\n", cases[i].name,
+                        ref.diagnostic, ref.error, text_or_empty(&ref.out));
+            }
+            LZ_CHECK(ref.compile_status == LZ_OK && ref.run_status == LZ_OK);
+            LZ_CHECK(strcmp(text_or_empty(&ref.out), cases[i].expected) == 0);
+            LZ_CHECK(outcomes_match(cases[i].name, cases[i].text, 0, &ref, &ge));
+            LZ_CHECK(ge.stats.translated && ge.stats.dispatches > 0);
+            if (i == 0) LZ_CHECK(ge.stats.jit_programs == 0);
+            outcome_free(&ref);
+            outcome_free(&ge);
+        }
+    }
+    lz_engine_set_jit(LZ_JIT_OFF);
+    const char *text = "fn f(x) { return 6 / x }\ntry { f(0) } catch e { println(e.kind) }\n";
+    for (uint64_t fuel = 1; fuel <= 90; fuel++) {
+        LZ_CHECK(compare_source("catch fuel boundary", text, fuel, 0, true));
+    }
+    for (size_t limit = 14000; limit < 24000; limit += 137) {
+        LZ_CHECK(compare_source("catch allocation boundary", text, 0, limit, true));
+    }
+    lz_engine_set_jit(saved);
+}
+
 int main(void) {
     check_api();
     check_corpus();
@@ -1230,5 +1308,6 @@ int main(void) {
     check_bytecode();
     check_fuel_sweeps();
     check_heap_limits();
+    check_try_ge();
     return LZ_TEST_RESULT();
 }

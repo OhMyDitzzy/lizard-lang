@@ -1,3 +1,4 @@
+#define _GNU_SOURCE 1
 #include <stdio.h>
 #include <string.h>
 
@@ -125,6 +126,28 @@ static LzStatus map_case(LzVM *vm, const char *name, const LzValue *argv, bool u
         return status;
     }
 
+    size_t ascii = 0;
+    while (ascii < text->length && (unsigned char)text->data[ascii] < 0x80) ascii++;
+    if (ascii == text->length) {
+        /* Even unchanged text gets a fresh string, keeping heap-limit failures
+         * and allocation accounting the same as the Unicode path. */
+        LzString *mapped = lz_heap_alloc(&vm->heap, LZ_OBJ_STRING,
+                                        sizeof(LzString) + text->length + 1);
+        if (mapped == NULL) return lz_vm_out_of_memory(vm);
+        mapped->length = text->length;
+        for (size_t i = 0; i < text->length; i++) {
+            unsigned char byte = (unsigned char)text->data[i];
+            if (upper ? byte >= 'a' && byte <= 'z' : byte >= 'A' && byte <= 'Z') {
+                byte = (unsigned char)(upper ? byte - 32 : byte + 32);
+            }
+            mapped->data[i] = (char)byte;
+        }
+        mapped->data[text->length] = '\0';
+        mapped->hash = lz_hash_bytes(mapped->data, mapped->length);
+        *result = lz_value_object(&mapped->base);
+        return LZ_OK;
+    }
+
     LzBuffer out = {0};
     LzWriter writer = lz_writer_from_buffer(&out);
     bool ok = true;
@@ -239,9 +262,17 @@ static size_t find_bytes(const LzString *hay, const LzString *needle, size_t fro
     if (needle->length == 0) {
         return from <= hay->length ? from : SIZE_MAX;
     }
-    if (needle->length > hay->length) {
+    if (from > hay->length || needle->length > hay->length - from) {
         return SIZE_MAX;
     }
+    if (needle->length == 1) {
+        const char *at = memchr(hay->data + from, (unsigned char)needle->data[0], hay->length - from);
+        return at == NULL ? SIZE_MAX : (size_t)(at - hay->data);
+    }
+#if defined(__linux__) && !defined(LZ_NO_MEMMEM)
+    const char *at = memmem(hay->data + from, hay->length - from, needle->data, needle->length);
+    return at == NULL ? SIZE_MAX : (size_t)(at - hay->data);
+#else
     size_t last = hay->length - needle->length;
     for (size_t i = from; i <= last; i++) {
         const char *at = memchr(hay->data + i, needle->data[0], last - i + 1);
@@ -254,6 +285,7 @@ static size_t find_bytes(const LzString *hay, const LzString *needle, size_t fro
         }
     }
     return SIZE_MAX;
+#endif
 }
 
 /* Fuel for a search: the haystack once, and the needle's length makes a bad case cost more. */

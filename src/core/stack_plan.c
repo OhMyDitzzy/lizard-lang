@@ -55,6 +55,30 @@ static LzStatus visit(Walk *walk, size_t at) {
     LzStatus status;
 
     switch (op) {
+    case LZ_OP_STRING_BEGIN:
+    case LZ_OP_STRING_FALLBACK:
+    case LZ_OP_STRING_CHECK:
+    case LZ_OP_BUILD_STRING: {
+        const LzStringBuild *plan = lz_chunk_string_build(walk->chunk, (uint16_t)operand);
+        if (plan == NULL) return LZ_ERR_RUNTIME;
+        if (op == LZ_OP_STRING_BEGIN) {
+            status = edge(walk, plan->fast, values + 1, handlers);
+            if (status != LZ_OK) return status;
+            add = 1;
+        } else if (op == LZ_OP_STRING_FALLBACK) {
+            if (values < 2) return LZ_ERR_RUNTIME;
+            return edge(walk, plan->end, values - 1, handlers);
+        } else if (op == LZ_OP_STRING_CHECK) {
+            if (read16(code + at + 3) >= plan->count) return LZ_ERR_RUNTIME;
+            need = 1;
+            add = 1;
+        } else {
+            need = remove = plan->slots;
+            add = 1;
+        }
+        break;
+    }
+
     case LZ_OP_CONSTANT:
     case LZ_OP_NIL:
     case LZ_OP_TRUE:

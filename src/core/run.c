@@ -31,18 +31,27 @@ static LzStatus malformed(LzVM *vm, const char *what) {
     return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "malformed bytecode: %s", what);
 }
 
-static LzStatus push(LzVM *vm, LzValue value) {
+static LzStatus push_to(LzVM *vm, LzValue *stack, LzValue value) {
     if (vm->stack_count >= vm->stack_cap) {
         return lz_vm_value_overflow(vm);
     }
     lz_value_retain(&value);
-    vm->stack[vm->stack_count++] = value;
+    stack[vm->stack_count++] = value;
     return LZ_OK;
 }
 
-static void pop(LzVM *vm) {
+static void pop_from(LzVM *vm, LzValue *stack) {
     vm->stack_count--;
-    lz_value_release(&vm->heap, &vm->stack[vm->stack_count]);
+    lz_value_release(&vm->heap, &stack[vm->stack_count]);
+}
+
+/* Helpers outside the dispatch loop resolve the active context at their entry. */
+static LzStatus push(LzVM *vm, LzValue value) {
+    return push_to(vm, vm->stack, value);
+}
+
+static void pop(LzVM *vm) {
+    pop_from(vm, vm->stack);
 }
 
 static LzStatus read_constant(LzVM *vm, const LzChunk *chunk, size_t *ip, const LzValue **out) {
@@ -857,7 +866,7 @@ static LzStatus error_for_failure(LzVM *vm, LzError **out) {
  * nothing catches it, and sandbox limits never are, with *status as the failure the loop must
  * return.
  */
-static bool unwind_to_handler(LzVM *vm, LzStatus *status, size_t floor, size_t failed_ip,
+bool lz_vm_unwind_to_handler(LzVM *vm, LzStatus *status, size_t floor, size_t failed_ip,
                               const LzChunk **chunk_io, size_t *ip_io) {
     if (!lz_status_catchable(*status) || vm->handler_count == 0 || vm->frame_count == 0) {
         return false;
@@ -968,9 +977,38 @@ static uint64_t current_owner(const LzVM *vm) {
     return frame->closure != NULL ? frame->closure->function->owner_id : 0;
 }
 
+/* A cache miss never reports an error. The ordinary member operations own that. */
+static const LzMember *cached_member(LzVM *vm, const LzChunk *chunk, size_t offset,
+                                    const LzValue *target, const LzString *name, int what) {
+    if (!lz_value_is_instance(target)) return NULL;
+    LzMemberCache *site = lz_chunk_member_site(chunk, offset);
+    if (site == NULL) return NULL;
+    const LzInstance *instance = lz_value_as_instance(target);
+    if (!lz_member_cache_matches(vm, site, instance) &&
+        !lz_member_cache_miss(vm, site, instance, name, what)) return NULL;
+    site->ic_run++;
+    return site->ic_member;
+}
+
 /* GET_FIELD_KEEP and the object case of GET_FIELD. */
-static LzStatus member_get_op(LzVM *vm, const LzString *name, bool keep, bool for_write) {
+static LzStatus member_get_op(LzVM *vm, const LzChunk *chunk, size_t offset,
+                              const LzString *name, bool keep, bool for_write) {
     LzValue target = vm->stack[vm->stack_count - 1];
+    const LzMember *member = cached_member(vm, chunk, offset, &target, name, for_write ? 1 : 0);
+    if (member != NULL) {
+        const LzInstance *instance = lz_value_as_instance(&target);
+        if (((instance->unset >> member->slot) & 1u) == 0 &&
+            (!keep || vm->stack_count < vm->stack_cap)) {
+            LzValue field = instance->fields[member->slot];
+            lz_value_retain(&field);
+            if (keep) vm->stack[vm->stack_count++] = field;
+            else {
+                vm->stack[vm->stack_count - 1] = field;
+                lz_value_release(&vm->heap, &target);
+            }
+            return LZ_OK;
+        }
+    }
     LzValue found = lz_value_nil();
     lz_value_retain(&target); /* a getter runs script code that may use the stack */
     LzStatus status = lz_vm_member_get(vm, current_owner(vm), &target, name, &found, for_write);
@@ -1027,14 +1065,16 @@ static LzStatus set_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
         return LZ_OK;
     }
     if (!lz_value_is_instance(&target) && !lz_value_is_class(&target)) {
-        LzStatus status = lz_vm_set_error(vm, LZ_ERR_TYPE, "cannot assign to field '%s' of %s", name->data,
+        status = lz_vm_set_error(vm, LZ_ERR_TYPE, "cannot assign to field '%s' of %s", name->data,
                                           lz_value_kind_name(&target));
         if (target.type == LZ_VAL_NIL) {
             nil_help(vm);
         }
         return status;
     }
-    status = lz_vm_member_set(vm, current_owner(vm), &target, name, &value);
+    const LzMember *member = cached_member(vm, chunk, *ip - 3, &target, name, 1);
+    status = member != NULL ? lz_instance_store(vm, lz_value_as_instance(&target), member, &value)
+                            : lz_vm_member_set(vm, current_owner(vm), &target, name, &value);
     if (status != LZ_OK) {
         return status;
     }
@@ -1055,6 +1095,16 @@ static LzStatus method_lookup_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     int mode = chunk->code[(*ip)++];
     if (vm->stack_count < 2) {
         return malformed(vm, "stack underflow");
+    }
+    const LzMember *member = cached_member(vm, chunk, *ip - 4,
+        &vm->stack[vm->stack_count - 2], name, 2);
+    if (member != NULL) {
+        LzValue callee = member->value;
+        lz_value_retain(&callee);
+        LzValue old = vm->stack[vm->stack_count - 1];
+        vm->stack[vm->stack_count - 1] = callee;
+        lz_value_release(&vm->heap, &old);
+        return LZ_OK;
     }
     return lz_vm_method_lookup(vm, current_owner(vm), name, mode, vm->stack_count - 2);
 }
@@ -1273,7 +1323,7 @@ static LzStatus class_link_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
  * `e.message`, `e.kind`, `e.trace`, `e.cause` and `e.data` are the fields of an error, and
  * they're read only.
  */
-static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool write_check) {
+LzStatus lz_vm_get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool write_check) {
     LzString *name = NULL;
     LzStatus status = read_name(vm, chunk, ip, &name);
     if (status != LZ_OK) {
@@ -1285,7 +1335,7 @@ static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool wr
     const LzValue *top = &vm->stack[vm->stack_count - 1];
     if (lz_value_is_link(top)) {
         if (write_check) {
-            return member_get_op(vm, name, false, true); /* the check wants the target's field */
+            return member_get_op(vm, chunk, *ip - 3, name, false, true); /* the check wants the target's field */
         }
         if (name->length == 6 && memcmp(name->data, "target", 6) == 0) {
             LzValue found = lz_link_deref(lz_value_as_link(top));
@@ -1312,7 +1362,7 @@ static LzStatus get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool wr
         return LZ_OK;
     }
     if (lz_value_is_instance(top) || lz_value_is_class(top)) {
-        return member_get_op(vm, name, false, write_check);
+        return member_get_op(vm, chunk, *ip - 3, name, false, write_check);
     }
     if (vm->ext_count != 0) {
         LzValue target = *top;
@@ -1569,6 +1619,11 @@ static LzStatus array_extend(LzVM *vm) {
     return status;
 }
 
+static inline void store_bool(LzValue *slot, bool value) {
+    slot->type = LZ_VAL_BOOL;
+    slot->as.boolean = value;
+}
+
 /*
  * a OP b for two ints or two floats, where OP is a comparison or '=='. These are exactly the
  * answers of lz_number_order, including NaN, which is unordered and so false for everything, and
@@ -1674,7 +1729,7 @@ static LzStatus binary_op(LzVM *vm, LzOpCode op) {
     return LZ_OK;
 }
 
-static LzStatus equal(LzVM *vm) {
+LzStatus lz_vm_equal_op(LzVM *vm) {
     if (vm->stack_count < 2) {
         return malformed(vm, "stack underflow");
     }
@@ -1734,6 +1789,131 @@ static LzStatus bit_not(LzVM *vm) {
     return LZ_OK;
 }
 
+typedef struct StringOutput {
+    char *data;
+    size_t length;
+    size_t capacity;
+} StringOutput;
+
+static bool string_output(void *context, const char *data, size_t length) {
+    StringOutput *out = context;
+    if (length > SIZE_MAX - out->length) return false;
+    if (out->data != NULL) {
+        if (length > out->capacity - out->length) return false;
+        memcpy(out->data + out->length, data, length);
+    }
+    out->length += length;
+    return true;
+}
+
+static LzStatus string_piece(LzVM *vm, const LzStringPiece *piece, const LzValue *value,
+                             StringOutput *out) {
+    LzWriter writer = {string_output, NULL, out};
+    if (piece->mode == LZ_STRING_PIECE_FORMAT) {
+        LzFormatError error;
+        LzFormatResult status = lz_format_value(value, &piece->format, &writer, &error);
+        if (status == LZ_FORMAT_BAD) {
+            return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "format(): %s", error.message);
+        }
+        if (status != LZ_FORMAT_OK) return lz_vm_out_of_memory(vm);
+    } else {
+        bool ok = piece->mode == LZ_STRING_PIECE_DEBUG ? lz_value_write_debug(value, &writer) :
+                                                   lz_value_write(value, &writer);
+        if (!ok) return lz_vm_out_of_memory(vm);
+    }
+    return LZ_OK;
+}
+
+static const LzValue *string_load(LzVM *vm, const LzChunk *chunk, uint8_t op, uint16_t arg,
+                                 LzValue *literal) {
+    const LzCallFrame *frame = vm->frame_count == 0 ? NULL : &vm->frames[vm->frame_count - 1];
+    switch (op) {
+    case LZ_OP_NIL: *literal = lz_value_nil(); return literal;
+    case LZ_OP_TRUE: *literal = lz_value_bool(true); return literal;
+    case LZ_OP_FALSE: *literal = lz_value_bool(false); return literal;
+    case LZ_OP_CONSTANT:
+        return arg < chunk->constant_count ? &chunk->constants[arg] : NULL;
+    case LZ_OP_GET_LOCAL:
+        return frame != NULL && frame->base + arg < vm->stack_count ? &vm->stack[frame->base + arg] : NULL;
+    case LZ_OP_GET_UPVALUE:
+        return frame != NULL && frame->closure != NULL && arg < frame->closure->upvalue_count ?
+            frame->closure->upvalues[arg]->location : NULL;
+    case LZ_OP_GET_GLOBAL: {
+        LzString *name = NULL;
+        if (arg >= chunk->constant_count || !value_is_text(&chunk->constants[arg])) return NULL;
+        name = (LzString *)chunk->constants[arg].as.object;
+        return lz_module_lookup(vm, lz_chunk_globals(vm, chunk), name);
+    }
+    default: return NULL;
+    }
+}
+
+/* The guard runs no user code. Inspecting later loads cannot change evaluation order. */
+static bool string_build_ready(LzVM *vm, const LzChunk *chunk, const LzStringBuild *plan) {
+    if (vm->fuel != LZ_FUEL_UNLIMITED || vm->heap.limit_bytes != LZ_HEAP_UNLIMITED ||
+        vm->stack_count > vm->stack_cap || plan->peak > vm->stack_cap - vm->stack_count) return false;
+    LzValue literal;
+    const LzValue *value = string_load(vm, chunk, plan->first_op, plan->first_arg, &literal);
+    if (value == NULL || (value->type == LZ_VAL_OBJECT && !value_is_text(value))) return false;
+    for (size_t at = plan->fast; at < plan->end;) {
+        uint8_t op = chunk->code[at];
+        size_t length = lz_opcode_length(op);
+        if (length == 0 || length > plan->end - at) return false;
+        if (op == LZ_OP_CONSTANT || op == LZ_OP_GET_LOCAL || op == LZ_OP_GET_UPVALUE || op == LZ_OP_GET_GLOBAL) {
+            uint16_t arg = (uint16_t)((chunk->code[at + 1] << 8) | chunk->code[at + 2]);
+            value = string_load(vm, chunk, op, arg, &literal);
+            if (value == NULL || (value->type == LZ_VAL_OBJECT && !value_is_text(value))) return false;
+        }
+        at += length;
+    }
+    return true;
+}
+
+static LzStatus build_string(LzVM *vm, const LzStringBuild *plan) {
+    if (vm->stack_count < plan->slots) return malformed(vm, "stack underflow");
+    size_t base = vm->stack_count - plan->slots;
+    size_t at = base;
+    StringOutput size = {0};
+    for (size_t i = 0; i < plan->count; i++) {
+        const LzValue *value = &vm->stack[at++];
+        if (plan->pieces[i].mode == LZ_STRING_PIECE_FORMAT) {
+            const LzValue *length = &vm->stack[at++];
+            if (length->type != LZ_VAL_INT || length->as.integer < 0 ||
+                (uint64_t)length->as.integer > SIZE_MAX - size.length) return malformed(vm, "invalid string length");
+            size.length += (size_t)length->as.integer;
+        } else {
+            LzStatus status = string_piece(vm, &plan->pieces[i], value, &size);
+            if (status != LZ_OK) return status;
+        }
+    }
+    if (size.length > SIZE_MAX - sizeof(LzString) - 1) return lz_vm_out_of_memory(vm);
+    LzString *result = lz_heap_alloc(&vm->heap, LZ_OBJ_STRING, sizeof *result + size.length + 1);
+    if (result == NULL) return lz_vm_out_of_memory(vm);
+    StringOutput out = {result->data, 0, size.length};
+    at = base;
+    for (size_t i = 0; i < plan->count; i++) {
+        LzStatus status = string_piece(vm, &plan->pieces[i], &vm->stack[at++], &out);
+        if (plan->pieces[i].mode == LZ_STRING_PIECE_FORMAT) at++;
+        if (status != LZ_OK) {
+            lz_object_release(&vm->heap, &result->base);
+            return status;
+        }
+    }
+    result->length = out.length;
+    result->data[out.length] = '\0';
+    result->hash = lz_hash_bytes(result->data, out.length);
+    while (vm->stack_count > base) pop(vm);
+    vm->stack[vm->stack_count++] = lz_value_object(&result->base);
+    return LZ_OK;
+}
+
+LzStatus lz_vm_check_param(LzVM *vm, const LzChunk *chunk, uint16_t slot, uint16_t index) {
+    if (index >= chunk->type_count) return malformed(vm, "type index out of range");
+    size_t at = vm->frames[vm->frame_count - 1].base + slot;
+    if (at >= vm->stack_count) return malformed(vm, "local slot out of range");
+    return check_value(vm, &chunk->types[index], &vm->stack[at], CHECK_PARAM, slot);
+}
+
 /*
  * Runs the one instruction at byte offset *ip_io and advances it past the instruction. It does no
  * accounting of fuel or vm->instructions, because the loop that calls it does that, so a faster
@@ -1749,7 +1929,8 @@ static LzStatus bit_not(LzVM *vm) {
 #define LZ_FORCE_INLINE static inline
 #endif
 
-LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip_io,
+LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, LzValue *stack, LzCallFrame *frames,
+                                  const LzChunk **chunk_io, size_t *ip_io,
                                   bool frames_ok) {
     const LzChunk *chunk = *chunk_io;
     size_t ip = *ip_io;
@@ -1761,6 +1942,47 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
     const size_t start = ip;
     uint8_t opcode = chunk->code[ip++];
     switch (opcode) {
+    case LZ_OP_STRING_BEGIN:
+    case LZ_OP_STRING_FALLBACK:
+    case LZ_OP_STRING_CHECK:
+    case LZ_OP_BUILD_STRING: {
+        uint16_t index;
+        if (!read_u16(chunk, &ip, &index)) { status = malformed(vm, "truncated operand"); break; }
+        const LzStringBuild *plan = lz_chunk_string_build(chunk, index);
+        if (plan == NULL || plan->fast >= plan->end || plan->end > chunk->count) {
+            status = malformed(vm, "invalid string build plan"); break;
+        }
+        if (opcode == LZ_OP_STRING_BEGIN) {
+            bool ready = string_build_ready(vm, chunk, plan);
+            LzValue literal;
+            const LzValue *value = string_load(vm, chunk, plan->first_op, plan->first_arg, &literal);
+            if (value == NULL) {
+                if (plan->first_op == LZ_OP_GET_GLOBAL && plan->first_arg < chunk->constant_count &&
+                    value_is_text(&chunk->constants[plan->first_arg])) {
+                    status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "undefined variable '%s'",
+                        ((LzString *)chunk->constants[plan->first_arg].as.object)->data);
+                } else { status = malformed(vm, "invalid string build load"); }
+            } else { status = push_to(vm, stack, *value); }
+            if (status == LZ_OK && ready) ip = plan->fast;
+        } else if (opcode == LZ_OP_STRING_FALLBACK) {
+            status = binary_op(vm, LZ_OP_ADD);
+            if (status == LZ_OK) ip = plan->end;
+        } else if (opcode == LZ_OP_STRING_CHECK) {
+            uint16_t piece;
+            if (!read_u16(chunk, &ip, &piece)) { status = malformed(vm, "truncated operand"); break; }
+            if (piece >= plan->count || vm->stack_count == 0) {
+                status = malformed(vm, "invalid string piece"); break;
+            }
+            StringOutput out = {0};
+            status = string_piece(vm, &plan->pieces[piece], &stack[vm->stack_count - 1], &out);
+            if (status == LZ_OK) {
+                if (out.length > INT64_MAX) { status = lz_vm_out_of_memory(vm); }
+                else { status = push_to(vm, stack, lz_value_int((int64_t)out.length)); }
+            }
+        } else { status = build_string(vm, plan); }
+        break;
+    }
+
     case LZ_OP_CONSTANT: {
         /*
          * The operand is decoded here with both checks done once. Anything off (a cut-off operand,
@@ -1772,7 +1994,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
             if (index < chunk->constant_count) {
                 LzValue value = chunk->constants[index];
                 lz_value_retain(&value);
-                vm->stack[vm->stack_count++] = value;
+                stack[vm->stack_count++] = value;
                 ip += 2;
                 break;
             }
@@ -1780,24 +2002,24 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         const LzValue *constant = NULL;
         status = read_constant(vm, chunk, &ip, &constant);
         if (status == LZ_OK) {
-            status = push(vm, *constant);
+            status = push_to(vm, stack, *constant);
         }
         break;
     }
     case LZ_OP_NIL:
-        status = push(vm, lz_value_nil());
+        status = push_to(vm, stack, lz_value_nil());
         break;
     case LZ_OP_TRUE:
-        status = push(vm, lz_value_bool(true));
+        status = push_to(vm, stack, lz_value_bool(true));
         break;
     case LZ_OP_FALSE:
-        status = push(vm, lz_value_bool(false));
+        status = push_to(vm, stack, lz_value_bool(false));
         break;
     case LZ_OP_POP:
         if (vm->stack_count == 0) {
             status = malformed(vm, "stack underflow");
         } else {
-            pop(vm);
+            pop_from(vm, stack);
         }
         break;
     case LZ_OP_GET_GLOBAL: {
@@ -1808,7 +2030,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         }
         const LzGlobalSite *site = global_site_hit(vm, chunk, index);
         if (site != NULL) {
-            status = push(vm, *site->slot);
+            status = push_to(vm, stack, *site->slot);
             break;
         }
         LzString *name;
@@ -1821,7 +2043,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
             status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "undefined variable '%s'", name->data);
         } else {
             global_site_fill(vm, chunk, index, name);
-            status = push(vm, *value);
+            status = push_to(vm, stack, *value);
         }
         break;
     }
@@ -1849,10 +2071,10 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
             break;
         }
         if (!lz_table_set(&vm->heap, lz_chunk_globals(vm, chunk), name,
-                          vm->stack[vm->stack_count - 1])) {
+                          stack[vm->stack_count - 1])) {
             status = lz_vm_out_of_memory(vm);
         } else {
-            pop(vm);
+            pop_from(vm, stack);
             global_site_fill(vm, chunk, index, name);
         }
         break;
@@ -1863,13 +2085,13 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
             break;
         }
         size_t argc = chunk->code[ip++];
-        if (!frames_ok && vm->stack_count > argc && lz_value_is_closure(&vm->stack[vm->stack_count - argc - 1])) {
+        if (!frames_ok && vm->stack_count > argc && lz_value_is_closure(&stack[vm->stack_count - argc - 1])) {
             status = malformed(vm, "a single step cannot enter a function");
             break;
         }
         if (vm->stack_count > argc) {
             /* A native that runs no user code is called from here, as lz_vm_call would, minus its checks. */
-            const LzValue *callee = &vm->stack[vm->stack_count - argc - 1];
+            const LzValue *callee = &stack[vm->stack_count - argc - 1];
             if (callee->type == LZ_VAL_OBJECT && callee->as.object->type == LZ_OBJ_NATIVE &&
                 lz_native_is_leaf((const LzNative *)callee->as.object, (int)argc, callee + 1)) {
                 LzValue result = lz_value_nil();
@@ -1878,9 +2100,9 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
                                              &result);
                 if (status == LZ_OK) {
                     for (size_t i = 0; i < argc + 1; i++) {
-                        pop(vm);
+                        pop_from(vm, stack);
                     }
-                    vm->stack[vm->stack_count++] = result;
+                    stack[vm->stack_count++] = result;
                 }
                 break;
             }
@@ -1888,7 +2110,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         bool entered = false;
         status = lz_vm_call(vm, argc, ip, (uint32_t)start, &entered);
         if (entered) {
-            *chunk_io = chunk = vm->frames[vm->frame_count - 1].chunk;
+            *chunk_io = chunk = frames[vm->frame_count - 1].chunk;
             ip = 0;
         }
         break;
@@ -1908,7 +2130,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
             bool entered = false;
             status = lz_vm_call_ex(vm, chunk, named, names, ip, (uint32_t)start, &entered);
             if (entered) {
-                *chunk_io = chunk = vm->frames[vm->frame_count - 1].chunk;
+                *chunk_io = chunk = frames[vm->frame_count - 1].chunk;
                 ip = 0;
             }
         }
@@ -1917,9 +2139,9 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
 #define ARITH_FAST_CASE(OPC)                                                                       \
     case OPC: {                                                                                    \
         LzValue fast;                                                                              \
-        if (vm->stack_count >= 2 && lz_arith_fast(OPC, &vm->stack[vm->stack_count - 2],           \
-                                                  &vm->stack[vm->stack_count - 1], &fast)) {       \
-            vm->stack[--vm->stack_count - 1] = fast;                                               \
+        if (vm->stack_count >= 2 &&                                                                \
+            lz_arith_fast(OPC, &stack[vm->stack_count - 2], &stack[vm->stack_count - 1], &fast)) { \
+            stack[--vm->stack_count - 1] = fast;                                                   \
             break;                                                                                 \
         }                                                                                          \
         status = binary_op(vm, (LzOpCode)opcode);                                                  \
@@ -1928,16 +2150,14 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
 #define COMPARE_FAST_CASE(OPC, TEST)                                                               \
     case OPC: {                                                                                    \
         bool fast;                                                                                 \
-        if (vm->stack_count >= 2 &&                                                                \
-            number_pair_test(&vm->stack[vm->stack_count - 2], &vm->stack[vm->stack_count - 1],    \
-                             &fast, OPC)) {                                                        \
-            vm->stack[--vm->stack_count - 1] = lz_value_bool(fast);                                \
+        if (vm->stack_count >= 2 && number_pair_test(&stack[vm->stack_count - 2],                  \
+                                                     &stack[vm->stack_count - 1], &fast, OPC)) {   \
+            store_bool(&stack[--vm->stack_count - 1], fast);                                       \
             break;                                                                                 \
         }                                                                                          \
-        if (vm->stack_count >= 2 &&                                                                \
-            number_mixed_test(&vm->stack[vm->stack_count - 2], &vm->stack[vm->stack_count - 1],   \
-                              &fast, OPC)) {                                                       \
-            vm->stack[--vm->stack_count - 1] = lz_value_bool(fast);                                \
+        if (vm->stack_count >= 2 && number_mixed_test(&stack[vm->stack_count - 2],                 \
+                                                      &stack[vm->stack_count - 1], &fast, OPC)) {  \
+            store_bool(&stack[--vm->stack_count - 1], fast);                                       \
             break;                                                                                 \
         }                                                                                          \
         status = binary_op(vm, (LzOpCode)opcode);                                                  \
@@ -1966,10 +2186,10 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         uint16_t slot;
         if (!read_u16(chunk, &ip, &slot)) {
             status = malformed(vm, "truncated operand");
-        } else if (vm->frames[vm->frame_count - 1].base + slot >= vm->stack_count) {
+        } else if (frames[vm->frame_count - 1].base + slot >= vm->stack_count) {
             status = malformed(vm, "local slot out of range");
         } else {
-            status = push(vm, vm->stack[vm->frames[vm->frame_count - 1].base + slot]);
+            status = push_to(vm, stack, stack[frames[vm->frame_count - 1].base + slot]);
         }
         break;
     }
@@ -1978,13 +2198,13 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         if (!read_u16(chunk, &ip, &slot)) {
             status = malformed(vm, "truncated operand");
         } else if (vm->stack_count == 0 ||
-                   vm->frames[vm->frame_count - 1].base + slot >= vm->stack_count - 1) {
+                   frames[vm->frame_count - 1].base + slot >= vm->stack_count - 1) {
             status = malformed(vm, "local slot out of range");
         } else {
-            size_t index = vm->frames[vm->frame_count - 1].base + slot;
-            LzValue moved = vm->stack[--vm->stack_count];
-            lz_value_release(&vm->heap, &vm->stack[index]);
-            vm->stack[index] = moved;
+            size_t index = frames[vm->frame_count - 1].base + slot;
+            LzValue moved = stack[--vm->stack_count];
+            lz_value_release(&vm->heap, &stack[index]);
+            stack[index] = moved;
         }
         break;
     }
@@ -2013,10 +2233,10 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         if (lz_table_get(lz_chunk_globals(vm, chunk), name) == NULL) {
             status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "undefined variable '%s'", name->data);
         } else if (!lz_table_set(&vm->heap, lz_chunk_globals(vm, chunk), name,
-                                 vm->stack[vm->stack_count - 1])) {
+                                 stack[vm->stack_count - 1])) {
             status = lz_vm_out_of_memory(vm);
         } else {
-            pop(vm);
+            pop_from(vm, stack);
             global_site_fill(vm, chunk, index, name);
         }
         break;
@@ -2033,7 +2253,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
             ip += distance;
         } else if (vm->stack_count == 0) {
             status = malformed(vm, "stack underflow");
-        } else if (lz_value_is_truthy(&vm->stack[vm->stack_count - 1]) ==
+        } else if (lz_value_is_truthy(&stack[vm->stack_count - 1]) ==
                    (opcode == LZ_OP_JUMP_IF_TRUE)) {
             ip += distance;
         }
@@ -2053,24 +2273,24 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
     case LZ_OP_EQUAL: {
         bool same;
         if (vm->stack_count >= 2 &&
-            number_pair_test(&vm->stack[vm->stack_count - 2], &vm->stack[vm->stack_count - 1], &same,
+            number_pair_test(&stack[vm->stack_count - 2], &stack[vm->stack_count - 1], &same,
                              LZ_OP_EQUAL)) {
-            vm->stack[--vm->stack_count - 1] = lz_value_bool(same);
+            store_bool(&stack[--vm->stack_count - 1], same);
             break;
         }
         if (vm->stack_count >= 2 &&
-            number_mixed_test(&vm->stack[vm->stack_count - 2], &vm->stack[vm->stack_count - 1], &same,
+            number_mixed_test(&stack[vm->stack_count - 2], &stack[vm->stack_count - 1], &same,
                               LZ_OP_EQUAL)) {
-            vm->stack[--vm->stack_count - 1] = lz_value_bool(same);
+            store_bool(&stack[--vm->stack_count - 1], same);
             break;
         }
-        status = equal(vm);
+        status = lz_vm_equal_op(vm);
         break;
     }
     case LZ_OP_NOT:
-        if (vm->stack_count >= 1 && vm->stack[vm->stack_count - 1].type != LZ_VAL_OBJECT) {
+        if (vm->stack_count >= 1 && stack[vm->stack_count - 1].type != LZ_VAL_OBJECT) {
             /* Nothing to release, so the answer replaces the operand in place. */
-            LzValue *top = &vm->stack[vm->stack_count - 1];
+            LzValue *top = &stack[vm->stack_count - 1];
             *top = lz_value_bool(!lz_value_is_truthy(top));
             break;
         }
@@ -2078,7 +2298,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         break;
     case LZ_OP_NEGATE:
         if (vm->stack_count >= 1) {
-            LzValue *top = &vm->stack[vm->stack_count - 1];
+            LzValue *top = &stack[vm->stack_count - 1];
             if (top->type == LZ_VAL_INT && top->as.integer != INT64_MIN) {
                 top->as.integer = -top->as.integer;
                 break;
@@ -2102,7 +2322,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         } else if (vm->stack_count == 0) {
             status = malformed(vm, "stack underflow");
         } else {
-            status = check_value(vm, &chunk->types[index], &vm->stack[vm->stack_count - 1],
+            status = check_value(vm, &chunk->types[index], &stack[vm->stack_count - 1],
                                  CHECK_VALUE, 0);
         }
         break;
@@ -2116,7 +2336,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         } else if (vm->stack_count == 0) {
             status = malformed(vm, "stack underflow");
         } else {
-            LzValue *top = &vm->stack[vm->stack_count - 1];
+            LzValue *top = &stack[vm->stack_count - 1];
             bool matches = lz_type_matches_through_link(&chunk->types[index], top);
             lz_value_release(&vm->heap, top);
             *top = lz_value_bool(matches);
@@ -2128,14 +2348,8 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         uint16_t index;
         if (!read_u16(chunk, &ip, &slot) || !read_u16(chunk, &ip, &index)) {
             status = malformed(vm, "truncated operand");
-        } else if (index >= chunk->type_count) {
-            status = malformed(vm, "type index out of range");
-        } else if (vm->frames[vm->frame_count - 1].base + slot >= vm->stack_count) {
-            status = malformed(vm, "local slot out of range");
         } else {
-            status = check_value(vm, &chunk->types[index],
-                                 &vm->stack[vm->frames[vm->frame_count - 1].base + slot],
-                                 CHECK_PARAM, slot);
+            status = lz_vm_check_param(vm, chunk, slot, index);
         }
         break;
     }
@@ -2148,7 +2362,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         } else if (vm->stack_count == 0) {
             status = malformed(vm, "stack underflow");
         } else {
-            status = check_value(vm, &chunk->types[index], &vm->stack[vm->stack_count - 1],
+            status = check_value(vm, &chunk->types[index], &stack[vm->stack_count - 1],
                                  CHECK_RETURN, 0);
         }
         break;
@@ -2161,7 +2375,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         } else if (ip + distance > chunk->count) {
             status = malformed(vm, "jump out of range");
         } else if (parameter >= 64 ||
-                   ((vm->frames[vm->frame_count - 1].supplied >> parameter) & 1u) != 0) {
+                   ((frames[vm->frame_count - 1].supplied >> parameter) & 1u) != 0) {
             ip += distance;
         }
         break;
@@ -2182,19 +2396,19 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
     case LZ_OP_GET_UPVALUE:
     case LZ_OP_SET_UPVALUE: {
         uint16_t index;
-        const LzClosure *closure = vm->frames[vm->frame_count - 1].closure;
+        const LzClosure *closure = frames[vm->frame_count - 1].closure;
         if (!read_u16(chunk, &ip, &index)) {
             status = malformed(vm, "truncated operand");
         } else if (closure == NULL || index >= closure->upvalue_count) {
             status = malformed(vm, "upvalue index out of range");
         } else if (opcode == LZ_OP_GET_UPVALUE) {
-            status = push(vm, *closure->upvalues[index]->location);
+            status = push_to(vm, stack, *closure->upvalues[index]->location);
         } else if (vm->stack_count == 0) {
             status = malformed(vm, "stack underflow");
         } else {
             LzUpvalue *upvalue = closure->upvalues[index];
             LzValue *location = upvalue->location;
-            LzValue moved = vm->stack[--vm->stack_count];
+            LzValue moved = stack[--vm->stack_count];
             LzValue old = *location;
             *location = moved;
             lz_value_release(&vm->heap, &old);
@@ -2213,16 +2427,16 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
             status = malformed(vm, "stack underflow");
         } else {
             lz_vm_close_upvalues(vm, vm->stack_count - 1);
-            pop(vm);
+            pop_from(vm, stack);
             lz_skink_run(vm);
         }
         break;
     case LZ_OP_GET_SELF: {
-        const LzClosure *closure = vm->frames[vm->frame_count - 1].closure;
+        const LzClosure *closure = frames[vm->frame_count - 1].closure;
         if (closure == NULL) {
             status = malformed(vm, "no running function");
         } else {
-            status = push(vm, lz_value_object((LzObject *)&closure->base));
+            status = push_to(vm, stack, lz_value_object((LzObject *)&closure->base));
         }
         break;
     }
@@ -2230,9 +2444,9 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         if (vm->stack_count < 2) {
             status = malformed(vm, "stack underflow");
         } else {
-            LzValue top = vm->stack[vm->stack_count - 1];
-            vm->stack[vm->stack_count - 1] = vm->stack[vm->stack_count - 2];
-            vm->stack[vm->stack_count - 2] = top;
+            LzValue top = stack[vm->stack_count - 1];
+            stack[vm->stack_count - 1] = stack[vm->stack_count - 2];
+            stack[vm->stack_count - 2] = top;
         }
         break;
     case LZ_OP_ARRAY_EXTEND:
@@ -2247,8 +2461,8 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
     case LZ_OP_INDEX:
         if (vm->stack_count >= 2) {
             /* An array and an int in range, which is all of index_op that matters here. */
-            LzValue *container = &vm->stack[vm->stack_count - 2];
-            const LzValue *index = &vm->stack[vm->stack_count - 1];
+            LzValue *container = &stack[vm->stack_count - 2];
+            const LzValue *index = &stack[vm->stack_count - 1];
             if (lz_value_is_array(container) && index->type == LZ_VAL_INT) {
                 const LzArray *array = lz_value_as_array(container);
                 int64_t wanted = index->as.integer;
@@ -2268,22 +2482,22 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         break;
     case LZ_OP_SET_INDEX:
         if (vm->stack_count >= 3) {
-            LzValue *container = &vm->stack[vm->stack_count - 3];
-            const LzValue *index = &vm->stack[vm->stack_count - 2];
+            LzValue *container = &stack[vm->stack_count - 3];
+            const LzValue *index = &stack[vm->stack_count - 2];
             if (lz_value_is_array(container) && index->type == LZ_VAL_INT) {
                 LzArray *array = lz_value_as_array(container);
                 int64_t wanted = index->as.integer;
                 int64_t resolved = wanted < 0 ? wanted + (int64_t)array->count : wanted;
                 if (resolved >= 0 && resolved < (int64_t)array->count) {
                     /* The same checks lz_array_set makes, in the same order, then its store. */
-                    status = lz_array_check_store(vm, array, &vm->stack[vm->stack_count - 1]);
+                    status = lz_array_check_store(vm, array, &stack[vm->stack_count - 1]);
                     if (status != LZ_OK) {
                         break;
                     }
-                    lz_array_store_at(&vm->heap, array, (size_t)resolved, &vm->stack[vm->stack_count - 1]);
-                    pop(vm);
-                    pop(vm);
-                    pop(vm);
+                    lz_array_store_at(&vm->heap, array, (size_t)resolved, &stack[vm->stack_count - 1]);
+                    pop_from(vm, stack);
+                    pop_from(vm, stack);
+                    pop_from(vm, stack);
                     break;
                 }
             }
@@ -2356,10 +2570,10 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         break;
     }
     case LZ_OP_GET_FIELD:
-        status = get_field_op(vm, chunk, &ip, false);
+        status = lz_vm_get_field_op(vm, chunk, &ip, false);
         break;
     case LZ_OP_GET_FIELD_W:
-        status = get_field_op(vm, chunk, &ip, true);
+        status = lz_vm_get_field_op(vm, chunk, &ip, true);
         break;
     case LZ_OP_GET_FIELD_KEEP: {
         LzString *name = NULL;
@@ -2367,10 +2581,10 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         if (status == LZ_OK) {
             if (vm->stack_count == 0) {
                 status = malformed(vm, "stack underflow");
-            } else if (lz_value_is_error(&vm->stack[vm->stack_count - 1]) &&
-                       ((LzError *)vm->stack[vm->stack_count - 1].as.object)->payload != NULL) {
+            } else if (lz_value_is_error(&stack[vm->stack_count - 1]) &&
+                       ((LzError *)stack[vm->stack_count - 1].as.object)->payload != NULL) {
                 /* an error with fields, and the target stays under the value */
-                LzValue target = vm->stack[vm->stack_count - 1];
+                LzValue target = stack[vm->stack_count - 1];
                 LzValue field = lz_value_nil();
                 bool member = false;
                 status = lz_vm_error_member_get(vm, current_owner(vm), &target, name, &field, &member);
@@ -2379,13 +2593,13 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
                                              name->data);
                 }
                 if (status == LZ_OK) {
-                    status = push(vm, field);
+                    status = push_to(vm, stack, field);
                 }
-            } else if (!lz_value_is_instance(&vm->stack[vm->stack_count - 1]) &&
-                       !lz_value_is_class(&vm->stack[vm->stack_count - 1])) {
-                status = no_field_error(vm, &vm->stack[vm->stack_count - 1], name);
+            } else if (!lz_value_is_instance(&stack[vm->stack_count - 1]) &&
+                       !lz_value_is_class(&stack[vm->stack_count - 1])) {
+                status = no_field_error(vm, &stack[vm->stack_count - 1], name);
             } else {
-                status = member_get_op(vm, name, true, false);
+                status = member_get_op(vm, chunk, ip - 3, name, true, false);
             }
         }
         break;
@@ -2418,7 +2632,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         if (vm->stack_count == 0) {
             status = malformed(vm, "stack underflow");
         } else {
-            status = push(vm, vm->stack[vm->stack_count - 1]);
+            status = push_to(vm, stack, stack[vm->stack_count - 1]);
         }
         break;
     case LZ_OP_CLOSE_UPVALUE_KEEP: {
@@ -2441,7 +2655,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
         } else {
             status = lz_vm_return(vm);
             if (status == LZ_OK) {
-                const LzCallFrame *caller = &vm->frames[vm->frame_count - 1];
+                const LzCallFrame *caller = &frames[vm->frame_count - 1];
                 *chunk_io = chunk = caller->chunk;
                 ip = caller->ip;
             }
@@ -2459,7 +2673,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, const LzChunk **chunk_io, size_t *ip
 LzStatus lz_vm_exec_one(LzVM *vm, const LzChunk *chunk, size_t *ip, bool *halted) {
     size_t next = *ip;
     const LzChunk *current = chunk;
-    LzStatus status = exec_one(vm, &current, &next, false);
+    LzStatus status = exec_one(vm, vm->stack, vm->frames, &current, &next, false);
     *halted = next == SIZE_MAX;
     *ip = *halted ? *ip + 1 : next;
     return status;
@@ -2467,6 +2681,10 @@ LzStatus lz_vm_exec_one(LzVM *vm, const LzChunk *chunk, size_t *ip, bool *halted
 
 static LzStatus execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, void *context) {
     (void)context;
+    /* A nested resume restores these buffers before returning, even on failure.
+     * New context-switching paths must preserve that contract or start a new loop. */
+    LzValue *const stack = vm->stack;
+    LzCallFrame *const frames = vm->frames;
     const LzChunk *chunk = main_chunk;
     size_t ip = 0;
 
@@ -2483,9 +2701,9 @@ static LzStatus execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, 
         vm->instructions++;
 
         size_t at = ip;
-        status = exec_one(vm, &chunk, &ip, true);
+        status = exec_one(vm, stack, frames, &chunk, &ip, true);
         if (status != LZ_OK) {
-            if (unwind_to_handler(vm, &status, 0, at, &chunk, &ip)) {
+            if (lz_vm_unwind_to_handler(vm, &status, 0, at, &chunk, &ip)) {
                 continue;
             }
             return status;
@@ -2494,7 +2712,10 @@ static LzStatus execute(LzVM *vm, const LzChunk *main_chunk, size_t *failed_at, 
 }
 
 LzStatus lz_vm_run_until(LzVM *vm, size_t depth, size_t *failed_at) {
-    const LzCallFrame *top = &vm->frames[vm->frame_count - 1];
+    /* Suspension exits this activation. The next resume starts with fresh pointers. */
+    LzValue *const stack = vm->stack;
+    LzCallFrame *const frames = vm->frames;
+    const LzCallFrame *top = &frames[vm->frame_count - 1];
     const LzChunk *chunk = top->chunk;
     size_t ip = top->ip;
 
@@ -2509,13 +2730,13 @@ LzStatus lz_vm_run_until(LzVM *vm, size_t depth, size_t *failed_at) {
         }
         vm->instructions++;
         size_t at = ip;
-        status = exec_one(vm, &chunk, &ip, true);
+        status = exec_one(vm, stack, frames, &chunk, &ip, true);
         if (status != LZ_OK) {
             if (status == LZ_YIELD) {
-                vm->frames[vm->frame_count - 1].ip = ip;
+                frames[vm->frame_count - 1].ip = ip;
                 return status;
             }
-            if (unwind_to_handler(vm, &status, depth, at, &chunk, &ip)) {
+            if (lz_vm_unwind_to_handler(vm, &status, depth, at, &chunk, &ip)) {
                 continue;
             }
             return status;
@@ -2531,6 +2752,7 @@ LzStatus lz_vm_eval_with(LzVM *vm, const LzChunk *chunk, LzValue *result, LzExec
     vm->error_offset = LZ_NO_OFFSET;
     vm->error_source = NULL;
     vm->native_depth = 0;
+    vm->c_stack_floor = 0;
     vm->trace_fixed = false;
     vm->heap.limit_hit = false;
 

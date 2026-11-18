@@ -29,6 +29,9 @@ AC_ARG_ENABLE([sanitizers],
 AC_ARG_ENABLE([poison],
     [AS_HELP_STRING([--enable-poison], [poison and quarantine freed objects (-DLZ_POISON, see docs/MEMORY.md)])],
     [], [enable_poison=no])
+AC_ARG_ENABLE([pool],
+    [AS_HELP_STRING([--disable-pool], [use malloc and free for every heap object (-DLZ_NO_POOL)])],
+    [], [enable_pool=yes])
 AC_ARG_ENABLE([static-binary],
     [AS_HELP_STRING([--enable-static-binary], [link the lizard executable statically (-static)])],
     [], [enable_static_binary=no])
@@ -43,7 +46,7 @@ AC_ARG_WITH([signing-key],
     [AS_HELP_STRING([--with-signing-key=FPR], [fingerprint of the key that signs an official build's package])],
     [lz_signing_key=$withval], [lz_signing_key=])
 
-for lz_opt in lto sanitizers poison static_binary werror tests official; do
+for lz_opt in lto sanitizers poison pool static_binary werror tests official; do
     eval lz_val=\$enable_$lz_opt
     case $lz_val in
         yes|no) ;;
@@ -137,6 +140,8 @@ if test "$lz_jit" = no; then LZ_JIT_CPPFLAGS="-DLZ_NO_JIT"; fi
 
 LZ_POISON_CPPFLAGS=
 if test "$enable_poison" = yes; then LZ_POISON_CPPFLAGS="-DLZ_POISON"; fi
+LZ_POOL_CPPFLAGS=
+if test "$enable_pool" = no; then LZ_POOL_CPPFLAGS="-DLZ_NO_POOL"; fi
 
 LZ_SAN_CFLAGS=; LZ_SAN_LDFLAGS=
 if test "$enable_sanitizers" = yes; then
@@ -213,6 +218,7 @@ AC_SUBST([LZ_LTO_LDFLAGS])
 AC_SUBST([LZ_STATIC_LDFLAGS])
 AC_SUBST([LZ_JIT_CPPFLAGS])
 AC_SUBST([LZ_POISON_CPPFLAGS])
+AC_SUBST([LZ_POOL_CPPFLAGS])
 AC_SUBST([LZ_BUILDINFO_ARGS])
 
 AC_CONFIG_FILES([Makefile])

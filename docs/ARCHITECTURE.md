@@ -24,6 +24,13 @@ Ownership is by reference count (`lz_object_retain` / `lz_object_release`).
 Objects still alive when the VM shuts down are visible through
 `--heap-stats` and `--trace-memory`.
 
+Heap object blocks up to 256 bytes use 16-byte size classes in a per-heap pool.
+The first small allocation acquires a 64 KiB chunk, and free lists recycle blocks
+without calling libc. Chunks share a bump allocator across size classes and stay
+until heap destruction. This avoids per-class chunks for classes used only once.
+No chunk is allocated for an empty heap. See [MEMORY.md](MEMORY.md#small-object-storage)
+for accounting and diagnostic modes.
+
 Arrays (`LzArray`) own a separately allocated item buffer. The buffer is
 charged to the heap (`lz_heap_charge` / `lz_heap_uncharge`), so `--max-heap`
 covers it and `live_bytes` returns to zero when everything is released. Items
@@ -35,8 +42,9 @@ overflow the C stack.
 Dicts (`LzDict`) keep their entries in a dense `entries[]` in insertion order
 plus an open-addressing `slots[]` that indexes them (0 empty, else entry + 1),
 both charged to the heap. A key is hashed once per lookup with the dict's own
-seed, so `1`, `true` and `"1"` never collide by accident and a hostile script
-cannot aim at a bucket. Removing an entry moves the rest down and reindexes, so
+seed. Strings reuse the hash already stored in their immutable header, and an
+insertion reuses its lookup hash. Key comparisons keep `1`, `true` and `"1"`
+distinct, including on hash collisions. Removing an entry moves the rest down and reindexes, so
 order is `[k0 k1 k2]` minus one, and a key removed and stored again goes to the
 end. A dict counts as a holder for the cycle check, and it can reach a closure,
 so it is a Skink suspect only when its key or value type does not rule one out.

@@ -9,7 +9,7 @@ The `sources_sync` test keeps the two paths from drifting apart.
 
 ```
 sh tools/build-plain.sh [build|check|install|clean] [--builddir=DIR] [--jobs=N] [--prefix=DIR]
-                        [--debug] [--no-jit] [--lto] [--sanitizers] [--poison] [--static] [--werror]
+                        [--debug] [--no-jit] [--no-pool] [--lto] [--sanitizers] [--poison] [--static] [--werror]
                         [--official --signing-key=FPR] [CC=clang] [CFLAGS=...] [LDFLAGS=...]
 ```
 
@@ -25,6 +25,8 @@ The options mean what the `configure` options of [options.md](options.md) mean: 
 `uname -s`; `--sanitizers` with `--static` is an error. Compiling is parallel (`--jobs`, default the CPU
 count) and incremental: a file is rebuilt when its `.c` or any header is newer than its object. The build directory
 may be outside the source tree.
+`--no-pool` defines `LZ_NO_POOL` to use libc for all heap objects. Changing compiler
+or preprocessing flags invalidates the plain build's object files automatically.
 
 ```
 sh tools/build-plain.sh check --jobs=4

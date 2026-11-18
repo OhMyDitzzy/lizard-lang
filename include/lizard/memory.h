@@ -46,6 +46,22 @@ typedef struct LzObject {
 
 #define LZ_HEAP_UNLIMITED SIZE_MAX
 
+/* Keep real frees under ASan so it can observe object lifetimes. */
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define LZ_POOL_ASAN 1
+#endif
+#endif
+#if defined(LZ_NO_POOL) || defined(__SANITIZE_ADDRESS__) || defined(LZ_POOL_ASAN)
+#define LZ_POOL_ENABLED 0
+#else
+#define LZ_POOL_ENABLED 1
+#endif
+
+#define LZ_POOL_STEP 16u
+#define LZ_POOL_MAX 256u
+#define LZ_POOL_CLASSES (LZ_POOL_MAX / LZ_POOL_STEP)
+
 /*
  * limit_bytes caps live_bytes, which counts heap objects such as strings and natives, and future
  * containers. Tables and chunks owned by the VM or the program are not counted. limit_hit is set
@@ -89,6 +105,8 @@ typedef struct LzHeap {
      */
     void (*on_link_freed)(void *context, LzObject *object);
     void *on_link_freed_context;
+    struct LzPoolChunk *pool_chunks;
+    LzObject *pool_free[LZ_POOL_CLASSES];
 } LzHeap;
 
 void lz_heap_init(LzHeap *heap);

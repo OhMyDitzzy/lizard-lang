@@ -151,7 +151,7 @@ static void test_higher_order(void) {
     check_output("println(map([], fn(n) => n), filter([], fn(n) => n))\n", "[] []\n");
     check_output("println(reduce([], fn(a, n) => a + n, 7), any([], fn(n) => n), all([], fn(n) => n))\n",
                  "7 false true\n");
-    /* Only nil and false are false. */
+    /* Predicates use the same truth rules as conditions. */
     check_output("println(filter([0, nil, false, \"\", [], {}, [0], \"a\", 0.0, 1], fn(x) => x))\n", "[[0], \"a\", 1]\n");
     /* A named function, a builtin and a closure are all callbacks. */
     check_output("fn double(n) { return n * 2 }\nprintln(map([1, 2], double), map([1, 2], string))\n",
@@ -177,6 +177,49 @@ static void test_methods(void) {
                  "println(add3(1), add3(1, c = 5), add3(1, *[2, 3]))\n",
                  "111 16 6\n");
     check_output("println(\"abc\".len())\n", "3\n");
+}
+
+static void test_call_fast_paths(void) {
+    check_output("fn f(a, b = 10, *rest) { return [a, b, rest] }\n"
+                 "fn g(a, b = 10) => a + b\n"
+                 "println(f(1, 2), f(1), f(1, 2, 3, 4))\n"
+                 "println(g(1, 2), g(1), g(b = 2, a = 1))\n",
+                 "[1, 2, []] [1, 10, []] [1, 2, [3, 4]]\n3 11 3\n");
+    check_output("fn make(n) { fn next(x) { n += x; return n }; return next }\n"
+                 "let f = make(10)\nprintln(map([1, 2, 3], f), f(4))\n"
+                 "fn work(n) { let f = make(n); return map([1, 2], f) }\n"
+                 "let co = coroutine(work)\nprintln(co.resume(20))\n",
+                 "[11, 13, 16] 20\n[21, 23]\n");
+    check_output("let xs = [9223372036854775807, -9223372036854775807 - 1, 0, 0]\n"
+                 "sort(xs)\nprintln(xs)\n"
+                 "let fs = [2.5, -0.0, 0.0, -1.5, 2.5]\nsort(fs)\nprintln(fs)\n",
+                 "[-9223372036854775808, 0, 0, 9223372036854775807]\n[-1.5, -0.0, 0.0, 2.5, 2.5]\n");
+}
+
+static void test_callback_stack_cache(void) {
+    Program program;
+    memset(&program, 0, sizeof program);
+    lz_vm_init(&program.vm, lz_writer_from_buffer(&program.out), lz_writer_from_buffer(&program.err));
+    lz_chunk_init(&program.chunk);
+    LZ_CHECK(lz_builtin_install(&program.vm) == LZ_OK);
+    LZ_CHECK(lz_vm_check_native_depth(&program.vm) == LZ_OK);
+    uintptr_t floor = program.vm.c_stack_floor;
+    bool known = program.vm.c_stack_hi != 0;
+    if (known) {
+        /* A one-byte sentinel distinguishes reuse from recomputing the same floor. */
+        program.vm.c_stack_floor = floor + 1;
+        LZ_CHECK(lz_vm_check_native_depth(&program.vm) == LZ_OK);
+        LZ_CHECK(program.vm.c_stack_floor == floor + 1);
+        program.vm.c_stack_lo = program.vm.c_stack_hi = 1;
+        LZ_CHECK(lz_vm_check_native_depth(&program.vm) == LZ_OK);
+        LZ_CHECK(program.vm.c_stack_hi > 1 && program.vm.c_stack_floor == floor);
+        program.vm.c_stack_floor = floor + 1;
+    }
+    lz_source_from_string(&program.source, "stack-cache.lz", "println(map([1], fn(x) => x))\n");
+    LZ_CHECK(lz_compile(&program.vm, &program.source, &program.chunk, &program.diagnostics) == LZ_OK);
+    LZ_CHECK(lz_vm_run(&program.vm, &program.chunk) == LZ_OK);
+    if (known) LZ_CHECK(program.vm.c_stack_floor == floor);
+    finish(&program);
 }
 
 static void test_callback_mutation(void) {
@@ -240,6 +283,8 @@ int main(void) {
     test_short_functions();
     test_higher_order();
     test_methods();
+    test_call_fast_paths();
+    test_callback_stack_cache();
     test_callback_mutation();
     test_callback_errors();
     test_method_errors();

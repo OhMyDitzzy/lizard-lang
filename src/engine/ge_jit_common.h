@@ -250,6 +250,27 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
         }
 
         switch (plain) {
+        case LZ_OP_STRING_BEGIN:
+            nd = d + 1;
+            jumps = true;
+            break;
+        case LZ_OP_STRING_FALLBACK:
+            ok = d >= 2;
+            nd = d - 1;
+            falls = false;
+            jumps = true;
+            break;
+        case LZ_OP_STRING_CHECK:
+            ok = d >= 1;
+            nd = d + 1;
+            break;
+        case LZ_OP_BUILD_STRING: {
+            const LzStringBuild *plan = lz_chunk_string_build(c->chunk, a);
+            ok = plan != NULL && plan->slots <= (size_t)d;
+            if (ok) nd = d - (int32_t)plan->slots + 1;
+            break;
+        }
+
         case LZ_OP_CONSTANT:
         case LZ_OP_NIL:
         case LZ_OP_TRUE:

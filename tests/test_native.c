@@ -27,6 +27,11 @@ int main(void) {
         LZ_CHECK(strcmp(print->name->data, "print") == 0);
     }
     LZ_CHECK(find_native(&vm, "no_such_builtin") == NULL);
+    static const char *const array_leaf_names[] = {"insert", "remove", "clear", "copy", "reverse"};
+    for (size_t i = 0; i < sizeof array_leaf_names / sizeof array_leaf_names[0]; i++) {
+        const LzNative *native = find_native(&vm, array_leaf_names[i]);
+        LZ_CHECK(native != NULL && (native->flags & LZ_NATIVE_LEAF) != 0);
+    }
 
     LzString *print_name = lz_vm_intern(&vm, "print", 5);
     LZ_CHECK(print_name != NULL);

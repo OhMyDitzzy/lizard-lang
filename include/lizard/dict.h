@@ -8,8 +8,8 @@
 #define LZ_DICT_MAX_LENGTH ((size_t)1 << 22)
 
 /*
- * One entry in insertion order. `hash` is the key's hash, so a resize or a lookup never hashes
- * the same key twice.
+ * One entry in insertion order. `hash` includes this dict's seed, so rebuilding
+ * the slot index never needs to hash its keys again.
  */
 typedef struct LzDictEntry {
     LzValue key;

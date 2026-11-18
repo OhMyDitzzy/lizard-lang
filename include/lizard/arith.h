@@ -178,7 +178,8 @@ static inline bool lz_arith_fast(LzOpCode op, const LzValue *left, const LzValue
             if (right->as.integer == 0) {
                 return false;
             }
-            *out = lz_value_float((double)left->as.integer / (double)right->as.integer);
+            *out = (LzValue){.type = LZ_VAL_FLOAT,
+                             .as.number = (double)left->as.integer / (double)right->as.integer};
             return true;
         default:
             return false;
@@ -186,7 +187,7 @@ static inline bool lz_arith_fast(LzOpCode op, const LzValue *left, const LzValue
         if (failed) {
             return false;
         }
-        *out = lz_value_int(result);
+        *out = (LzValue){.type = LZ_VAL_INT, .as.integer = result};
         return true;
     }
     if ((left->type == LZ_VAL_FLOAT || left->type == LZ_VAL_INT) &&
@@ -195,26 +196,26 @@ static inline bool lz_arith_fast(LzOpCode op, const LzValue *left, const LzValue
         double y = right->type == LZ_VAL_INT ? (double)right->as.integer : right->as.number;
         switch (op) {
         case LZ_OP_ADD:
-            *out = lz_value_float(x + y);
+            *out = (LzValue){.type = LZ_VAL_FLOAT, .as.number = x + y};
             return true;
         case LZ_OP_SUBTRACT:
-            *out = lz_value_float(x - y);
+            *out = (LzValue){.type = LZ_VAL_FLOAT, .as.number = x - y};
             return true;
         case LZ_OP_MULTIPLY:
-            *out = lz_value_float(x * y);
+            *out = (LzValue){.type = LZ_VAL_FLOAT, .as.number = x * y};
             return true;
         case LZ_OP_DIVIDE:
             if (y == 0.0) {
                 return false;
             }
-            *out = lz_value_float(x / y);
+            *out = (LzValue){.type = LZ_VAL_FLOAT, .as.number = x / y};
             return true;
         case LZ_OP_MODULO: {
             double r;
             if (!lz_float_modulo_whole(x, y, &r)) {
                 return false;
             }
-            *out = lz_value_float(r);
+            *out = (LzValue){.type = LZ_VAL_FLOAT, .as.number = r};
             return true;
         }
         default:

@@ -21,6 +21,60 @@ everything they hold alive.
 
 A `link` is the one value that does **not** own: see below.
 
+## Small object storage
+
+Each heap pools object blocks up to 256 bytes in classes rounded up to 16 bytes.
+On the audited 64-bit build, string and closure headers are 56 bytes, upvalues and
+arrays are 88, instances and bound methods are 80, dicts are 120, coroutines are
+192 and functions are 240. Variable-size payloads can take an object above the
+cutoff. Class objects are 1360 bytes and always use `malloc`.
+
+The first small object allocates a 64 KiB chunk. Further small objects use its
+remaining space or a free block in their size class. The empty heap allocates no
+chunks. Larger objects still use `malloc` and `free`. Chunks stay until
+`lz_vm_free` or `lz_heap_destroy`, even when empty. Keeping them avoids allocator
+traffic during repeated bursts of temporary objects. The pool does not try to
+return empty chunks to the system while the VM lives.
+
+`--max-heap` and heap statistics still count the exact requested object size, not
+the rounded class size, and retain the existing charges for owned buffers.
+Physical memory can exceed that count because of rounding, chunk headers, unused
+chunk space and blocks kept for reuse. Object allocation hooks, finalization,
+link invalidation and Skink run in their existing order.
+
+Only `lz_heap_alloc` object blocks use this pool. Objects never use `realloc`,
+and their header keeps the requested size so freeing identifies their class.
+Array and dict storage, coroutine stacks, chunks of bytecode and native API
+`lzn_alloc` buffers keep their own allocation and reallocation paths. Native
+class finalizers are called as before, before the object block is recycled.
+
+ASan disables the pool automatically for both GCC's `__SANITIZE_ADDRESS__` and
+Clang's address-sanitizer feature. `-DLZ_NO_POOL` disables it explicitly. Use
+`--disable-pool` with configure, or `--no-pool` with `tools/build-plain.sh`.
+Poison mode fills pooled free blocks with `0xDD`, reserving the first pointer for
+the free list. Allocation checks the remaining bytes before reusing a block and
+aborts with `pooled object modified after free` if they changed. Nonpooled
+allocations keep the existing poison quarantine.
+
+The local allocation audit wrapped libc `malloc` and `free` with the linker's
+`--wrap` option. Allocating and releasing a 61-byte object 100,000 times took
+100,000 calls to each with the pool disabled and one call to each with it enabled,
+including heap destruction. Both runs recorded 100,000 logical allocations and
+zero live bytes at the end. This measures allocator traffic, not an Ir percentage.
+The randomized lifetime test checks 100,000 operations and keeps one verified
+payload alive across as many as 2640 intervening operations. The size-boundary
+test checks every requested size from the object header through 320 bytes at an
+exact two-object heap limit. Poison tests also corrupt a freed pooled block in a
+child process and require the reuse check to reject it.
+
+For example, use separate build directories to compare both allocators:
+
+```sh
+sh tools/build-plain.sh check --builddir=build-pool
+sh tools/build-plain.sh check --no-pool --builddir=build-no-pool
+sh tools/build-plain.sh check --poison --builddir=build-pool-poison 'CFLAGS=-O1 -g'
+```
+
 ## Cycles are refused when stored
 
 Storing a value into a container that already reaches back to the container would close

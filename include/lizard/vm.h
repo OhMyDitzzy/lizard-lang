@@ -273,6 +273,15 @@ LzStatus lz_vm_eval(LzVM *vm, const LzChunk *chunk, LzValue *result);
  */
 LzStatus lz_vm_exec_one(LzVM *vm, const LzChunk *chunk, size_t *ip, bool *halted);
 
+/* Shared opcode semantics. The caller charges and counts the instruction. */
+LzStatus lz_vm_get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool write_check);
+LzStatus lz_vm_equal_op(LzVM *vm);
+LzStatus lz_vm_check_param(LzVM *vm, const LzChunk *chunk, uint16_t slot, uint16_t index);
+
+/* Restore a catch in a frame owned by this interpreter activation. The target is a byte offset. */
+bool lz_vm_unwind_to_handler(LzVM *vm, LzStatus *status, size_t floor, size_t failed_ip,
+                             const LzChunk **chunk_io, size_t *ip_io);
+
 /*
  * Runs the reference interpreter from the frame on top, at its saved ip in byte offsets, until the
  * frame stack is depth frames deep again. That means until that frame has returned. An engine that

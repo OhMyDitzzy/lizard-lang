@@ -107,6 +107,10 @@ static size_t pair_instruction(const LzChunk *chunk, size_t offset, const LzWrit
     }
     unsigned first = read16(chunk, offset + 1);
     unsigned second = read16(chunk, offset + 3);
+    if (opcode == LZ_OP_STRING_CHECK) {
+        put(out, "%-18s %5u %5u\n", name, first, second);
+        return offset + 5;
+    }
     if (opcode == LZ_OP_JUMP_IF_SUPPLIED) {
         put(out, "%-18s %5u %5u -> %04zu\n", name, first, second, offset + 5 + second);
         return offset + 5;
@@ -185,6 +189,7 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_IS:
     case LZ_OP_CHECK_RETURN:
         return type_instruction(chunk, offset, out);
+    case LZ_OP_STRING_CHECK:
     case LZ_OP_CHECK_PARAM:
     case LZ_OP_JUMP_IF_SUPPLIED:
         return pair_instruction(chunk, offset, out);
@@ -244,6 +249,9 @@ size_t lz_disassemble_instruction(const LzChunk *chunk, size_t offset, const LzS
     case LZ_OP_TRY_END:
     case LZ_OP_THROW:
         return simple_instruction(lz_opcode_name(opcode), offset, out);
+    case LZ_OP_STRING_BEGIN:
+    case LZ_OP_STRING_FALLBACK:
+    case LZ_OP_BUILD_STRING:
     case LZ_OP_DICT:
         return slot_instruction(chunk, offset, out);
     case LZ_OP_CLOSE_UPVALUE_KEEP:

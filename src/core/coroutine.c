@@ -130,11 +130,11 @@ LzStatus lz_coroutine_resume(LzVM *vm, int argc, const LzValue *argv, LzValue *r
     if (co->state != LZ_CO_SUSPENDED) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot resume a coroutine that is %s", lz_coroutine_status(co));
     }
-    uintptr_t saved_floor = vm->c_stack_floor;
     LzStatus status = lz_vm_check_native_depth(vm);
     if (status != LZ_OK) {
         return status;
     }
+    uintptr_t saved_floor = vm->c_stack_floor;
     LzExecutionContext *caller = vm->context;
     LzCoroutine *parent = caller->coroutine;
     const struct LzNative *saved_native = vm->current_native;

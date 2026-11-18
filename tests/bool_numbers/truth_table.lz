@@ -1,0 +1,77 @@
+# Each row is a value and its truth value. Keep these as any through every test.
+class TruthNode { pub value: int = 1 }
+fn identity(x) => x
+fn capture() { let x = 1; return fn() => x }
+let node = TruthNode()
+let live = link(node)
+let dead = link(TruthNode())
+let inf = 1e308 * 10
+let rows = [
+  [nil, false], [false, false], [0, false], [0.0, false], [-0.0, false],
+  ["", false], [[], false], [{}, false],
+  [true, true], [bool(42), true], [bool(-1), true], [42, true], [-1, true],
+  [0.5, true], ["0", true], ["false", true], [inf - inf, true],
+  [node, true], [capture(), true], [identity, true], [println, true],
+  [coroutine(identity), true], [live, true], [dead, true],
+  [[0], true], [{"x": 0}, true]
+]
+
+let errors = 0
+let visited = 0
+for row in rows {
+  visited = visited + 1
+  let value: any = row[0]
+  let expected = row[1]
+  let taken = false
+  if value { taken = true }
+  errors = errors + (taken != expected)
+  errors = errors + ((not value) == expected)
+  errors = errors + (bool(value and true) != expected)
+  errors = errors + (bool(value or false) != expected)
+  errors = errors + (bool(value) != expected)
+  taken = false
+  while value { taken = true; break }
+  errors = errors + (taken != expected)
+  errors = errors + ((len(filter([value], identity)) == 1) != expected)
+  errors = errors + (any([value], identity) != expected)
+  errors = errors + (all([value], identity) != expected)
+}
+println(errors, visited)
+
+fn check(value: any, expected) {
+  let errors = 0
+  let taken = false
+  if value { taken = true }
+  errors = errors + (taken != expected)
+  errors = errors + ((not value) == expected)
+  errors = errors + (bool(value and true) != expected)
+  errors = errors + (bool(value or false) != expected)
+  errors = errors + (bool(value) != expected)
+  taken = false
+  while value { taken = true; break }
+  errors = errors + (taken != expected)
+  errors = errors + ((len(filter([value], identity)) == 1) != expected)
+  errors = errors + (any([value], identity) != expected)
+  errors = errors + (all([value], identity) != expected)
+  return errors
+}
+errors = 0
+visited = 0
+for row in rows {
+  errors = errors + check(row[0], row[1])
+  visited = visited + 1
+}
+println(errors, visited)
+
+# Calls and loop backedges both exceed the eager compilation threshold.
+errors = 0
+visited = 0
+let round = 0
+while round < 3000 {
+  for row in rows {
+    errors = errors + check(row[0], row[1])
+    visited = visited + 1
+  }
+  round = round + 1
+}
+println(errors, visited)

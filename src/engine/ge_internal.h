@@ -17,9 +17,9 @@ enum { GE_K_LOCAL = 0, GE_K_GLOBAL = 1, GE_K_CONST = 2 };
 /* Where a fused result goes, besides the stack. */
 enum { GE_ST_NONE = 0, GE_ST_LOCAL = 1, GE_ST_GLOBAL = 2 };
 
-/* Values below 64 are LzOpCode: a plain instruction that GE runs itself. */
+/* Keep synthetic instructions above the bytecode range, including future additions. */
 enum {
-    GE_OP_END = 64, /* sentinel after the last instruction: running off the chunk */
+    GE_OP_END = 128, /* sentinel after the last instruction: running off the chunk */
     GE_OP_DELEGATE, /* a plain instruction GE does not specialise: reference interpreter */
     GE_OP_BIN,      /* [load a] [load b] ARITH [store]          */
     GE_OP_BIN1,     /* [load b] ARITH [store], with the left operand on the stack */
@@ -28,6 +28,9 @@ enum {
     GE_OP_INDEX,    /* [load a] [load b] INDEX                  */
     GE_OP_INDEX1    /* [load b] INDEX, with the array on the stack */
 };
+
+_Static_assert((int)LZ_OP_COUNT <= (int)GE_OP_END, "bytecode and GE opcodes must not overlap");
+_Static_assert(GE_OP_INDEX1 <= UINT8_MAX, "GE instructions use a byte opcode");
 
 #define GE_NO_HINT UINT32_MAX
 
@@ -45,32 +48,8 @@ typedef struct GeIns {
     uint32_t hint_a; /* inline caches: slot in the globals table last seen for each operand */
     uint32_t hint_b;
     uint32_t hint_c;
-    /*
-     * Inline cache of GET_FIELD, GET_FIELD_W, GET_FIELD_KEEP, SET_FIELD and METHOD_LOOKUP: the id
-     * of the class last seen on this instruction and the member it resolved to. A hit means the
-     * instance's class is that very class (ids are never reused, so a class made again or at a
-     * reused address misses), and then the lookup, the visibility checks of the code that owns the
-     * instruction and the kind of the member were all settled when the entry was filled. A class
-     * never gains or loses members once an instance of it exists (members are added while the
-     * class is being defined), and the member lives in the members array of a class its
-     * instances keep alive, so the pointer cannot dangle. 0 means empty.
-     */
-    uint64_t ic_class;
-    const struct LzMember *ic_member;
-    /*
-     * Health of that cache. ic_run counts the hits since the last miss. A miss that follows a
-     * run shorter than IC_MIN_RUN is a bad one, IC_BAD_MAX bad ones in a row mark the site stuck
-     * (polymorphic, or a member the cache never takes such as a link field), and a stuck site
-     * goes straight to the reference without looking the name up again. A longer run clears the
-     * count. A class that is already cached still hits on a stuck site.
-     */
-    uint32_t ic_run;
-    uint8_t ic_bad;
-    uint8_t ic_stuck;
+    LzMemberCache member_cache; /* shared lookup and miss health with ref */
 } GeIns;
-
-#define IC_MIN_RUN 4u
-#define IC_BAD_MAX 8u
 
 struct GeJit;
 

@@ -9,6 +9,7 @@
 | `--enable-lto` | `-flto`, when the compiler supports it (a warning when not) |
 | `--enable-sanitizers` | `-fsanitize=address,undefined -fno-omit-frame-pointer`; an error with `--enable-static-binary` |
 | `--enable-poison` | `-DLZ_POISON`: freed objects are poisoned and quarantined (see [MEMORY.md](../MEMORY.md)) |
+| `--disable-pool` | `-DLZ_NO_POOL`: use libc for every heap object. ASan disables the pool automatically |
 | `--enable-static-binary` | link `lizard` with `-static` (not `--enable-static`, which means libtool libraries elsewhere) |
 | `--enable-werror` | `-Werror` |
 | `--disable-tests` | do not build the tests; `make check` only says so |
