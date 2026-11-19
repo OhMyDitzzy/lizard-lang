@@ -85,7 +85,6 @@ lizard_docs = \
 	docs/FUNCTIONS.md \
 	docs/COROUTINES.md \
 	docs/MEMORY.md \
-	docs/PERFORMANCE-STAGE4.md \
 	docs/METHODS.md \
 	docs/MODULES.md \
 	docs/NATIVE.md \
