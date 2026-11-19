@@ -696,6 +696,38 @@ found:
 }
 
 LzStatus lz_vm_values_equal(LzVM *vm, const LzValue *a, const LzValue *b, bool *same) {
+    if (lz_value_is_instance(a) && lz_value_as_instance(a)->cls->equality_state == 1 &&
+        (b->type == LZ_VAL_NIL || (b->type == LZ_VAL_OBJECT && a->as.object == b->as.object))) {
+        *same = b->type != LZ_VAL_NIL;
+        return LZ_OK;
+    }
+    /* Primitive comparisons cannot invoke a class operator or consume array fuel. Keeping them
+     * out of the budgeted walker also avoids opening an equality scope for every scalar pair. */
+    if (a->type != LZ_VAL_OBJECT && b->type != LZ_VAL_OBJECT) {
+        if (a->type == LZ_VAL_NIL || b->type == LZ_VAL_NIL) {
+            *same = a->type == LZ_VAL_NIL && b->type == LZ_VAL_NIL;
+            return LZ_OK;
+        }
+        if (a->type == b->type) {
+            switch (a->type) {
+            case LZ_VAL_BOOL: *same = a->as.boolean == b->as.boolean; return LZ_OK;
+            case LZ_VAL_INT: *same = a->as.integer == b->as.integer; return LZ_OK;
+            case LZ_VAL_FLOAT: *same = a->as.number == b->as.number; return LZ_OK;
+            default: break;
+            }
+        }
+    } else if (a->type == LZ_VAL_OBJECT && b->type == LZ_VAL_OBJECT &&
+               a->as.object == b->as.object && !lz_value_is_instance(a)) {
+        *same = true;
+        return LZ_OK;
+    } else if (a->type == LZ_VAL_NIL || b->type == LZ_VAL_NIL) {
+        /* An instance on the left may define == nil, so leave that case to the normal path. */
+        if (!lz_value_is_instance(a)) {
+            *same = false;
+            return LZ_OK;
+        }
+    }
+
     if (a->type == LZ_VAL_OBJECT && b->type == LZ_VAL_OBJECT && a->as.object != b->as.object &&
         a->as.object->type == LZ_OBJ_STRING && b->as.object->type == LZ_OBJ_STRING) {
         const LzString *x = (const LzString *)a->as.object;

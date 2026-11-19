@@ -103,7 +103,7 @@ void lz_free_sized(void *block, size_t size) {
 /* Only heap objects use the pool. Owned buffers keep their original allocator. */
 static void free_object(LzHeap *heap, LzObject *object) {
 #if LZ_POOL_ENABLED
-    if (object->size <= LZ_POOL_MAX) {
+    if (heap->pool_enabled && object->size <= LZ_POOL_MAX) {
         size_t index = pool_class(object->size);
 #ifdef LZ_POISON
         memset(object, 0xDD, (index + 1) * LZ_POOL_STEP);
@@ -141,6 +141,12 @@ void lz_heap_init(LzHeap *heap) {
     heap->on_link_freed_context = NULL;
     heap->pool_chunks = NULL;
     memset(heap->pool_free, 0, sizeof heap->pool_free);
+#if LZ_POOL_ENABLED
+    const char *pool_setting = getenv("LZ_POOL");
+    heap->pool_enabled = pool_setting == NULL || strcmp(pool_setting, "off") != 0;
+#else
+    heap->pool_enabled = false;
+#endif
 }
 
 /*
@@ -230,7 +236,7 @@ void *lz_heap_alloc(LzHeap *heap, LzObjType type, size_t size) {
 
     LzObject *object;
 #if LZ_POOL_ENABLED
-    object = size <= LZ_POOL_MAX ? pool_alloc(heap, size) : malloc(size);
+    object = heap->pool_enabled && size <= LZ_POOL_MAX ? pool_alloc(heap, size) : malloc(size);
 #else
     object = malloc(size);
 #endif

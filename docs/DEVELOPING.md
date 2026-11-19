@@ -109,6 +109,10 @@ compare outputs and allocation counts, without running the benchmark CI.
 
 ## Sanitizers
 
+The stage 4 implementation, guarded paths, delegated-opcode measurements, memory audit and
+explicit deferrals are recorded in [PERFORMANCE-STAGE4.md](PERFORMANCE-STAGE4.md). Its final
+verification section describes the current checkpoint rather than a timing or Ir claim.
+
     mkdir build-san && cd build-san
     ../configure --enable-sanitizers --with-build-type=debug
     make -j && make check

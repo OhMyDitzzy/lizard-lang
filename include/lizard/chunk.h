@@ -179,9 +179,10 @@ _Static_assert(sizeof(LzMemberCache) == 24, "member cache must keep the GE layou
 #define LZ_MEMBER_CACHE_BAD_MAX 8u
 #define LZ_MEMBER_SITES_MAX 128u
 
-/* One bounded, direct-mapped cache per bytecode site. NULL keeps the slow path. */
+/* Fixed site numbers are assigned while emitting code. Zero means uncached. */
 struct LzChunk;
 LzMemberCache *lz_chunk_member_site(const struct LzChunk *chunk, size_t offset);
+bool lz_chunk_register_member_site(struct LzChunk *chunk, size_t offset);
 
 enum { LZ_STRING_PIECE_TEXT, LZ_STRING_PIECE_DEBUG, LZ_STRING_PIECE_FORMAT };
 
@@ -201,6 +202,24 @@ typedef struct LzStringBuild {
     uint8_t first_op;
 } LzStringBuild;
 
+typedef struct LzBuiltinSite {
+    const LzValue *slot;
+    uint32_t shape;
+    uint16_t kind;
+} LzBuiltinSite;
+
+/* Compiler-owned metadata stays outside charged function objects. */
+typedef struct LzChunkCache {
+    LzStringBuild *builds;
+    size_t build_count;
+    size_t build_capacity;
+    LzMemberCache *member_sites;
+    uint8_t *member_site_ids;
+    size_t member_site_count;
+    LzGlobalSite *globals;
+    LzBuiltinSite *builtin_sites;
+} LzChunkCache;
+
 typedef struct LzChunk {
     uint8_t *code;
     uint32_t *offsets; /* source offset of each byte, see lizard/source.h */
@@ -216,7 +235,7 @@ typedef struct LzChunk {
     size_t type_slot_capacity;
     const struct LzModule *module; /* the module this chunk's code belongs to, borrowed, or NULL for main */
     struct LzInterface *iface; /* what the unit's `pub` declarations offer, see lizard/interface.h, or NULL for a function's chunk */
-    LzGlobalSite *global_sites; /* one per constant, made on first use, see lz_chunk_global_site */
+    LzChunkCache *cache; /* uncharged plans and fixed cache sites */
     size_t global_site_count;
 } LzChunk;
 

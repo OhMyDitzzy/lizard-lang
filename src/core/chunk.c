@@ -4,22 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct MemberSite {
-    size_t offset_plus_one;
-    LzMemberCache cache;
-} MemberSite;
-
-typedef struct ChunkCache {
-    LzStringBuild *builds;
-    size_t build_count;
-    size_t build_capacity;
-    MemberSite *members;
-    LzGlobalSite sites[];
-} ChunkCache;
+typedef LzChunkCache ChunkCache;
 
 static ChunkCache *chunk_cache(const LzChunk *chunk) {
-    return chunk->global_sites == NULL ? NULL :
-        (ChunkCache *)((unsigned char *)chunk->global_sites - offsetof(ChunkCache, sites));
+    return chunk->cache;
 }
 
 static void free_cache(LzChunk *chunk) {
@@ -27,7 +15,10 @@ static void free_cache(LzChunk *chunk) {
     if (cache != NULL) {
         for (size_t i = 0; i < cache->build_count; i++) free(cache->builds[i].pieces);
         free(cache->builds);
-        free(cache->members);
+        free(cache->globals);
+        free(cache->builtin_sites);
+        free(cache->member_sites);
+        free(cache->member_site_ids);
         free(cache);
     }
 }
@@ -47,7 +38,7 @@ void lz_chunk_init(LzChunk *chunk) {
     chunk->type_slot_capacity = 0;
     chunk->module = NULL;
     chunk->iface = NULL;
-    chunk->global_sites = NULL;
+    chunk->cache = NULL;
     chunk->global_site_count = 0;
 }
 
@@ -91,6 +82,11 @@ static bool reserve_code(LzChunk *chunk, size_t extra) {
         return false;
     }
     chunk->offsets = offsets;
+    if (lz_chunk_global_site(chunk, 0) == NULL) return false;
+    uint8_t *ids = realloc(chunk->cache->member_site_ids, capacity);
+    if (ids == NULL) return false;
+    memset(ids + chunk->capacity, 0, capacity - chunk->capacity);
+    chunk->cache->member_site_ids = ids;
     chunk->capacity = capacity;
     return true;
 }
@@ -126,6 +122,7 @@ bool lz_chunk_add_constant(LzChunk *chunk, LzValue value, uint16_t *index) {
         }
         chunk->constants = grown;
         chunk->constant_capacity = capacity;
+        if (lz_chunk_global_site(chunk, (uint16_t)(capacity - 1)) == NULL) return false;
     }
 
     lz_value_retain(&value);
@@ -491,50 +488,60 @@ void lz_chunk_truncate(LzHeap *heap, LzChunk *chunk, size_t code_count, size_t c
         chunk->constant_count--;
         lz_value_release(heap, &chunk->constants[chunk->constant_count]);
     }
+    if (chunk->cache != NULL && chunk->cache->member_sites != NULL) {
+        memset(chunk->cache->member_sites, 0, LZ_MEMBER_SITES_MAX * sizeof *chunk->cache->member_sites);
+        memset(chunk->cache->member_site_ids + chunk->count, 0, chunk->capacity - chunk->count);
+    }
+    if (chunk->cache != NULL && chunk->cache->builtin_sites != NULL) {
+        memset(chunk->cache->builtin_sites, 0, LZ_MEMBER_SITES_MAX * sizeof *chunk->cache->builtin_sites);
+    }
     /* Keep live build plans, but no cached cell may refer to a reused constant index. */
     ChunkCache *cache = chunk_cache(chunk);
     if (cache != NULL) {
         while (cache->build_count > 0 && cache->builds[cache->build_count - 1].end > code_count) {
             free(cache->builds[--cache->build_count].pieces);
         }
-        memset(chunk->global_sites, 0, chunk->global_site_count * sizeof *chunk->global_sites);
-        if (cache->members != NULL) memset(cache->members, 0, LZ_MEMBER_SITES_MAX * sizeof *cache->members);
+        memset(cache->globals, 0, chunk->global_site_count * sizeof *cache->globals);
+
     }
 }
 
 LzGlobalSite *lz_chunk_global_site(const LzChunk *chunk, uint16_t index) {
-    LzChunk *cache = (LzChunk *)chunk;
-    if (index >= cache->global_site_count) {
-        size_t count = cache->constant_count > (size_t)index + 1 ? cache->constant_count : (size_t)index + 1;
-        ChunkCache *old = chunk_cache(chunk);
-        ChunkCache *grown = realloc(old, offsetof(ChunkCache, sites) + count * sizeof(LzGlobalSite));
-        if (grown == NULL) return NULL;
-        if (old == NULL) {
-            grown->builds = NULL;
-            grown->build_count = grown->build_capacity = 0;
-            grown->members = NULL;
-        }
-        memset(grown->sites + cache->global_site_count, 0,
-               (count - cache->global_site_count) * sizeof(LzGlobalSite));
-        cache->global_sites = grown->sites;
-        cache->global_site_count = count;
+    LzChunk *owner = (LzChunk *)chunk;
+    if (owner->cache == NULL) {
+        owner->cache = calloc(1, sizeof *owner->cache);
+        if (owner->cache == NULL) return NULL;
     }
-    return &cache->global_sites[index];
+    if (index >= owner->global_site_count) {
+        size_t count = owner->constant_count > (size_t)index + 1 ? owner->constant_count : (size_t)index + 1;
+        LzGlobalSite *grown = realloc(owner->cache->globals, count * sizeof *grown);
+        if (grown == NULL) return NULL;
+        memset(grown + owner->global_site_count, 0,
+               (count - owner->global_site_count) * sizeof *grown);
+        owner->cache->globals = grown;
+        owner->global_site_count = count;
+    }
+    return &owner->cache->globals[index];
+}
+
+bool lz_chunk_register_member_site(LzChunk *chunk, size_t offset) {
+    if (offset >= chunk->count) return false;
+    if (chunk->cache->member_site_count == LZ_MEMBER_SITES_MAX) return true;
+    if (chunk->cache->member_sites == NULL) {
+        chunk->cache->member_sites = calloc(LZ_MEMBER_SITES_MAX, sizeof *chunk->cache->member_sites);
+        if (chunk->cache->member_sites == NULL) return false;
+    }
+    if (chunk->code[offset] == LZ_OP_METHOD_LOOKUP && chunk->cache->builtin_sites == NULL) {
+        chunk->cache->builtin_sites = calloc(LZ_MEMBER_SITES_MAX, sizeof *chunk->cache->builtin_sites);
+        if (chunk->cache->builtin_sites == NULL) return false;
+    }
+    chunk->cache->member_site_ids[offset] = (uint8_t)++chunk->cache->member_site_count;
+    return true;
 }
 
 LzMemberCache *lz_chunk_member_site(const LzChunk *chunk, size_t offset) {
-    if (lz_chunk_global_site(chunk, 0) == NULL) return NULL;
-    ChunkCache *cache = chunk_cache(chunk);
-    if (cache->members == NULL) {
-        cache->members = calloc(LZ_MEMBER_SITES_MAX, sizeof *cache->members);
-        if (cache->members == NULL) return NULL;
-    }
-    MemberSite *site = &cache->members[offset % LZ_MEMBER_SITES_MAX];
-    if (site->offset_plus_one != offset + 1) {
-        memset(site, 0, sizeof *site);
-        site->offset_plus_one = offset + 1;
-    }
-    return &site->cache;
+    if (offset >= chunk->count || chunk->cache == NULL || chunk->cache->member_site_ids[offset] == 0) return NULL;
+    return &chunk->cache->member_sites[chunk->cache->member_site_ids[offset] - 1];
 }
 
 bool lz_chunk_add_string_build(LzChunk *chunk, const LzStringBuild *build, uint16_t *index) {

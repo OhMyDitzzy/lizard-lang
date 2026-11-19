@@ -1,8 +1,10 @@
 #include <stdint.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "lizard/array.h"
+#include "array/array.h"
 #include "lizard/builtin.h"
 #include "lizard/compiler.h"
 #include "lizard/debug.h"
@@ -746,7 +748,33 @@ static void test_growth_policy(void) {
     lz_buffer_free(&err);
 }
 
+static void test_sort_stability(void) {
+    LzVM vm;
+    lz_vm_init(&vm, (LzWriter){0}, (LzWriter){0});
+    LzArray *array = lz_array_new(&vm.heap, 32);
+    LZ_CHECK(array != NULL);
+    if (array == NULL) { lz_vm_free(&vm); return; }
+    for (size_t i = 0; i < 32; i++) array->items[array->count++] = lz_value_float(i % 2 ? -0.0 : 0.0);
+    LzValue argument = lz_value_object(&array->base), result = lz_value_nil();
+    lz_vm_set_fuel(&vm, 1000);
+    LZ_CHECK(lz_builtin_sort(&vm, 1, &argument, &result) == LZ_OK);
+    LZ_CHECK(vm.fuel == 976);
+    for (size_t i = 0; i < 32; i++) LZ_CHECK(!!signbit(array->items[i].as.number) == (i % 2 != 0));
+    array->count = 3;
+    array->items[0] = lz_value_int(INT64_C(9007199254740993));
+    array->items[1] = lz_value_float(9007199254740992.0);
+    array->items[2] = lz_value_int(INT64_C(9007199254740992));
+    LZ_CHECK(lz_builtin_sort(&vm, 1, &argument, &result) == LZ_OK);
+    LZ_CHECK(array->items[0].type == LZ_VAL_FLOAT);
+    LZ_CHECK(array->items[1].type == LZ_VAL_INT && array->items[1].as.integer == INT64_C(9007199254740992));
+    LZ_CHECK(array->items[2].type == LZ_VAL_INT && array->items[2].as.integer == INT64_C(9007199254740993));
+    lz_value_release(&vm.heap, &argument);
+    LZ_CHECK(vm.heap.live_objects == 0);
+    lz_vm_free(&vm);
+}
+
 int main(void) {
+    test_sort_stability();
     test_literals_and_printing();
     test_indexing();
     test_slices();

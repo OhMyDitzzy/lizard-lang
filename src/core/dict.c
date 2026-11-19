@@ -37,7 +37,8 @@ static uint64_t hash_key(const LzDict *dict, const LzValue *key) {
         break;
     case LZ_VAL_OBJECT: {
         const LzString *text = (const LzString *)key->as.object;
-        part = ((uint64_t)text->hash << 32 | text->hash) ^ 0x4444444444444444ull;
+        uint32_t hash = lz_string_hash(text);
+        part = ((uint64_t)hash << 32 | hash) ^ 0x4444444444444444ull;
         break;
     }
     default:
@@ -155,7 +156,7 @@ static bool same_key(const LzValue *a, const LzValue *b) {
             if (a->as.object->type == LZ_OBJ_STRING && b->as.object->type == LZ_OBJ_STRING) {
                 const LzString *left = (const LzString *)a->as.object;
                 const LzString *right = (const LzString *)b->as.object;
-                return left->length == right->length && left->hash == right->hash &&
+                return left->length == right->length && lz_string_hash(left) == lz_string_hash(right) &&
                        memcmp(left->data, right->data, left->length) == 0;
             }
             break;

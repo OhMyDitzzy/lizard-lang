@@ -66,6 +66,7 @@ LzValue lz_value_float(double value);
 LzValue lz_value_object(LzObject *object);
 
 uint32_t lz_hash_bytes(const char *chars, size_t length);
+uint32_t lz_string_hash(const LzString *string);
 
 LzString *lz_string_new(LzHeap *heap, const char *chars, size_t length);
 

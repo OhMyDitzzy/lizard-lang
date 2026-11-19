@@ -39,6 +39,8 @@ typedef struct LzNative {
 checks only argv[0] because the builtin stores the others, as push and insert do, and
 LZ_LINKS_ANY allows any */
     uint8_t flags;         /* LZ_NATIVE_*, see lizard/native_fast.h */
+    uint16_t method_kind;  /* dispatcher cache, stored in existing alignment padding */
+    uint16_t method_row;   /* one-based index in the immutable builtin method table */
     const void *data;      /* private to whoever made the native, and a method dispatcher keeps its group here */
 } LzNative;
 

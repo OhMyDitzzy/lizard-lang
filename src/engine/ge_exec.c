@@ -1256,9 +1256,19 @@ resume:
             const LzValue *b = load_operand(globals, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
             LzArray *array = NULL;
             size_t position = 0;
-            if (GE_UNLIKELY(a == NULL || b == NULL || !array_position(a, b, &array, &position))) {
-                goto plain_tick;
+            if (GE_UNLIKELY(a == NULL || b == NULL)) goto plain_tick;
+            if (lz_value_is_dict(a) && (b->type == LZ_VAL_INT ||
+                (b->type == LZ_VAL_OBJECT && b->as.object->type == LZ_OBJ_STRING))) {
+                const LzValue *stored = lz_dict_get(lz_value_as_dict(a), b);
+                if (stored == NULL) goto plain_tick;
+                LzValue item = *stored;
+                grab(&item);
+                stack[sp++] = item;
+                FUSED_COMMIT();
+                pc += ins->span;
+                break;
             }
+            if (GE_UNLIKELY(!array_position(a, b, &array, &position))) goto plain_tick;
             LzValue item = array->items[position];
             grab(&item);
             stack[sp++] = item;
@@ -1274,9 +1284,21 @@ resume:
             const LzValue *b = load_operand(globals, constants, stack, base, sp, KIND_B(ins), ins->b, &ins->hint_b);
             LzArray *array = NULL;
             size_t position = 0;
-            if (GE_UNLIKELY(b == NULL || !array_position(&stack[sp - 1], b, &array, &position))) {
-                goto plain_tick;
+            if (GE_UNLIKELY(b == NULL)) goto plain_tick;
+            if (lz_value_is_dict(&stack[sp - 1]) && (b->type == LZ_VAL_INT ||
+                (b->type == LZ_VAL_OBJECT && b->as.object->type == LZ_OBJ_STRING))) {
+                const LzValue *stored = lz_dict_get(lz_value_as_dict(&stack[sp - 1]), b);
+                if (stored == NULL) goto plain_tick;
+                LzValue item = *stored;
+                grab(&item);
+                LzValue holder = stack[sp - 1];
+                stack[sp - 1] = item;
+                drop(vm, &holder);
+                FUSED_COMMIT();
+                pc += ins->span;
+                break;
             }
+            if (GE_UNLIKELY(!array_position(&stack[sp - 1], b, &array, &position))) goto plain_tick;
             LzValue item = array->items[position];
             grab(&item);
             LzObject *holder = stack[sp - 1].as.object;
@@ -1297,6 +1319,32 @@ resume:
              * charge and a state sync, preserving their existing diagnostics and callbacks.
              */
             switch (ins->plain) {
+            case LZ_OP_BUILD_STRING: {
+                TICK(1);
+                SYNC_OUT();
+                status = lz_vm_build_string_op(vm, chunk, ins->a);
+                SYNC_IN();
+                if (status != LZ_OK) goto fail;
+                pc++;
+                continue;
+            }
+            case LZ_OP_ITER_LENGTH:
+            case LZ_OP_ITER_NEXT:
+            case LZ_OP_ITER_CHECK:
+            case LZ_OP_CLOSE_UPVALUE_KEEP: {
+                TICK(1);
+                SYNC_OUT();
+                switch (ins->plain) {
+                case LZ_OP_ITER_LENGTH: status = lz_vm_iter_length_op(vm); break;
+                case LZ_OP_ITER_NEXT: status = lz_vm_iter_next_op(vm); break;
+                case LZ_OP_ITER_CHECK: status = lz_vm_iter_check_op(vm); break;
+                default: status = lz_vm_close_upvalue_keep_op(vm, ins->a); break;
+                }
+                SYNC_IN();
+                if (status != LZ_OK) goto fail;
+                pc++;
+                continue;
+            }
             case LZ_OP_CHECK_TYPE:
             case LZ_OP_CHECK_RETURN:
                 if (GE_UNLIKELY(sp == 0 || ins->a >= chunk->type_count ||
@@ -1400,6 +1448,11 @@ resume:
                 TICK(1);
                 LzValue field = object->fields[member->slot];
                 grab(&field);
+                if (member->is_link && lz_value_is_link(&field)) {
+                    LzValue cell = field;
+                    field = lz_link_deref(lz_value_as_link(&cell));
+                    drop(vm, &cell);
+                }
                 if (keep) {
                     stack[sp++] = field;
                 } else {
@@ -1439,7 +1492,7 @@ resume:
                  * charge. The rest is the reference's.
                  */
                 const LzMember *member = ins->member_cache.ic_member;
-                if (GE_UNLIKELY(!kind_accepted(&member->type, &stack[sp - 1]))) {
+                if (GE_UNLIKELY(member->is_link || !kind_accepted(&member->type, &stack[sp - 1]))) {
                     goto plain_tick;
                 }
                 TICK(1);
@@ -1455,9 +1508,22 @@ resume:
                 continue;
             }
             case LZ_OP_METHOD_LOOKUP: {
-                size_t name_index = ((size_t)chunk->code[ins->offset + 1] << 8) | chunk->code[ins->offset + 2];
+                size_t name_index = ins->a;
                 if (sp < 2 || !const_is_string(chunk, name_index)) goto plain_tick;
                 if (GE_UNLIKELY(!lz_value_is_instance(&stack[sp - 2]))) {
+                    const LzValue *builtin = lz_builtin_method_cached(vm, chunk, ins->offset,
+                        (const LzString *)constants[name_index].as.object, ins->b,
+                        &stack[sp - 2], &stack[sp - 1]);
+                    if (builtin != NULL) {
+                        TICK(1);
+                        LzValue callee = *builtin;
+                        grab(&callee);
+                        LzValue fallback = stack[sp - 1];
+                        stack[sp - 1] = callee;
+                        drop(vm, &fallback);
+                        pc++;
+                        continue;
+                    }
                     goto method_slow;
                 }
                 const LzInstance *object = lz_value_as_instance(&stack[sp - 2]);
@@ -1465,7 +1531,7 @@ resume:
                     if (ins->member_cache.ic_stuck != 0) {
                         goto method_slow;
                     }
-                    /* Three bytes: the name constant and the mode. The translator's operands do not cover them. */
+                    /* The translator has already decoded the name constant and lookup mode. */
                     if (!const_is_string(chunk, name_index) ||
                         !lz_member_cache_miss(vm, &ins->member_cache, object, (const LzString *)chunk->constants[name_index].as.object, 2)) {
                         goto method_slow;
@@ -1486,7 +1552,7 @@ resume:
                 const LzCallFrame *frame = &vm->frames[vm->frame_count - 1];
                 uint64_t owner = frame->closure == NULL ? 0 : frame->closure->function->owner_id;
                 status = lz_vm_method_lookup(vm, owner, (const LzString *)constants[name_index].as.object,
-                    chunk->code[ins->offset + 3], sp - 2);
+                    ins->b, sp - 2);
                 SYNC_IN();
                 if (status != LZ_OK) goto fail;
                 pc++;

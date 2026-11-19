@@ -5,6 +5,7 @@
 #include "lizard/array.h"
 #include "lizard/builtin.h"
 #include "lizard/compiler.h"
+#include "lizard/class.h"
 #include "lizard/debug.h"
 #include "method/method.h"
 #include "test_util.h"
@@ -283,7 +284,7 @@ static void check_case_bytes(LzVM *vm, const char *bytes, size_t length,
             if (got->length == expected[i]->length) {
                 LZ_CHECK(got->length == 0 || memcmp(got->data, expected[i]->data, got->length) == 0);
             }
-            LZ_CHECK(got->hash == lz_hash_bytes(got->data, got->length));
+            LZ_CHECK(lz_string_hash(got) == lz_hash_bytes(got->data, got->length));
             LZ_CHECK(vm->heap.total_allocations == before + 1);
         }
         lz_value_release(&vm->heap, &result);
@@ -414,7 +415,57 @@ static void test_search_corpus(void) {
     lz_vm_free(&vm);
 }
 
+static void test_dispatch_cache(void) {
+    check_output("fn dupe(x) => x.copy()\n"
+                 "for i in 0..4 { println(dupe([1, 2]), dupe({\"a\": 1})) }\n",
+                 "[1, 2] {\"a\": 1}\n[1, 2] {\"a\": 1}\n"
+                 "[1, 2] {\"a\": 1}\n[1, 2] {\"a\": 1}\n");
+    check_output("fn size(x) => x.len()\n"
+                 "for i in 0..12 { println(size([1, 2]), size(\"abc\"), size({\"a\": 1})) }\n",
+                 "2 3 1\n2 3 1\n2 3 1\n2 3 1\n2 3 1\n2 3 1\n"
+                 "2 3 1\n2 3 1\n2 3 1\n2 3 1\n2 3 1\n2 3 1\n");
+    Program program;
+    run(&program, "let d = {\"a\": 1}\nfor i in 0..20 { d.len() }\n", 0, 0);
+    LZ_CHECK(program.compile_status == LZ_OK && program.run_status == LZ_OK);
+    LzVM *vm = &program.vm;
+    LzString *name = lz_vm_intern(vm, "len", 3);
+    const LzValue *method = lz_table_get(&vm->methods, name);
+    LZ_CHECK(method != NULL);
+    if (method != NULL) {
+        const LzNative *native = (const LzNative *)method->as.object;
+        LZ_CHECK(native->method_kind == LZ_KIND_DICT && native->method_row != 0);
+        LzChunk sites;
+        lz_chunk_init(&sites);
+        LZ_CHECK(lz_chunk_write(&sites, LZ_OP_METHOD_LOOKUP, 0));
+        LZ_CHECK(lz_chunk_register_member_site(&sites, 0));
+        LzValue fallback = lz_value_nil();
+        LzString *text = lz_vm_intern(vm, "abc", 3);
+        LzValue receiver = lz_value_object(&text->base);
+        const LzValue *hit = lz_builtin_method_cached(vm, &sites, 0, name, 1, &receiver, &fallback);
+        LZ_CHECK(hit != NULL && hit->as.object == method->as.object);
+        vm->ext_count = 1;
+        LZ_CHECK(lz_builtin_method_cached(vm, &sites, 0, name, 1, &receiver, &fallback) == NULL);
+        vm->ext_count = 0;
+        for (size_t i = 0; i < 40; i++) {
+            char key[32];
+            (void)snprintf(key, sizeof key, "cache_probe_%zu", i);
+            LzString *interned = lz_vm_intern(vm, key, strlen(key));
+            LZ_CHECK(lz_vm_define_method(vm, interned, fallback));
+        }
+        hit = lz_builtin_method_cached(vm, &sites, 0, name, 1, &receiver, &fallback);
+        LZ_CHECK(hit != NULL && hit->as.object == &native->base);
+        LzString *upper = lz_vm_intern(vm, "to_upper", 8);
+        LzValue replacement = *lz_table_get(&vm->methods, upper);
+        LZ_CHECK(lz_vm_define_method(vm, name, replacement));
+        hit = lz_builtin_method_cached(vm, &sites, 0, name, 1, &receiver, &fallback);
+        LZ_CHECK(hit != NULL && hit->as.object == replacement.as.object);
+        lz_chunk_free(&vm->heap, &sites);
+    }
+    finish(&program);
+}
+
 int main(void) {
+    test_dispatch_cache();
     test_text_methods();
     test_unicode_text();
     test_number_methods();

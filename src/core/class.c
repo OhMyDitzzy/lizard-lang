@@ -107,6 +107,7 @@ LzClass *lz_class_new(LzVM *vm, LzString *name, uint32_t offset) {
     cls->param_count = 0;
     cls->init_member = -1;
     cls->consts_ready = false;
+    cls->equality_state = 0;
     cls->offset = offset;
     cls->is_ext = false;
     cls->ext_kinds = 0;
@@ -200,6 +201,7 @@ static void layout(LzClass *cls, size_t base) { /* `base` is added to the own sl
 }
 
 void lz_class_seal(LzClass *cls) {
+    cls->equality_state = 0;
     cls->init_member = -1;
     cls->own_field_count = cls->field_count;
     for (size_t i = 0; i < cls->member_count; i++) {
@@ -247,7 +249,7 @@ static void member_cache_fill(LzVM *vm, LzMemberCache *ins, const LzInstance *in
             return;
         }
     } else {
-        if (member->kind != LZ_MEMBER_FIELD || member->is_link) {
+        if (member->kind != LZ_MEMBER_FIELD) {
             return;
         }
         if (what == 1 && member->vis == LZ_VIS_PUB_READ && !sees) {
@@ -985,7 +987,7 @@ static LzValue self_of(const LzInstance *instance) {
     return lz_value_object(instance->owner_error != NULL ? instance->owner_error : (LzObject *)&instance->base);
 }
 
-static LzInstance *instance_alloc(LzVM *vm, LzClass *cls) {
+static LzInstance *instance_alloc(LzVM *vm, LzClass *cls, bool clear_fields) {
     size_t size = sizeof(LzInstance) + cls->field_count * sizeof(LzValue) + lz_native_instance_extra(cls);
     LzInstance *instance = lz_heap_alloc(&vm->heap, LZ_OBJ_INSTANCE, size);
     if (instance == NULL) {
@@ -997,7 +999,7 @@ static LzInstance *instance_alloc(LzVM *vm, LzClass *cls) {
     instance->mark = 0;
     instance->owner_error = NULL;
     instance->unset = cls->field_count >= 64 ? UINT64_MAX : (((uint64_t)1 << cls->field_count) - 1u);
-    for (size_t i = 0; i < cls->field_count; i++) {
+    for (size_t i = 0; clear_fields && i < cls->field_count; i++) {
         instance->fields[i] = lz_value_nil();
     }
     if (cls->native != NULL) {
@@ -1007,7 +1009,7 @@ static LzInstance *instance_alloc(LzVM *vm, LzClass *cls) {
 }
 
 LzInstance *lz_instance_new_raw(LzVM *vm, LzClass *cls) {
-    return instance_alloc(vm, cls);
+    return instance_alloc(vm, cls, true);
 }
 
 /*
@@ -1430,7 +1432,7 @@ static LzStatus construct_impl(LzVM *vm, LzClass *cls, size_t positional, const 
         }
     }
 
-    LzInstance *instance = instance_alloc(vm, cls);
+    LzInstance *instance = instance_alloc(vm, cls, true);
     if (instance == NULL) {
         return lz_vm_out_of_memory(vm);
     }
@@ -1479,9 +1481,50 @@ static LzStatus construct_impl(LzVM *vm, LzClass *cls, size_t positional, const 
     return LZ_OK;
 }
 
+/* All fields are supplied and no initializer can observe a partly initialized object.
+ * Only scalar values qualify, so this path needs neither cycle checks nor type conformance. */
+static bool scalar_construction(const LzClass *cls, size_t positional, const LzValue *argv,
+                                 size_t named_count) {
+    if (named_count != 0 || cls->native != NULL || cls->is_trait ||
+        positional != cls->param_count || positional != cls->field_count) return false;
+    for (const LzClass *parent = cls; parent != NULL; parent = parent->parent)
+        if (parent->init_member >= 0) return false;
+    for (size_t i = 0; i < positional; i++) {
+        const LzMember *member = field_at(cls, cls->params[i]);
+        const LzValue *value = &argv[i];
+        if (member->is_link) return false;
+        switch (member->type_tag) {
+        case LZ_FIELD_INT: if (value->type == LZ_VAL_INT) continue; break;
+        case LZ_FIELD_FLOAT: if (value->type == LZ_VAL_FLOAT) continue; break;
+        case LZ_FIELD_BOOL: if (value->type == LZ_VAL_BOOL) continue; break;
+        case LZ_FIELD_STRING:
+            if (value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_STRING) continue;
+            break;
+        case LZ_FIELD_ANY:
+            if (value->type != LZ_VAL_OBJECT || value->as.object->type == LZ_OBJ_STRING) continue;
+            break;
+        default: break;
+        }
+        return false;
+    }
+    return true;
+}
+
 LzStatus lz_class_construct(LzVM *vm, LzClass *cls, size_t positional, const LzValue *argv,
                             size_t named_count, const char *names, size_t names_length,
                             const LzValue *named, LzValue *result) {
+    if (scalar_construction(cls, positional, argv, named_count)) {
+        LzInstance *instance = instance_alloc(vm, cls, false);
+        if (instance == NULL) return lz_vm_out_of_memory(vm);
+        for (size_t i = 0; i < positional; i++) {
+            LzValue value = argv[i];
+            lz_value_retain(&value);
+            instance->fields[cls->params[i]] = value;
+        }
+        instance->unset = 0;
+        *result = lz_value_object(&instance->base);
+        return LZ_OK;
+    }
     return construct_impl(vm, cls, positional, argv, named_count, names, names_length, named, NULL, result);
 }
 
@@ -1555,7 +1598,7 @@ LzStatus lz_instance_copy(LzVM *vm, const LzInstance *source, LzValue *result) {
     if (source->cls->native != NULL) {
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot copy an instance of the native class %s", source->cls->name->data);
     }
-    LzInstance *copy = instance_alloc(vm, source->cls);
+    LzInstance *copy = instance_alloc(vm, source->cls, true);
     if (copy == NULL) {
         return lz_vm_out_of_memory(vm);
     }
@@ -1644,7 +1687,7 @@ static LzStatus error_clone(LzVM *vm, const LzError *source, LzError **out) {
     lz_error_set_extra(vm, error, &source->cause, &source->data);
     if (source->payload != NULL) {
         const LzInstance *from = source->payload;
-        LzInstance *copy = instance_alloc(vm, from->cls);
+        LzInstance *copy = instance_alloc(vm, from->cls, true);
         if (copy == NULL) {
             lz_object_release(&vm->heap, &error->base);
             return lz_vm_out_of_memory(vm);
@@ -2445,6 +2488,8 @@ bool lz_class_equal_hook(const LzValue *left, const LzValue *right, bool *same) 
         *same = false; /* an operator already failed, so stop quickly because the error is reported */
         return true;
     }
+    LzClass *cls = lz_value_as_instance(left)->cls;
+    if (cls->equality_state == 1) return false;
     LzValue result = lz_value_nil();
     bool found = false;
     LzStatus status = run_operator(vm, left, "==", right, &result, &found);
@@ -2457,8 +2502,12 @@ bool lz_class_equal_hook(const LzValue *left, const LzValue *right, bool *same) 
         return true;
     }
     if (!found) {
+        /* The first miss still interns the operator name, preserving its allocation and
+         * heap-limit failure. Later misses on this immutable class need no lookup. */
+        cls->equality_state = 1;
         return false;
     }
+    cls->equality_state = 2;
     *same = result.as.boolean;
     return true;
 }

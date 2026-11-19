@@ -259,15 +259,26 @@ static LzStatus dispatch(LzVM *vm, int argc, const LzValue *argv, LzValue *resul
         kind = LZ_KIND_NIL;
     }
 
-    for (const LzMethod *m = first; m < methods + METHOD_COUNT && same_group(m, first); m++) {
-        if ((m->kinds & kind) == 0) {
-            continue;
+    const LzMethod *selected = NULL;
+    if (self->method_row != 0 && self->method_kind == kind) {
+        selected = &methods[self->method_row - 1];
+    } else {
+        for (const LzMethod *m = first; m < methods + METHOD_COUNT && same_group(m, first); m++) {
+            if ((m->kinds & kind) != 0) {
+                selected = m;
+                LzNative *cache = (LzNative *)self;
+                cache->method_kind = kind;
+                cache->method_row = (uint16_t)(m - methods + 1);
+                break;
+            }
         }
+    }
+    if (selected != NULL) {
         int given = argc - 1;
-        if (given < m->min_args || given > m->max_args) {
-            return arity_error(vm, m, given);
+        if (given < selected->min_args || given > selected->max_args) {
+            return arity_error(vm, selected, given);
         }
-        return m->fn(vm, argc, argv, result);
+        return selected->fn(vm, argc, argv, result);
     }
 
     /* No row for this kind. There is no fallback to a function of the same name: a method is
@@ -308,6 +319,13 @@ LzStatus lz_method_install(LzVM *vm) {
             return lz_vm_out_of_memory(vm);
         }
         native->data = first;
+        /* These groups never invoke user code, including on their error paths. The ordinary
+         * dispatcher still checks receiver kinds and reports its original arity diagnostics. */
+        const char *leaf_names[] = {"to_upper", "to_lower", "split", "get", "has", "push",
+            "pop", "insert", "clear", "copy", "len", "keys", "values", "items", "remove", "is_empty"};
+        for (size_t leaf = 0; leaf < sizeof leaf_names / sizeof *leaf_names; leaf++) {
+            if (strcmp(first->name, leaf_names[leaf]) == 0) native->flags = LZ_NATIVE_LEAF;
+        }
         native->takes_links = (strcmp(first->name, "to_string") == 0 || strcmp(first->name, "to_debug") == 0)
                                   ? LZ_LINKS_ANY
                               : (strcmp(first->name, "push") == 0 || strcmp(first->name, "insert") == 0)

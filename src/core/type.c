@@ -384,7 +384,7 @@ uint32_t lz_type_hash(const LzType *type) {
             part = mix(literal->as.boolean ? 0x1111u : 0x2222u);
             break;
         default:
-            part = literal->as.string->hash ^ 0x5BD1E995u;
+            part = lz_string_hash(literal->as.string) ^ 0x5BD1E995u;
             break;
         }
         hash += part; /* a sum, so the order of the literals does not matter */

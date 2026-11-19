@@ -1,6 +1,6 @@
 /*
  * The inline caches of the Gecko Engine on the member instructions (GET_FIELD, SET_FIELD,
- * METHOD_LOOKUP): sites whose class changes, whose member is never cached (a link field), that
+ * METHOD_LOOKUP): sites whose class changes, fields holding weak links, sites that
  * start to miss after hits, and the claim they rest on, that the members of a class do not change
  * once it has instances. Every program runs on the reference interpreter and on GE, which must
  * agree on everything observable, and the output is checked against what the language says, so a
@@ -12,6 +12,7 @@
 #include "engine_compare.h"
 #include "lizard/class.h"
 #include "lizard/array.h"
+#include "lizard/dict.h"
 #include "lizard/link.h"
 #include "test_util.h"
 
@@ -568,13 +569,24 @@ static void check_ref_cache(void) {
         }
     }
     LZ_CHECK(hits == 3);
-    LzMemberCache *site = lz_chunk_member_site(&chunk, 3);
+    LzChunk sites;
+    lz_chunk_init(&sites);
+    for (size_t i = 0; i < LZ_MEMBER_SITES_MAX + 1; i++) {
+        size_t offset = sites.count;
+        LZ_CHECK(lz_chunk_write(&sites, LZ_OP_GET_FIELD, 0));
+        LZ_CHECK(lz_chunk_register_member_site(&sites, offset));
+        LZ_CHECK(lz_chunk_write_u16(&sites, 0, 0));
+    }
+    LzMemberCache *site = lz_chunk_member_site(&sites, 0);
     LZ_CHECK(site != NULL);
     site->ic_class = 42;
-    LZ_CHECK(lz_chunk_member_site(&chunk, 3 + LZ_MEMBER_SITES_MAX)->ic_class == 0);
-    site->ic_class = 43;
-    lz_chunk_truncate(&vm.heap, &chunk, chunk.count, chunk.constant_count);
-    LZ_CHECK(lz_chunk_member_site(&chunk, 3 + LZ_MEMBER_SITES_MAX)->ic_class == 0);
+    LZ_CHECK(lz_chunk_member_site(&sites, 3) != site);
+    LZ_CHECK(lz_chunk_member_site(&sites, 3)->ic_class == 0);
+    LZ_CHECK(lz_chunk_member_site(&sites, LZ_MEMBER_SITES_MAX * 3) == NULL);
+    LZ_CHECK(site->ic_class == 42);
+    lz_chunk_truncate(&vm.heap, &sites, sites.count, 0);
+    LZ_CHECK(site->ic_class == 0);
+    lz_chunk_free(&vm.heap, &sites);
     outcome_end(&vm, &chunk, &result);
     LZ_CHECK(result.live_objects == 0 && result.live_bytes == 0);
     outcome_free(&result);
@@ -583,7 +595,7 @@ static void check_ref_cache(void) {
 /* These inputs are already owned by the VM stack. Each chunk exercises one
  * non-numeric semantic path without unrelated startup opcodes in its counts. */
 static void check_direct_semantics(void) {
-    for (unsigned which = 0; which < 4; which++) {
+    for (unsigned which = 0; which < 9; which++) {
         LzVM vm;
         Outcome outcome;
         outcome_begin(&vm, &outcome);
@@ -614,6 +626,32 @@ static void check_direct_semantics(void) {
             LZ_CHECK(lz_chunk_write(&chunk, LZ_OP_CHECK_PARAM, 0));
             LZ_CHECK(lz_chunk_write_u16(&chunk, 0, 0));
             LZ_CHECK(lz_chunk_write_u16(&chunk, index, 0));
+        } else if (which >= 4 && which <= 6) {
+            LzArray *array = lz_array_new(&vm.heap, 1);
+            LZ_CHECK(array != NULL);
+            array->items[array->count++] = lz_value_int(9);
+            if (which == 6) vm.stack[vm.stack_count++] = lz_value_int(1);
+            vm.stack[vm.stack_count++] = lz_value_object(&array->base);
+            if (which == 5) vm.stack[vm.stack_count++] = lz_value_int(0);
+            LZ_CHECK(lz_chunk_write(&chunk, which == 4 ? LZ_OP_ITER_LENGTH :
+                which == 5 ? LZ_OP_ITER_NEXT : LZ_OP_ITER_CHECK, 0));
+            if (which == 6) LZ_CHECK(lz_chunk_write(&chunk, LZ_OP_NIL, 0));
+        } else if (which == 7) {
+            vm.stack[vm.stack_count++] = lz_value_int(7);
+            LZ_CHECK(lz_chunk_write(&chunk, LZ_OP_CLOSE_UPVALUE_KEEP, 0));
+            LZ_CHECK(lz_chunk_write_u16(&chunk, 0, 0));
+        } else if (which == 8) {
+            LzDict *dict = lz_dict_new(&vm.heap, 0);
+            LZ_CHECK(dict != NULL);
+            LzValue key = lz_value_int(0), value = lz_value_int(9);
+            LZ_CHECK(lz_dict_set(&vm, dict, &key, &value) == LZ_OK);
+            vm.stack[vm.stack_count++] = lz_value_object(&dict->base);
+            LZ_CHECK(lz_chunk_add_constant(&chunk, key, &index));
+            LZ_CHECK(lz_chunk_write(&chunk, LZ_OP_GET_LOCAL, 0));
+            LZ_CHECK(lz_chunk_write_u16(&chunk, 0, 0));
+            LZ_CHECK(lz_chunk_write(&chunk, LZ_OP_CONSTANT, 0));
+            LZ_CHECK(lz_chunk_write_u16(&chunk, index, 0));
+            LZ_CHECK(lz_chunk_write(&chunk, LZ_OP_INDEX, 0));
         } else {
             LzString *text = lz_string_new(&vm.heap, "Ab", 2);
             vm.stack[vm.stack_count++] = lz_value_object(&text->base);
@@ -632,7 +670,10 @@ static void check_direct_semantics(void) {
         LZ_CHECK(stats.translated && stats.delegated == 0);
         if (which == 0 || which == 3) LZ_CHECK(result.type == LZ_VAL_BOOL && !result.as.boolean);
         else if (which == 1) LZ_CHECK(lz_value_is_array(&result));
-        else LZ_CHECK(result.type == LZ_VAL_OBJECT && result.as.object->type == LZ_OBJ_NATIVE);
+        else if (which == 2) LZ_CHECK(result.type == LZ_VAL_OBJECT && result.as.object->type == LZ_OBJ_NATIVE);
+        else if (which == 6) LZ_CHECK(result.type == LZ_VAL_NIL);
+        else LZ_CHECK(result.type == LZ_VAL_INT && result.as.integer ==
+            (which == 7 ? 7 : which == 8 ? 9 : 1));
         lz_value_release(&vm.heap, &result);
         outcome_end(&vm, &chunk, &outcome);
         LZ_CHECK(outcome.live_objects == 0 && outcome.live_bytes == 0);

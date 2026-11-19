@@ -18,7 +18,7 @@ static void test_interning(void) {
     LZ_CHECK(a != c);
     LZ_CHECK(a->base.refcount == 1);
     LZ_CHECK(vm.heap.live_objects == 3);
-    LZ_CHECK(lz_hash_bytes("name", 4) == a->hash);
+    LZ_CHECK(lz_hash_bytes("name", 4) == lz_string_hash(a));
 
     lz_vm_release_roots(&vm);
     LZ_CHECK(vm.heap.live_objects == 0);

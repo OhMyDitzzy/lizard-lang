@@ -107,6 +107,7 @@ typedef struct LzHeap {
     void *on_link_freed_context;
     struct LzPoolChunk *pool_chunks;
     LzObject *pool_free[LZ_POOL_CLASSES];
+    bool pool_enabled; /* can be disabled for allocation profiling in pool-enabled builds */
 } LzHeap;
 
 void lz_heap_init(LzHeap *heap);

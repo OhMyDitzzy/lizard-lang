@@ -115,7 +115,7 @@ static void check_text(const LzValue *value, const char *expected) {
         const LzString *text = (const LzString *)value->as.object;
         LZ_CHECK(text->length == strlen(expected));
         LZ_CHECK(strcmp(text->data, expected) == 0);
-        LZ_CHECK(text->hash == lz_hash_bytes(expected, strlen(expected)));
+        LZ_CHECK(lz_string_hash(text) == lz_hash_bytes(expected, strlen(expected)));
     }
 }
 

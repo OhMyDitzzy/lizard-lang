@@ -15,6 +15,12 @@
 #include "lizard/suggest.h"
 #include "lizard/vm.h"
 
+#if defined(__GNUC__) || defined(__clang__)
+#define CALL_INLINE static inline __attribute__((always_inline))
+#else
+#define CALL_INLINE static inline
+#endif
+
 /*
  * Calls, frames and upvalues. Everything an engine needs to run a user function that is not
  * "execute the next instruction" lives here, so the reference interpreter and the Gecko Engine
@@ -165,8 +171,12 @@ static LzStatus arrange_slow(LzVM *vm, const LzFunction *function, size_t argc, 
 }
 
 /* Keep the ordinary call out of the rest/default path's C frame and register spills. */
-static inline LzStatus arrange(LzVM *vm, const LzFunction *function, size_t argc, bool strict) {
-    if (argc == function->param_count && !function->has_rest && vm->stack_count <= vm->stack_cap) {
+CALL_INLINE LzStatus arrange(LzVM *vm, const LzFunction *function, size_t argc, bool strict) {
+    if (!function->has_rest && argc <= function->param_count &&
+        (!strict || argc >= function->required) && vm->stack_count <= vm->stack_cap &&
+        function->param_count - argc <= vm->stack_cap - vm->stack_count) {
+        for (size_t i = argc; i < function->param_count; i++)
+            vm->stack[vm->stack_count++] = lz_value_nil();
         return LZ_OK;
     }
     return arrange_slow(vm, function, argc, strict);
@@ -247,7 +257,7 @@ static LzStatus construct_on_stack(LzVM *vm, size_t callee_index, size_t argc, s
     return LZ_OK;
 }
 
-static LzStatus call_closure(LzVM *vm, LzClosure *closure, size_t callee_index, size_t argc,
+CALL_INLINE LzStatus call_closure(LzVM *vm, LzClosure *closure, size_t callee_index, size_t argc,
                              size_t resume_ip, uint32_t call_offset, bool *entered) {
     LzStatus status = arrange(vm, closure->function, argc, true);
     if (status != LZ_OK) return status;
@@ -346,7 +356,7 @@ static uintptr_t c_stack_floor(LzVM *vm, uintptr_t now) {
 #endif
 
 /* True when this callback would nest deeper than the C stack can take. */
-static bool c_stack_exhausted(LzVM *vm) {
+CALL_INLINE bool c_stack_exhausted(LzVM *vm) {
     char here;
     (void)here;
     uintptr_t now = C_STACK_NOW();

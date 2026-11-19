@@ -216,3 +216,13 @@ skink: worst trial pause X ms (... total), worst full pass Y ms (... total)
 
 The timing lines are measured only with `--heap-stats` (reading the clock on every trial
 would otherwise cost more than the trial).
+## Allocation profiling
+
+Immutable strings start with an unset zero hash. `lz_string_hash` computes it on the first
+key or type-hash use and retains it. `lz_hash_bytes` maps a genuine zero result to one so
+the sentinel cannot be confused with a computed hash. Concatenation, case mapping and
+template construction therefore skip hashing when the result is never used as a key.
+
+The allocation profile in `bench/profile.sh` runs dhat with `LZ_POOL=off` in builds that include
+the object pool. That makes dhat report individual heap objects instead of only the backing pool
+chunks. This switch affects allocation strategy, not the heap limit or language behavior.

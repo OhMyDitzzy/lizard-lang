@@ -562,7 +562,31 @@ static void test_cache_builtin_shadowed_by_embedder(void) {
     finish(&env);
 }
 
+static void test_hidden_type_suggestions(void) {
+    Src sources[] = {{"hidden", "class HiddenDragon {}\nerror HiddenFault : Error\n"}};
+    const char *programs[] = {"HiddenDragn()\n", "HiddenFalt()\n"};
+    for (size_t i = 0; i < 2; i++) {
+        Env env;
+        setup(&env, sources, 1, true);
+        (void)load(&env, "hidden");
+        LZ_CHECK(run_main(&env, programs[i]) == LZ_ERR_RUNTIME);
+        for (size_t k = 0; k < env.vm.error_suggestions.count; k++) {
+            LZ_CHECK(strcmp(env.vm.error_suggestions.names[k], "HiddenDragon") != 0);
+            LZ_CHECK(strcmp(env.vm.error_suggestions.names[k], "HiddenFault") != 0);
+        }
+        for (size_t h = 0; h < env.diagnostics.hint_count; h++) {
+            const LzSuggestions *suggestions = &env.diagnostics.hints[h].suggestions;
+            for (size_t k = 0; k < suggestions->count; k++) {
+                LZ_CHECK(strcmp(suggestions->names[k], "HiddenDragon") != 0);
+                LZ_CHECK(strcmp(suggestions->names[k], "HiddenFault") != 0);
+            }
+        }
+        finish(&env);
+    }
+}
+
 int main(void) {
+    test_hidden_type_suggestions();
     test_separate_globals();
     test_function_uses_its_module();
     test_loaded_once();

@@ -19,6 +19,9 @@
 # ENGINES is a comma list of ref, ge (default ref,ge). The JIT is always skipped: callgrind
 # cannot name the machine code it generates, and the code is invisible to it unless valgrind is
 # told to watch for self-modifying code, so Ir would not be comparable with the interpreters.
+# dhat runs with LZ_POOL=off in pool-enabled builds so its allocation report includes individual
+# heap objects instead of only the backing pool chunks. Pool chunk high-water statistics are not
+# currently exposed by the runtime, so the report does not include a separate pool column.
 #
 # --parse reads the text of callgrind_annotate and prints the same normalized form, which is how
 # the parser is tested without valgrind (tests/bench_scripts_check.sh). --parse-dhat does the same
@@ -181,7 +184,7 @@ if [ "$have_ref" = yes ]; then
         name=$(basename "$file" .lz)
         wanted "$name" || continue
         [ -s "$TMP/$name.lz" ] || continue
-        valgrind --tool=dhat --dhat-out-file="$TMP/dhat.out" \
+        LZ_POOL=off valgrind --tool=dhat --dhat-out-file="$TMP/dhat.out" \
             "$LIZARD" --engine=ref "$TMP/$name.lz" >/dev/null 2>"$TMP/dhat.err"
         rc=$?
         if [ "$rc" -ne 0 ] || ! parse_dhat <"$TMP/dhat.err" >"$TMP/dhat.txt"; then

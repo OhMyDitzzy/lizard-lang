@@ -196,14 +196,22 @@ The slow checker stays out of line so its diagnostic buffers do not create a
 large C frame on each primitive store.
 
 Ref and GE share member-cache lookup, visibility checks and miss health. Ref
-uses a lazy direct-mapped table of at most 128 sites per chunk, occupying 4 KiB
-on this 64-bit build. Entries are keyed by bytecode offset and class id. A table
-collision replaces the old entry. Truncating bytecode clears the table, and
-chunk destruction frees it. The sidecar is uncharged, like the existing global
-cache, so logical heap limits and object sizes do not change.
+assigns at most 128 fixed member site numbers per chunk while compiling. A byte-offset
+side table maps instruction starts to those numbers. Later sites use the ordinary
+member operation without displacing earlier sites. The hot reference handler indexes
+the cache directly, with no lazy allocation, modulo or collision clearing. Truncation
+clears cached entries and removes mappings beyond the retained code. Site numbers
+are not recycled during compilation. Chunk destruction frees both arrays. Global
+slots are reserved alongside the constant table. These compiler-owned arrays remain
+uncharged, so logical heap limits and object sizes do not change.
 
 Only resolved members of the immutable class chain are cached. Getter calls,
-callable fields, `init`, extension members and link fields keep the slow path.
+callable fields, `init` and extension members keep the slow path. Link fields cache
+only their slot. Every read dereferences its current cell through `lz_link_deref`,
+including the nil result after a target dies. Link writes retain the general store
+path. Scalar writes in ref can transfer the stack value directly into a cached slot
+after a positive field type-tag check. Complex types and rejected values retain
+the original checker and diagnostics.
 The active frame's lexical visibility and write access are checked when filling
 an entry. A receiver keeps the declaring class alive, and ids are never reused.
 The existing extension count invalidates entries after registration. A compact
@@ -216,6 +224,59 @@ Class members cannot be replaced through `extend` in this language. Extensions
 are searched after the class chain, and their results are never cached. A future
 feature that permits member-array edits after instances exist must add class-chain
 shape validation before reusing these borrowed member pointers.
+
+Builtin method dispatch remembers the last receiver kind and its row in the immutable
+method table. A hit selects the implementation without walking name groups or calling
+`strcmp`. The two 16-bit cache fields use existing alignment padding in `LzNative`,
+keeping that object at 80 bytes on the audited 64-bit target. Arity and unsupported-kind
+errors still come from the dispatcher.
+
+Ref and GE also recognize ordinary string, array and dict receivers at method lookup.
+When the compiler already supplied a native fallback, they retain that fallback directly.
+Otherwise a fixed site can remember the method table slot, guarded by its shape and the
+receiver kind. Caching the slot preserves replacement of a method value without requiring
+a shape change. Any registered extension disables these lookup shortcuts, since extension
+lookup depends on lexical visibility. This is conservative and keeps extension methods
+and their diagnostics on the original path.
+
+Audited method groups that never call user code carry the leaf flag, including dictionary
+`get`, string case conversion and array `push`. Existing CALL handlers then use the native
+fast-call path. Groups that can invoke user code keep the general call path. Lookup and
+CALL remain separate instructions so argument evaluation, fuel and error positions keep
+their original order.
+
+GE dispatches iterator length, iterator next, iterator consistency checks and the
+keep-slot upvalue close directly to shared semantic helpers. Each handler charges one
+instruction and synchronizes the VM state before the helper runs. The upvalue helper
+still invokes the collector at the same point. Fused indexing also handles present integer
+and string keys in dictionaries, using the dictionary's own hash lookup. Missing keys and
+other kinds keep the ordinary diagnostic path. A fused result is retained before an
+owned receiver can be released, and the existing fused fuel and stack guards still apply.
+
+Unformatted template pieces have direct int, string, bool and nil writers. Float, debug and
+formatted conversion retain their existing implementations. Format specs are already parsed
+in compiler plans. GE calls the shared BUILD_STRING helper directly. Finite fuel and heap
+limits retain the old guarded fallback and its allocation and error order.
+
+Calls with missing optional positional arguments fill nil parameter slots inline, leaving
+default evaluation in the callee prologue. Primitive parameter matches also run inline.
+Bounds checks remain because reference chunks can be built without the compiler. Rest
+arguments keep their ordinary allocation. Call arrangement, closure entry and the C-stack
+guard are forced inline on supporting compilers, without changing stack-floor refresh rules.
+
+Scalar sorting chooses a known-kind comparison after validation, starts with stable insertion
+runs of 16 and merges those runs. Mixed numeric comparisons retain their exact int/float
+rules. The original fuel formula and scratch allocation remain even when fewer passes run.
+
+Fully supplied scalar construction without an init anywhere in the ancestry fills instance
+slots directly and sets unset once. It skips the initial nil writes because no operation
+between allocation and publication can fail or run user code. All other construction uses
+the original path. No heap header or collector bookkeeping is removed.
+
+Equality remembers a successful first miss for an immutable class without a custom operator.
+The first miss still interns the operator name and preserves its heap-limit failure. Later
+nil and identity comparisons can then bypass operator lookup. A class with custom equality
+continues through the operator path, including for identical pointers and comparisons to nil.
 
 The local layout audit found no changes to these sizes: `LzMember` 240 bytes,
 `LzClass` 1,360, `LzInstance` 80, `LzChunk` 128 and `GeIns` 56. The accepted,
@@ -249,8 +310,8 @@ Guarded class and numeric shortcuts remain in place. Other values call the
 shared VM field, parameter, method or equality semantics directly, after
 charging one instruction and synchronizing the stack and instruction count.
 Callbacks, type conformance and their extra fuel charges use the same code as
-ref. GE still creates no independent diagnostic text. Link fields use the shared
-link implementation and are never inserted into the member cache.
+ref. GE still creates no independent diagnostic text. Cached link slots use the shared
+link dereference implementation for each read.
 
 Field-name decoding stays in the common field helper, while parameter operands
 are already decoded in the IR. Keeping the JIT's delegate marks lets native

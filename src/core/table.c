@@ -4,7 +4,7 @@
 #include <string.h>
 
 static LzTableEntry *find_slot(LzTableEntry *entries, size_t capacity, const LzString *key) {
-    size_t index = (size_t)key->hash & (capacity - 1);
+    size_t index = (size_t)lz_string_hash(key) & (capacity - 1);
     for (;;) {
         LzTableEntry *entry = &entries[index];
         if (entry->key == key || entry->key == NULL) {
@@ -96,7 +96,7 @@ LzString *lz_table_find_string(const LzTable *table, const char *chars, size_t l
         if (key == NULL) {
             return NULL;
         }
-        if (key->hash == hash && key->length == length && memcmp(key->data, chars, length) == 0) {
+        if (lz_string_hash(key) == hash && key->length == length && memcmp(key->data, chars, length) == 0) {
             return key;
         }
         index = (index + 1) & (table->capacity - 1);

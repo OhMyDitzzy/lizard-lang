@@ -14,6 +14,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#if defined(__GNUC__) || defined(__clang__)
+#define RUN_INLINE static inline __attribute__((always_inline))
+#else
+#define RUN_INLINE static inline
+#endif
+
 static bool value_is_text(const LzValue *value) {
     return value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_STRING;
 }
@@ -54,7 +60,7 @@ static void pop(LzVM *vm) {
     pop_from(vm, vm->stack);
 }
 
-static LzStatus read_constant(LzVM *vm, const LzChunk *chunk, size_t *ip, const LzValue **out) {
+RUN_INLINE LzStatus read_constant(LzVM *vm, const LzChunk *chunk, size_t *ip, const LzValue **out) {
     uint16_t index;
     if (!read_u16(chunk, ip, &index)) {
         return malformed(vm, "truncated operand");
@@ -66,7 +72,7 @@ static LzStatus read_constant(LzVM *vm, const LzChunk *chunk, size_t *ip, const 
     return LZ_OK;
 }
 
-static LzStatus read_name(LzVM *vm, const LzChunk *chunk, size_t *ip, LzString **name) {
+RUN_INLINE LzStatus read_name(LzVM *vm, const LzChunk *chunk, size_t *ip, LzString **name) {
     const LzValue *constant = NULL;
     LzStatus status = read_constant(vm, chunk, ip, &constant);
     if (status != LZ_OK) {
@@ -80,7 +86,7 @@ static LzStatus read_name(LzVM *vm, const LzChunk *chunk, size_t *ip, LzString *
 }
 
 /* The name constant at index, checked the way read_name checks it. */
-static LzStatus name_at(LzVM *vm, const LzChunk *chunk, uint16_t index, LzString **name) {
+RUN_INLINE LzStatus name_at(LzVM *vm, const LzChunk *chunk, uint16_t index, LzString **name) {
     if (index >= chunk->constant_count) {
         return malformed(vm, "constant index out of range");
     }
@@ -99,7 +105,7 @@ static LzStatus name_at(LzVM *vm, const LzChunk *chunk, uint16_t index, LzString
  */
 static inline const LzGlobalSite *global_site_hit(LzVM *vm, const LzChunk *chunk, uint16_t index) {
     if (index < chunk->global_site_count) {
-        const LzGlobalSite *site = &chunk->global_sites[index];
+        const LzGlobalSite *site = &chunk->cache->globals[index];
         if (site->slot != NULL && site->globals_shape == lz_chunk_globals(vm, chunk)->shape &&
             site->builtins_shape == vm->builtins.shape) {
             return site;
@@ -488,7 +494,7 @@ static size_t code_point_length(const char *data, size_t length, size_t at) {
     return size;
 }
 
-static LzStatus iter_length_op(LzVM *vm) {
+LzStatus lz_vm_iter_length_op(LzVM *vm) {
     if (vm->stack_count == 0) {
         return malformed(vm, "stack underflow");
     }
@@ -510,7 +516,7 @@ static LzStatus iter_length_op(LzVM *vm) {
     return push(vm, lz_value_int(length));
 }
 
-static LzStatus iter_next_op(LzVM *vm) {
+LzStatus lz_vm_iter_next_op(LzVM *vm) {
     if (vm->stack_count < 2) {
         return malformed(vm, "stack underflow");
     }
@@ -642,7 +648,7 @@ static LzStatus iter_pair_op(LzVM *vm) {
 }
 
 /* A dict may have its values changed while it's walked, but not its size. */
-static LzStatus iter_check_op(LzVM *vm) {
+LzStatus lz_vm_iter_check_op(LzVM *vm) {
     if (vm->stack_count < 2) {
         return malformed(vm, "stack underflow");
     }
@@ -978,10 +984,11 @@ static uint64_t current_owner(const LzVM *vm) {
 }
 
 /* A cache miss never reports an error. The ordinary member operations own that. */
-static const LzMember *cached_member(LzVM *vm, const LzChunk *chunk, size_t offset,
+static inline const LzMember *cached_member(LzVM *vm, const LzChunk *chunk, size_t offset,
                                     const LzValue *target, const LzString *name, int what) {
     if (!lz_value_is_instance(target)) return NULL;
-    LzMemberCache *site = lz_chunk_member_site(chunk, offset);
+    uint8_t id = offset < chunk->count && chunk->cache != NULL ? chunk->cache->member_site_ids[offset] : 0;
+    LzMemberCache *site = id != 0 ? &chunk->cache->member_sites[id - 1] : NULL;
     if (site == NULL) return NULL;
     const LzInstance *instance = lz_value_as_instance(target);
     if (!lz_member_cache_matches(vm, site, instance) &&
@@ -1001,6 +1008,11 @@ static LzStatus member_get_op(LzVM *vm, const LzChunk *chunk, size_t offset,
             (!keep || vm->stack_count < vm->stack_cap)) {
             LzValue field = instance->fields[member->slot];
             lz_value_retain(&field);
+            if (member->is_link && lz_value_is_link(&field)) {
+                LzValue cell = field;
+                field = lz_link_deref(lz_value_as_link(&cell));
+                lz_value_release(&vm->heap, &cell);
+            }
             if (keep) vm->stack[vm->stack_count++] = field;
             else {
                 vm->stack[vm->stack_count - 1] = field;
@@ -1030,6 +1042,19 @@ static LzStatus member_get_op(LzVM *vm, const LzChunk *chunk, size_t offset,
     }
     lz_value_release(&vm->heap, &target);
     return LZ_OK;
+}
+
+/* Only scalar stores bypass the general field checker and its container cycle walk. */
+static inline bool scalar_field_accepts(const LzMember *member, const LzValue *value) {
+    if (member->is_link) return false;
+    switch (member->type_tag) {
+    case LZ_FIELD_INT: return value->type == LZ_VAL_INT;
+    case LZ_FIELD_FLOAT: return value->type == LZ_VAL_FLOAT;
+    case LZ_FIELD_BOOL: return value->type == LZ_VAL_BOOL;
+    case LZ_FIELD_STRING: return value_is_text(value);
+    case LZ_FIELD_ANY: return value->type != LZ_VAL_OBJECT || value_is_text(value);
+    default: return false;
+    }
 }
 
 static LzStatus set_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
@@ -1073,6 +1098,17 @@ static LzStatus set_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
         return status;
     }
     const LzMember *member = cached_member(vm, chunk, *ip - 3, &target, name, 1);
+    if (member != NULL && scalar_field_accepts(member, &value)) {
+        LzInstance *instance = lz_value_as_instance(&target);
+        LzValue old = instance->fields[member->slot];
+        lz_drop_container_holder(&old);
+        instance->fields[member->slot] = value;
+        instance->unset &= ~((uint64_t)1 << member->slot);
+        vm->stack_count -= 2;
+        lz_value_release(&vm->heap, &old);
+        lz_value_release(&vm->heap, &target);
+        return LZ_OK;
+    }
     status = member != NULL ? lz_instance_store(vm, lz_value_as_instance(&target), member, &value)
                             : lz_vm_member_set(vm, current_owner(vm), &target, name, &value);
     if (status != LZ_OK) {
@@ -1095,6 +1131,17 @@ static LzStatus method_lookup_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
     int mode = chunk->code[(*ip)++];
     if (vm->stack_count < 2) {
         return malformed(vm, "stack underflow");
+    }
+    const LzValue *builtin = lz_builtin_method_cached(vm, chunk, *ip - 4, name, mode,
+                                                      &vm->stack[vm->stack_count - 2],
+                                                      &vm->stack[vm->stack_count - 1]);
+    if (builtin != NULL) {
+        LzValue callee = *builtin;
+        lz_value_retain(&callee);
+        LzValue old = vm->stack[vm->stack_count - 1];
+        vm->stack[vm->stack_count - 1] = callee;
+        lz_value_release(&vm->heap, &old);
+        return LZ_OK;
     }
     const LzMember *member = cached_member(vm, chunk, *ip - 4,
         &vm->stack[vm->stack_count - 2], name, 2);
@@ -1494,7 +1541,7 @@ static LzStatus range_next_op(LzVM *vm) {
 }
 
 /* The slot is validated by the caller, so this only closes the upvalue open at it. */
-static LzStatus close_upvalue_keep_op(LzVM *vm, uint16_t slot) {
+LzStatus lz_vm_close_upvalue_keep_op(LzVM *vm, uint16_t slot) {
     if (slot >= vm->stack_count) {
         return malformed(vm, "local slot out of range");
     }
@@ -1808,6 +1855,25 @@ static bool string_output(void *context, const char *data, size_t length) {
 
 static LzStatus string_piece(LzVM *vm, const LzStringPiece *piece, const LzValue *value,
                              StringOutput *out) {
+    if (piece->mode == LZ_STRING_PIECE_TEXT) {
+        const char *text = NULL;
+        size_t length = 0;
+        char number[32];
+        switch (value->type) {
+        case LZ_VAL_NIL: text = "nil"; length = 3; break;
+        case LZ_VAL_BOOL: text = value->as.boolean ? "true" : "false";
+            length = value->as.boolean ? 4 : 5; break;
+        case LZ_VAL_INT: length = lz_int_to_text(value->as.integer, number); text = number; break;
+        case LZ_VAL_OBJECT:
+            if (value_is_text(value)) {
+                const LzString *string = (const LzString *)value->as.object;
+                text = string->data; length = string->length;
+            }
+            break;
+        default: break;
+        }
+        if (text != NULL) return string_output(out, text, length) ? LZ_OK : lz_vm_out_of_memory(vm);
+    }
     LzWriter writer = {string_output, NULL, out};
     if (piece->mode == LZ_STRING_PIECE_FORMAT) {
         LzFormatError error;
@@ -1901,10 +1967,29 @@ static LzStatus build_string(LzVM *vm, const LzStringBuild *plan) {
     }
     result->length = out.length;
     result->data[out.length] = '\0';
-    result->hash = lz_hash_bytes(result->data, out.length);
+    result->hash = 0;
     while (vm->stack_count > base) pop(vm);
     vm->stack[vm->stack_count++] = lz_value_object(&result->base);
     return LZ_OK;
+}
+
+LzStatus lz_vm_build_string_op(LzVM *vm, const LzChunk *chunk, uint16_t index) {
+    const LzStringBuild *plan = lz_chunk_string_build(chunk, index);
+    if (plan == NULL || plan->fast >= plan->end || plan->end > chunk->count)
+        return malformed(vm, "invalid string build plan");
+    return build_string(vm, plan);
+}
+
+static inline bool primitive_param_accepts(const LzType *type, const LzValue *value) {
+    uint16_t kind = 0;
+    switch (value->type) {
+    case LZ_VAL_NIL: kind = LZ_KIND_NIL; break;
+    case LZ_VAL_BOOL: kind = LZ_KIND_BOOL; break;
+    case LZ_VAL_INT: kind = LZ_KIND_INT; break;
+    case LZ_VAL_FLOAT: kind = LZ_KIND_FLOAT; break;
+    default: if (value_is_text(value)) kind = LZ_KIND_STRING; break;
+    }
+    return (type->kinds & kind) != 0;
 }
 
 LzStatus lz_vm_check_param(LzVM *vm, const LzChunk *chunk, uint16_t slot, uint16_t index) {
@@ -2349,7 +2434,10 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, LzValue *stack, LzCallFrame *frames,
         if (!read_u16(chunk, &ip, &slot) || !read_u16(chunk, &ip, &index)) {
             status = malformed(vm, "truncated operand");
         } else {
-            status = lz_vm_check_param(vm, chunk, slot, index);
+            size_t at = index < chunk->type_count ? vm->frames[vm->frame_count - 1].base + slot : vm->stack_count;
+            if (index < chunk->type_count && at < vm->stack_count &&
+                primitive_param_accepts(&chunk->types[index], &vm->stack[at])) status = LZ_OK;
+            else status = lz_vm_check_param(vm, chunk, slot, index);
         }
         break;
     }
@@ -2508,17 +2596,17 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, LzValue *stack, LzCallFrame *frames,
         status = index_keep_op(vm);
         break;
     case LZ_OP_ITER_LENGTH:
-        status = iter_length_op(vm);
+        status = lz_vm_iter_length_op(vm);
         break;
     case LZ_OP_ITER_NEXT:
-        status = iter_next_op(vm);
+        status = lz_vm_iter_next_op(vm);
         break;
     case LZ_OP_ITER_PAIR: {
         status = iter_pair_op(vm);
         break;
     }
     case LZ_OP_ITER_CHECK:
-        status = iter_check_op(vm);
+        status = lz_vm_iter_check_op(vm);
         break;
     case LZ_OP_DICT: {
         uint16_t count;
@@ -2640,7 +2728,7 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, LzValue *stack, LzCallFrame *frames,
         if (!read_u16(chunk, &ip, &slot)) {
             status = malformed(vm, "truncated operand");
         } else {
-            status = close_upvalue_keep_op(vm, slot);
+            status = lz_vm_close_upvalue_keep_op(vm, slot);
         }
         break;
     }

@@ -631,6 +631,11 @@ static void test_traits(void) {
     "    pub operator <(self, other) => self.x * self.x + self.y * self.y < other.x * other.x + other.y * other.y\n}\n"
 
 static void test_operators(void) {
+    check_output("class Eq { pub x: int\n pub operator ==(self, other) => true }\n"
+                 "let a = Eq(1)\nprintln(a == nil, a == nil, a == a, [a] == [nil])\n"
+                 "class Never { pub operator ==(self, other) => false }\n"
+                 "let n = Never()\nprintln(n == n, n == n)\n",
+                 "true true true true\nfalse false\n");
     check_output(join2(VEC_CLASS, "println(Vec(1, 2) + Vec(3, 4) * 2)\nprintln(-Vec(1, 2))\n"
                                   "println(Vec(1, 1) < Vec(2, 2), Vec(2, 2) >= Vec(1, 1), Vec(1, 1) <= Vec(1, 1), Vec(3, 3) > Vec(1, 1))\n"),
                  "Vec(x: 7, y: 10)\nVec(x: -1, y: -2)\ntrue true true true\n");

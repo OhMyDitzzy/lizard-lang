@@ -270,9 +270,36 @@ static int compare_items(const LzValue *a, const LzValue *b) {
     return (int)lz_number_order(a, b);
 }
 
+/* Validation has already established the element kind. Mixed numbers keep the exact
+ * integer/float comparison, including values beyond the float integer precision range. */
+static inline int compare_sorted(const LzValue *a, const LzValue *b, int mode) {
+    if (mode == 1) return (a->as.integer > b->as.integer) - (a->as.integer < b->as.integer);
+    if (mode == 2) return (a->as.number > b->as.number) - (a->as.number < b->as.number);
+    if (mode == 3) {
+        const LzString *x = (const LzString *)a->as.object, *y = (const LzString *)b->as.object;
+        size_t common = x->length < y->length ? x->length : y->length;
+        int order = common == 0 ? 0 : memcmp(x->data, y->data, common);
+        return order != 0 ? order : (x->length > y->length) - (x->length < y->length);
+    }
+    return compare_items(a, b);
+}
+
 /* Stable bottom-up merge sort of items[0..count) using tmp as scratch. */
-static void merge_sort(LzValue *items, LzValue *tmp, size_t count) {
-    for (size_t width = 1; width < count; width *= 2) {
+static void merge_sort(LzValue *items, LzValue *tmp, size_t count, int mode) {
+    const size_t block = 16;
+    for (size_t lo = 0; lo < count; lo += block) {
+        size_t hi = count - lo < block ? count : lo + block;
+        for (size_t i = lo + 1; i < hi; i++) {
+            LzValue value = items[i];
+            size_t j = i;
+            while (j > lo && compare_sorted(&value, &items[j - 1], mode) < 0) {
+                items[j] = items[j - 1];
+                j--;
+            }
+            items[j] = value;
+        }
+    }
+    for (size_t width = block; width < count; width *= 2) {
         for (size_t lo = 0; lo < count; lo += 2 * width) {
             size_t mid = lo + width < count ? lo + width : count;
             size_t hi = lo + 2 * width < count ? lo + 2 * width : count;
@@ -280,7 +307,7 @@ static void merge_sort(LzValue *items, LzValue *tmp, size_t count) {
             size_t j = mid;
             size_t k = lo;
             while (i < mid && j < hi) {
-                tmp[k++] = compare_items(&items[j], &items[i]) < 0 ? items[j++] : items[i++];
+                tmp[k++] = compare_sorted(&items[j], &items[i], mode) < 0 ? items[j++] : items[i++];
             }
             while (i < mid) {
                 tmp[k++] = items[i++];
@@ -417,8 +444,10 @@ LzStatus lz_builtin_sort(LzVM *vm, int argc, const LzValue *argv, LzValue *resul
         return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "sort(): cannot sort values of type %s",
                                kind_of(first));
     }
+    int mode = first->type == LZ_VAL_INT ? 1 : first->type == LZ_VAL_FLOAT ? 2 : 3;
     for (size_t i = 0; i < count; i++) {
         const LzValue *item = &array->items[i];
+        if (item->type != first->type) mode = 0;
         if (numbers ? !is_number(item) : !is_string(item)) {
             return lz_vm_set_error(vm, LZ_ERR_RUNTIME,
                                    "sort(): cannot sort mixed types (%s and %s)", kind_of(first),
@@ -446,7 +475,7 @@ LzStatus lz_builtin_sort(LzVM *vm, int argc, const LzValue *argv, LzValue *resul
         lz_heap_uncharge(&vm->heap, bytes);
         return lz_vm_out_of_memory(vm);
     }
-    merge_sort(array->items, scratch, count);
+    merge_sort(array->items, scratch, count, mode);
     free(scratch);
     lz_heap_uncharge(&vm->heap, bytes);
     *result = lz_value_nil();

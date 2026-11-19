@@ -717,7 +717,12 @@ static void emit_byte_at(Parser *parser, uint8_t byte, uint32_t offset) {
 }
 
 static void emit_op_at(Parser *parser, LzOpCode op, uint32_t offset) {
+    size_t site = parser->chunk->count;
     emit_byte_at(parser, (uint8_t)op, offset);
+    if (op == LZ_OP_GET_FIELD || op == LZ_OP_GET_FIELD_KEEP || op == LZ_OP_GET_FIELD_W ||
+        op == LZ_OP_SET_FIELD || op == LZ_OP_METHOD_LOOKUP) {
+        if (!lz_chunk_register_member_site(parser->chunk, site)) fail(parser, LZ_ERR_MEMORY);
+    }
 }
 
 static void emit_op(Parser *parser, LzOpCode op) {
@@ -745,7 +750,7 @@ static uint32_t hash_constant(const LzValue *value) {
         break;
     case LZ_VAL_OBJECT:
         if (value->as.object->type == LZ_OBJ_STRING) {
-            return ((const LzString *)value->as.object)->hash;
+            return lz_string_hash((const LzString *)value->as.object);
         }
         bits = (uint64_t)(uintptr_t)value->as.object;
         break;

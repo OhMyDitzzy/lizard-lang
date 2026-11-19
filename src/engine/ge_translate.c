@@ -235,6 +235,9 @@ bool ge_translate(const LzChunk *chunk, GeProgram *program) {
             in->a = read_u16(chunk->code, offset + 1); /* every 3-byte instruction has a u16 */
         } else if (length == 2) {
             in->a = chunk->code[offset + 1]; /* OP_CALL's argument count */
+        } else if (length == 4 && op == LZ_OP_METHOD_LOOKUP) {
+            in->a = read_u16(chunk->code, offset + 1);
+            in->b = chunk->code[offset + 3];
         } else if (length == 4) {
             in->a = chunk->code[offset + 1]; /* OP_CALL_EX: named count, then the names constant */
             in->b = read_u16(chunk->code, offset + 2);

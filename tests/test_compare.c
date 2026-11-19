@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "lizard/compare.h"
+#include "lizard/array.h"
 #include "test_util.h"
 
 static LzVM vm;
@@ -18,6 +19,13 @@ static LzValue number(double value) {
 static void check_equal(LzValue a, LzValue b, bool expected) {
     LZ_CHECK(lz_value_equal(&a, &b) == expected);
     LZ_CHECK(lz_value_equal(&b, &a) == expected);
+    bool same = !expected;
+    uint64_t fuel = vm.fuel;
+    LZ_CHECK(lz_vm_values_equal(&vm, &a, &b, &same) == LZ_OK);
+    LZ_CHECK(same == expected);
+    LZ_CHECK(vm.fuel == fuel);
+    LZ_CHECK(lz_vm_values_equal(&vm, &b, &a, &same) == LZ_OK);
+    LZ_CHECK(same == expected);
 }
 
 static void check_order(LzValue a, LzValue b, LzOrder expected) {

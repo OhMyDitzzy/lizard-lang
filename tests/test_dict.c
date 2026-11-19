@@ -493,7 +493,7 @@ static void test_key_probes(void) {
         LZ_CHECK(lz_dict_set(&vm, dict, &key, &value) == LZ_OK);
     }
     LZ_CHECK(strings[0]->hash == strings[1]->hash);
-    LZ_CHECK(strings[2]->hash == 0);
+    LZ_CHECK(lz_string_hash(strings[2]) == 1);
     for (size_t i = 0; i < 3; i++) {
         LzString *copy = lz_string_new(&vm.heap, names[i], strlen(names[i]));
         LzValue key = lz_value_object(&copy->base);

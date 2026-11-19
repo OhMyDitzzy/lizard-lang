@@ -280,6 +280,10 @@ static void test_method_errors(void) {
 }
 
 int main(void) {
+    check_output("fn f(a, b = 2) => a + b\nfn invoke(g) => g()\n"
+                 "try { invoke(f) } catch Error as e { println(e.message) }\n"
+                 "fn d(a = 7) => a\nprintln(invoke(d))\n",
+                 "f(): expected 1 to 2 arguments, got 0\n7\n");
     test_short_functions();
     test_higher_order();
     test_methods();

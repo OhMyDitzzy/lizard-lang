@@ -143,7 +143,7 @@ static LzStatus map_case(LzVM *vm, const char *name, const LzValue *argv, bool u
             mapped->data[i] = (char)byte;
         }
         mapped->data[text->length] = '\0';
-        mapped->hash = lz_hash_bytes(mapped->data, mapped->length);
+        mapped->hash = 0;
         *result = lz_value_object(&mapped->base);
         return LZ_OK;
     }
@@ -449,7 +449,7 @@ LzStatus lz_method_repeat(LzVM *vm, int argc, const LzValue *argv, LzValue *resu
         memcpy(built->data + i * text->length, text->data, text->length);
     }
     built->data[total] = '\0';
-    built->hash = lz_hash_bytes(built->data, total);
+    built->hash = 0;
     *result = lz_value_object(&built->base);
     return LZ_OK;
 }

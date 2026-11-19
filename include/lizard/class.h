@@ -89,6 +89,7 @@ typedef struct LzClass {
     bool linked;              /* lz_class_link has run, and a class without a parent links when it's sealed */
     int init_member;          /* the member `init`, or -1 */
     bool consts_ready;        /* the initialisers of the constants have run */
+    uint8_t equality_state;   /* 0 unknown, 1 no custom equality, 2 custom equality */
     uint32_t offset;
     /*
      * An `extend` block is a hidden class. It holds the members the block adds (is_ext) and is the
@@ -185,6 +186,35 @@ bool lz_class_lookup(const LzClass *cls, const LzString *name, LzFound *out);
 static inline bool lz_member_cache_matches(const LzVM *vm, const LzMemberCache *cache,
                                           const LzInstance *instance) {
     return cache->ic_class == instance->cls->id && cache->ic_extensions == vm->ext_count;
+}
+
+/* Extension lookup depends on lexical visibility, so any registered extension keeps the
+ * ordinary lookup. A table slot stays borrowed only while the method table shape matches. */
+static inline const LzValue *lz_builtin_method_cached(LzVM *vm, const LzChunk *chunk,
+                                                      size_t offset, const LzString *name,
+                                                      int mode, const LzValue *receiver,
+                                                      const LzValue *fallback) {
+    if (vm->ext_count != 0 || receiver->type != LZ_VAL_OBJECT ||
+        (receiver->as.object->type != LZ_OBJ_STRING && receiver->as.object->type != LZ_OBJ_ARRAY &&
+         receiver->as.object->type != LZ_OBJ_DICT)) return NULL;
+    if (mode == 0) {
+        return fallback->type == LZ_VAL_OBJECT && fallback->as.object->type == LZ_OBJ_NATIVE
+            ? fallback : NULL;
+    }
+    if (mode != 1 || chunk->cache == NULL ||
+        chunk->cache->builtin_sites == NULL || offset >= chunk->count) return NULL;
+    uint8_t id = chunk->cache->member_site_ids[offset];
+    if (id == 0) return NULL;
+    LzBuiltinSite *site = &chunk->cache->builtin_sites[id - 1];
+    uint16_t kind = lz_kind_of(receiver);
+    if (site->slot == NULL || site->shape != vm->methods.shape || site->kind != kind) {
+        site->slot = lz_table_get(&vm->methods, name);
+        site->shape = vm->methods.shape;
+        site->kind = kind;
+    }
+    const LzValue *value = site->slot;
+    return value != NULL && value->type == LZ_VAL_OBJECT && value->as.object->type == LZ_OBJ_NATIVE
+        ? value : NULL;
 }
 
 /* what is 0 for a read, 1 for a write and 2 for a method call. */

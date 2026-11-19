@@ -46,7 +46,12 @@ uint32_t lz_hash_bytes(const char *chars, size_t length) {
         hash ^= (uint8_t)chars[i];
         hash *= 16777619u;
     }
-    return hash;
+    return hash == 0 ? 1 : hash;
+}
+
+uint32_t lz_string_hash(const LzString *string) {
+    if (string->hash == 0) ((LzString *)string)->hash = lz_hash_bytes(string->data, string->length);
+    return string->hash;
 }
 
 LzString *lz_string_new(LzHeap *heap, const char *chars, size_t length) {
@@ -59,7 +64,7 @@ LzString *lz_string_new(LzHeap *heap, const char *chars, size_t length) {
         memcpy(string->data, chars, length);
     }
     string->data[length] = '\0';
-    string->hash = lz_hash_bytes(string->data, length);
+    string->hash = 0;
     return string;
 }
 
@@ -77,7 +82,7 @@ LzString *lz_string_concat(LzHeap *heap, const LzString *a, const LzString *b) {
     memcpy(string->data, a->data, a->length);
     memcpy(string->data + a->length, b->data, b->length);
     string->data[length] = '\0';
-    string->hash = lz_hash_bytes(string->data, length);
+    string->hash = 0;
     return string;
 }
 
