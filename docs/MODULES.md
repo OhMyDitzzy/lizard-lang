@@ -33,15 +33,23 @@ println(add(3, 4) + MAX)
 binds a name that only exists at compile time: `util.add` is checked against what `util` exports, but
 `util` alone is not a value, so `let m = util` is an error. `from util import add` binds `add` itself.
 
-Imports come first in the file. Only comments and other imports may stand before them, and an import
-inside a function or after other code is an error. That way every `util.f()` is already defined when
-the code that uses it runs. A module's top-level code runs once, the first time an `import` of it is
-reached, even when several files import it, and in the order the imports are written.
+Imports are statements and may stand after other code or inside a function, block, loop, or handler.
+The compiler still resolves the module and checks its interface before running the program. An import
+binding belongs to its surrounding scope and is visible from the import to the end of that scope.
+Names from an outer scope can be shadowed as with `let`; two declarations in the same scope are an
+error labelled at the first declaration. A file-level import is visible to later declarations,
+including functions written after it. The import's module globals remain separate from the importing
+file's globals, so a local `from` import cannot overwrite a file-level name. This follows the same
+lexical rule as `let` and keeps dependencies local to the code that needs them.
+A module's top-level code runs once, the first time an `import` of it is reached, even when several
+files import it, and in the order the imports are executed. An import in a frequently called function
+checks the module's ready state and copies exports only at the first execution of that site.
 
 Only `pub` names can be imported. There is no `pub let`, because the importing file copies the value
 once and a variable could change afterwards. There is no `pub extend` either: an `extend` stays in the
 file that writes it. There is no `from util import *`, no re-exporting with `pub import`, and no import
-that depends on a condition.
+whose module name is computed at runtime. Imports follow the same lexical scope as `let` so a branch
+can use a dependency without exposing its names to the rest of the file.
 
 When something is wrong, the error shows up on the line of the import or of the name:
 
@@ -55,9 +63,42 @@ error: cannot use 'secret' from module 'util'
   = note: `secret` exists in util but is not `pub`
 ```
 
-A missing module and a module that does not compile are reported at the `import` line too. The
-module's own report is printed first, with its own file name, and only once per run, however many
-files import it.
+A missing module and a module that does not compile are compile errors at the `import` line unless
+that statement is inside a `try` with a `catch ImportError` or a catch naming one of its subtypes.
+Only that explicit catch defers resolution or compilation to the import's execution. A bare catch or
+a catch of a general parent such as `RuntimeError` does not defer it. The CLI prints diagnostics from
+a broken optional module once as warnings so that a working fallback does not hide a broken
+dependency. A cycle remains a compile error.
+
+When resolution is deferred, the compiler treats member access through that namespace as `any`
+inside the protected body because the import will fail before that code can run. The fallback import
+is still resolved normally and its interface is checked.
+
+If the module exists but its top-level code throws, the import raises a catchable `ImportError` with
+the module name and original reason. The thrown error is available as `cause`, and its trace includes
+the module's source file. A failed initializer is removed from the loaded-module list; a later import
+tries it from the start. `ImportError` is a child of `RuntimeError`.
+
+For example, place `fastjson.lz` or `fallback.lz` alongside this script and export a `parse` function
+from each. Missing or broken `fastjson` is deferred at the first import, while the fallback import is
+resolved and type-checked during compilation:
+
+```lizard module
+fn parse(text: string) {
+    try {
+        import fastjson
+        return fastjson.parse(text)
+    } catch ImportError {
+        import fallback
+        return fallback.parse(text)
+    }
+}
+```
+
+If module initialization fails, the import raises `ImportError` with the original error in the
+message and, for a thrown value, in `cause`. The trace identifies the failing module. An import
+that runs again after a failure starts the initializer over. The compiler keeps copies of imported
+values under private keys for local imports so two blocks can use the same name independently.
 
 ## A file that is a library and a program
 

@@ -1,0 +1,5 @@
+try {
+    import fastjson
+} catch {
+    println("unreachable")
+}

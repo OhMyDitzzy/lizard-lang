@@ -539,10 +539,11 @@ checked against the module's `LzInterface`, and `util.f` becomes a plain `GET_GL
 
 At the place of the import the compiler emits `OP_IMPORT` (module id, bound name, name in the module,
 mode). When it runs, it runs the module once through `vm->module_run`, then copies the module's `pub`
-values into the importing module's globals, as `util.f` for `import util` or as `f` for
-`from util import f`. A copy is enough because an export cannot change. The engines do not know the
-opcode: the graph engine and the JIT hand it to `lz_vm_exec_one` like any instruction they do not
-translate.
+values into the importing module's globals. Block imports use keys that source code cannot name.
+The compiler's symbol table keeps those keys in scope like other declarations. A copy is enough
+because an export cannot change. An import site caches its successful copy and checks module state
+before reusing it. GE has a handler for `OP_IMPORT` and the JIT may call the reference instruction
+helper. A deferred import failure uses mode 2 to raise `ImportError` without calling the resolver.
 
 ## Not decided yet
 

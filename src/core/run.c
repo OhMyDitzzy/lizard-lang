@@ -12,6 +12,7 @@
 #include "lizard/native_fast.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -1258,8 +1259,55 @@ static LzStatus import_store(LzVM *vm, LzTable *dest, const char *name, LzValue 
     return lz_table_set(&vm->heap, dest, key, value) ? LZ_OK : lz_vm_out_of_memory(vm);
 }
 
-/* `import m` and `from m import a`: runs the module once, then copies what it exports. */
-static LzStatus import_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
+static LzStatus import_error(LzVM *vm, const char *name, const char *reason) {
+    LzValue cause = vm->thrown;
+    vm->thrown = lz_value_nil();
+    if (!lz_value_is_error(&cause) && reason[0] != '\0') {
+        LzError *original = NULL;
+        LzErrorKind kind = lz_error_classify(LZ_ERR_RUNTIME, reason);
+        if (lz_error_new(vm, kind, reason, strlen(reason), &original) == LZ_OK) {
+            cause = lz_value_object(&original->base);
+        }
+    }
+    LzStatus status = lz_vm_set_error(vm, LZ_ERR_RUNTIME, "cannot import '%s': %s", name, reason);
+    vm->error_kind = LZ_ERROR_IMPORT;
+    if (lz_value_is_error(&cause)) {
+        LzError *error;
+        LzStatus made = lz_error_new(vm, LZ_ERROR_IMPORT, vm->error, strlen(vm->error), &error);
+        if (made != LZ_OK) {
+            lz_value_release(&vm->heap, &cause);
+            return made;
+        }
+        error->cause = cause;
+        vm->thrown = lz_value_object(&error->base);
+    }
+    return status;
+}
+
+static LzStatus module_import_error(LzVM *vm, const LzString *id, const char *reason) {
+    const char *name = strrchr(id->data, '/');
+    name = name != NULL ? name + 1 : id->data;
+    size_t length = strlen(name);
+    char display[256];
+    if (length > 3 && strcmp(name + length - 3, ".lz") == 0) length -= 3;
+    (void)snprintf(display, sizeof display, "%.*s", (int)length, name);
+    return import_error(vm, display, reason);
+}
+
+LzStatus lz_vm_import_op(LzVM *vm, const LzChunk *chunk, size_t start) {
+    if (start >= chunk->count || chunk->count - start < 8) {
+        return malformed(vm, "truncated operand");
+    }
+    LzImportSite *site = chunk->cache != NULL && chunk->cache->imports != NULL &&
+                                 start < chunk->count
+                             ? &chunk->cache->imports[start] : NULL;
+    unsigned generation = chunk->module != NULL ? chunk->module->import_generation : 0;
+    if (site != NULL && site->vm == vm && site->generation == generation &&
+        site->module->state == LZ_MODULE_READY) {
+        return LZ_OK;
+    }
+    size_t next = start + 1;
+    size_t *ip = &next;
     LzString *id = NULL;
     LzString *bound = NULL;
     LzString *original = NULL;
@@ -1277,16 +1325,32 @@ static LzStatus import_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
         return malformed(vm, "truncated operand");
     }
     uint8_t mode = chunk->code[(*ip)++];
+    if (mode == 2) {
+        return import_error(vm, id->data, bound->data);
+    }
+    if (mode > 2) {
+        return malformed(vm, "unknown import mode");
+    }
     LzModule *module = vm->modules;
     while (module != NULL && (module->id == NULL || strcmp(module->id, id->data) != 0)) {
         module = module->next;
     }
-    if (module == NULL || vm->module_run == NULL) {
-        return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "module '%s' is not loaded", id->data);
+    if (module == NULL) {
+        for (module = vm->retired; module != NULL; module = module->next) {
+            if (module->id != NULL && strcmp(module->id, id->data) == 0) break;
+        }
     }
+    if (module == NULL || vm->module_run == NULL) {
+        return module_import_error(vm, id, "the module is not loaded");
+    }
+    vm->native_call_offset = (uint32_t)start;
     status = vm->module_run(vm, module);
     if (status != LZ_OK) {
-        return status;
+        if (!lz_status_catchable(status) && status != LZ_YIELD) return status;
+        char reason[sizeof vm->error];
+        (void)snprintf(reason, sizeof reason, "%s",
+                       status == LZ_YIELD ? "a module initializer cannot yield" : vm->error);
+        return module_import_error(vm, id, reason);
     }
     const LzInterface *iface = lz_interface_of(module->chunk);
     LzTable *dest = lz_chunk_globals(vm, chunk);
@@ -1305,7 +1369,9 @@ static LzStatus import_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
             continue; /* a type alias has no value */
         }
         if (mode == 1) {
-            return import_store(vm, dest, bound->data, *value);
+            status = import_store(vm, dest, bound->data, *value);
+            if (status != LZ_OK) return status;
+            break;
         }
         char stored[160];
         (void)snprintf(stored, sizeof stored, "%s.%s", bound->data, name);
@@ -1313,6 +1379,16 @@ static LzStatus import_op(LzVM *vm, const LzChunk *chunk, size_t *ip) {
         if (status != LZ_OK) {
             return status;
         }
+    }
+    LzChunk *mutable_chunk = (LzChunk *)chunk;
+    if (mutable_chunk->cache == NULL) {
+        mutable_chunk->cache = calloc(1, sizeof *mutable_chunk->cache);
+    }
+    if (mutable_chunk->cache != NULL && mutable_chunk->cache->imports == NULL) {
+        mutable_chunk->cache->imports = calloc(chunk->count, sizeof *mutable_chunk->cache->imports);
+    }
+    if (mutable_chunk->cache != NULL && mutable_chunk->cache->imports != NULL) {
+        mutable_chunk->cache->imports[start] = (LzImportSite){module, vm, generation};
     }
     return LZ_OK;
 }
@@ -2711,7 +2787,8 @@ LZ_FORCE_INLINE LzStatus exec_one(LzVM *vm, LzValue *stack, LzCallFrame *frames,
         status = error_class_op(vm, chunk, &ip);
         break;
     case LZ_OP_IMPORT:
-        status = import_op(vm, chunk, &ip);
+        status = lz_vm_import_op(vm, chunk, start);
+        ip = start + 8;
         break;
     case LZ_OP_SUPER:
         status = super_op(vm, chunk, &ip);

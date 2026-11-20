@@ -97,6 +97,9 @@ const LzModuleFailure *lz_vm_module_failure(const LzVM *vm);
 /* The reports of lz_diagnostics_report without the closing "aborting" line, for a caller that writes several. */
 void lz_diagnostics_report_body(const LzDiagnostics *diagnostics, const LzSource *source, bool color,
                                 const LzWriter *out);
+void lz_diagnostics_report_severity(const LzDiagnostics *diagnostics, const LzSource *source,
+                                    const char *severity, bool color, const LzWriter *out);
+void lz_vm_module_warnings_report(const LzVM *vm, bool color, const LzWriter *out);
 
 /*
  * Writes the reports of every module that failed to compile, the one that failed first first, each

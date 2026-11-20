@@ -19,6 +19,7 @@ static void free_cache(LzChunk *chunk) {
         free(cache->builtin_sites);
         free(cache->member_sites);
         free(cache->member_site_ids);
+        free(cache->imports);
         free(cache);
     }
 }
@@ -481,6 +482,7 @@ size_t lz_opcode_length(uint8_t opcode) {
 }
 
 void lz_chunk_truncate(LzHeap *heap, LzChunk *chunk, size_t code_count, size_t constant_count) {
+    size_t old_code_count = chunk->count;
     if (code_count < chunk->count) {
         chunk->count = code_count;
     }
@@ -494,6 +496,10 @@ void lz_chunk_truncate(LzHeap *heap, LzChunk *chunk, size_t code_count, size_t c
     }
     if (chunk->cache != NULL && chunk->cache->builtin_sites != NULL) {
         memset(chunk->cache->builtin_sites, 0, LZ_MEMBER_SITES_MAX * sizeof *chunk->cache->builtin_sites);
+    }
+    if (chunk->cache != NULL && chunk->cache->imports != NULL && code_count < old_code_count) {
+        memset(chunk->cache->imports + code_count, 0,
+               (old_code_count - code_count) * sizeof *chunk->cache->imports);
     }
     /* Keep live build plans, but no cached cell may refer to a reused constant index. */
     ChunkCache *cache = chunk_cache(chunk);

@@ -121,6 +121,7 @@ lizard_examples = \
 	examples/hello.lz \
 	examples/higher.lz \
 	examples/if_expr.lz \
+	examples/import_anywhere.lz \
 	examples/inheritance.lz \
 	examples/links.lz \
 	examples/loops.lz \

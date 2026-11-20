@@ -1,0 +1,10 @@
+error: circular import of 'bad_8'
+ --> bad_8.lz:2:12
+  |
+2 |     import bad_8
+  |            ^^^^^ this import leads back to a module that is waiting for it
+  |
+  = note: the chain is bad_8.lz -> bad_8.lz
+  = help: a module cannot import another module that imports it, directly or not
+
+error: aborting due to 1 previous error

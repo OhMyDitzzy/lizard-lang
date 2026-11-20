@@ -1,0 +1,23 @@
+warning: expected expression
+ --> broken.lz:2:1
+  |
+2 | 
+  | ^
+
+start
+fallback loaded
+42
+42
+7
+8
+3
+5
+6
+9
+broken module fallback
+broken module fallback again
+compile failure reported once
+boom loaded
+broken initializer
+boom loaded
+broken initializer

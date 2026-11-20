@@ -1,0 +1,3 @@
+fn cycle() {
+    import bad_8
+}

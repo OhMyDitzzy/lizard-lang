@@ -8,6 +8,7 @@
 #include <string.h>
 
 static size_t fail_countdown = 0;
+static LzStatus run_import(LzVM *vm, LzModule *module);
 
 void lz_module_fail_after(size_t n) {
     fail_countdown = n;
@@ -138,7 +139,7 @@ static bool in_progress(const LzModule *module) {
 }
 
 LzStatus lz_module_prepare_source(LzVM *vm, LzModuleSource *source, LzModule **out) {
-    vm->module_run = lz_module_run;
+    vm->module_run = run_import;
     LzModule *known = source->id != NULL ? find_module(vm, source->id) : NULL;
     if (known != NULL) {
         LzStatus status = LZ_OK;
@@ -255,7 +256,7 @@ LzStatus lz_module_prepare_source(LzVM *vm, LzModuleSource *source, LzModule **o
     return LZ_OK;
 }
 
-LzStatus lz_module_run(LzVM *vm, LzModule *module) {
+static LzStatus run_module(LzVM *vm, LzModule *module, bool keep_failed_code) {
     if (module->state == LZ_MODULE_READY) {
         return LZ_OK;
     }
@@ -276,16 +277,41 @@ LzStatus lz_module_run(LzVM *vm, LzModule *module) {
     if (status != LZ_OK) {
         /* What the code made may live on in other places, so the module's memory stays until the VM ends. */
         unlink_module(vm, module);
-        lz_chunk_free(&vm->heap, module->chunk);
-        lz_chunk_init(module->chunk);
+        if (keep_failed_code) {
+            module->state = LZ_MODULE_COMPILED;
+        } else {
+            lz_chunk_free(&vm->heap, module->chunk);
+            lz_chunk_init(module->chunk);
+            lz_vm_error_scope_drop(vm, module);
+        }
         lz_table_free(&vm->heap, &module->globals);
-        lz_vm_error_scope_drop(vm, module);
+        module->import_generation++;
         module->next = vm->retired;
         vm->retired = module;
     }
     return status;
 }
 
+LzStatus lz_module_run(LzVM *vm, LzModule *module) {
+    return run_module(vm, module, false);
+}
+
+static LzStatus run_import(LzVM *vm, LzModule *module) {
+    LzModule **link = &vm->retired;
+    while (*link != NULL && *link != module) {
+        link = &(*link)->next;
+    }
+    if (*link == module) {
+        if (vm->module_count >= LZ_MODULES_MAX) {
+            return lz_vm_set_error(vm, LZ_ERR_RUNTIME, "too many modules (limit is %d)", LZ_MODULES_MAX);
+        }
+        *link = module->next;
+        module->next = vm->modules;
+        vm->modules = module;
+        vm->module_count++;
+    }
+    return run_module(vm, module, true);
+}
 LzStatus lz_module_load_source(LzVM *vm, LzModuleSource *source, LzModule **out) {
     LzModule *module = NULL;
     LzStatus status = lz_module_prepare_source(vm, source, &module);
@@ -318,7 +344,7 @@ LzStatus lz_module_prepare(LzVM *vm, const LzModule *importer, const char *name,
     bool native = false;
     LzModule *registered = lz_native_module_find(vm, name, &native);
     if (native) {
-        vm->module_run = lz_module_run;
+        vm->module_run = run_import;
         if (out != NULL) {
             *out = registered;
         }
@@ -364,15 +390,19 @@ bool lz_module_set_main(LzVM *vm, const char *id, const char *name) {
     return true;
 }
 
-static size_t failures_report(const LzModuleFailure *failure, bool color, const LzWriter *out) {
+static size_t failures_report(const LzModuleFailure *failure, const char *severity, bool color, const LzWriter *out) {
     if (failure == NULL) {
         return 0;
     }
-    size_t before = failures_report(failure->next, color, out);
-    lz_diagnostics_report_body(&failure->diagnostics, &failure->source, color, out);
+    size_t before = failures_report(failure->next, severity, color, out);
+    lz_diagnostics_report_severity(&failure->diagnostics, &failure->source, severity, color, out);
     return before + failure->diagnostics.count + failure->diagnostics.dropped;
 }
 
 size_t lz_vm_module_failures_report(const LzVM *vm, bool color, const LzWriter *out) {
-    return failures_report(vm->module_failure, color, out);
+    return failures_report(vm->module_failure, "error", color, out);
+}
+
+void lz_vm_module_warnings_report(const LzVM *vm, bool color, const LzWriter *out) {
+    (void)failures_report(vm->module_failure, "warning", color, out);
 }

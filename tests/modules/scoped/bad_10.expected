@@ -1,0 +1,15 @@
+error: expected expression
+ --> broken.lz:2:1
+  |
+2 | 
+  | ^
+
+error: module 'broken' has errors
+ --> bad_10.lz:1:8
+  |
+1 | import broken
+  |        ^^^^^^ this module does not compile
+  |
+  = note: first error: broken.lz:2: expected expression
+
+error: aborting due to 2 previous errors

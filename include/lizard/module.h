@@ -28,6 +28,7 @@ typedef struct LzModule {
     LzSource source;        /* owned text and name, for reports */
     LzTable globals;        /* this module's globals; for main, vm->globals is used instead */
     LzModuleState state;
+    unsigned import_generation; /* changes when a failed initialization drops the globals */
     LzChunk *chunk;         /* its top-level code, kept for its interface; NULL for main */
     struct LzModule *next;  /* the VM's list of modules */
     bool is_main;

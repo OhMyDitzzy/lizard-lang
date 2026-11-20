@@ -1,0 +1,10 @@
+error: variable 'local' is already declared in this scope
+ --> bad_2.lz:3:24
+  |
+3 |     import fallback as local
+  |                        ^^^^^ this name is already in use
+  |
+  = note: first declared on line 2
+  = help: give one declaration another name
+
+error: aborting due to 1 previous error

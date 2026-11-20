@@ -1,0 +1,74 @@
+fn parse(text: string) {
+    try {
+        import fastjson
+        return fastjson.parse(text)
+    } catch ImportError {
+        import fallback
+        return fallback.parse(text)
+    }
+}
+
+fn counter() {
+    from fallback import parse as convert
+    return fn(x: string) => convert(x)
+}
+
+println("start")
+if false {
+    import boom
+}
+for i in 0..2 {
+    println(parse("42"))
+}
+println(counter()("7"))
+fn shadow() {
+    let convert = 3
+    if true {
+        from fallback import parse as convert
+        println(convert("8"))
+    }
+    println(convert)
+}
+shadow()
+class Reader {
+    pub fn read(self) {
+        try {
+            return 6
+        } finally {
+            import fallback
+            println(fallback.parse("5"))
+        }
+    }
+}
+println(Reader().read())
+fn job() {
+    import fallback
+    return fallback.parse("9")
+}
+let co = coroutine(job)
+println(co.resume())
+try {
+    import broken
+    println(broken.unknown())
+} catch ImportError {
+    println("broken module fallback")
+}
+try {
+    from broken import unknown
+    println(unknown())
+} catch ImportError {
+    println("broken module fallback again")
+}
+try {
+    import broken
+    import broken as again
+} catch ImportError {
+    println("compile failure reported once")
+}
+for i in 0..2 {
+    try {
+        import boom
+    } catch ImportError as e {
+        println(e.cause.message)
+    }
+}

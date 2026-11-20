@@ -416,6 +416,7 @@ static int run_script(const char *script_path, bool heap_stats, bool trace_memor
             report_plain_error(color, vm.error);
             exit_code = EXIT_RUNTIME_ERROR;
         } else {
+            lz_vm_module_warnings_report(&vm, color, &vm.err);
             status = lz_engine_run(eng, &vm, &chunk, engine_stats ? &stats : NULL);
             if (status != LZ_OK) {
                 lz_writer_flush(&vm.out);

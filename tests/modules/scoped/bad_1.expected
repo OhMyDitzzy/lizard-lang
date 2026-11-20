@@ -1,0 +1,7 @@
+error: cannot find module 'fastjson' (looked for fastjson.lz, imported from bad_1.lz)
+ --> bad_1.lz:1:8
+  |
+1 | import fastjson
+  |        ^^^^^^^^ no module with this name
+
+error: aborting due to 1 previous error

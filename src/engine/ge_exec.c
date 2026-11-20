@@ -1309,6 +1309,15 @@ resume:
             break;
         }
 
+        case LZ_OP_IMPORT:
+            TICK(1);
+            SYNC_OUT();
+            status = lz_vm_import_op(vm, chunk, ins->offset);
+            SYNC_IN();
+            if (status != LZ_OK) goto fail;
+            pc++;
+            continue;
+
         case LZ_OP_GET_FIELD_W:
         case LZ_OP_SET_FIELD:
         case LZ_OP_METHOD_LOOKUP:

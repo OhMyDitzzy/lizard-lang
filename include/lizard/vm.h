@@ -272,6 +272,7 @@ LzStatus lz_vm_eval(LzVM *vm, const LzChunk *chunk, LzValue *result);
  * byte offset of the failing instruction through *failed_at.
  */
 LzStatus lz_vm_exec_one(LzVM *vm, const LzChunk *chunk, size_t *ip, bool *halted);
+LzStatus lz_vm_import_op(LzVM *vm, const LzChunk *chunk, size_t start);
 
 /* Shared opcode semantics. The caller charges and counts the instruction. */
 LzStatus lz_vm_get_field_op(LzVM *vm, const LzChunk *chunk, size_t *ip, bool write_check);

@@ -1,0 +1,9 @@
+error: an import cannot appear directly in a class body
+ --> bad_6.lz:2:5
+  |
+2 |     import fallback
+  |     ^^^^^^ this body only accepts members
+  |
+  = help: put the import inside a method if the method needs it
+
+error: aborting due to 1 previous error

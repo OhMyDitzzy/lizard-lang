@@ -1,0 +1,2 @@
+println("fallback loaded")
+pub fn parse(text: string) => int(text)

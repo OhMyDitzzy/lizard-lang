@@ -1,0 +1,9 @@
+error: an import cannot appear in an expression
+ --> bad_5.lz:1:9
+  |
+1 | let x = import fallback
+  |         ^^^^^^ imports are statements
+  |
+  = help: put the import on its own line
+
+error: aborting due to 1 previous error

@@ -689,6 +689,11 @@ Same structure, different instruction set. Differences worth knowing:
 * GE needs no compiler extensions: it builds with `-std=c11 -Wpedantic`. Computed
   `goto` dispatch might add some speed on GCC and Clang, at the price of that.
 
+Imports have a direct GE handler. It checks whether the module has finished running and returns at
+that site on later executions. A first execution runs the module and copies its exports. The JIT
+delegates this single instruction through the regular interpreter helper, so functions containing
+imports remain translatable.
+
 ## Roadmap
 
 The baseline JIT is done (above). What remains, in order:

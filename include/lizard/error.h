@@ -23,6 +23,7 @@ typedef enum LzErrorKind {
     LZ_ERROR_ARITHMETIC,
     LZ_ERROR_ARITY,
     LZ_ERROR_IO,
+    LZ_ERROR_IMPORT,
     LZ_ERROR_KIND_COUNT
 } LzErrorKind;
 

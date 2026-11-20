@@ -193,10 +193,6 @@ typedef struct Bad {
 static void test_syntax_errors(void) {
     Src sources[] = {{"util", "pub fn a() => 1\n"}, {"other", "pub fn a() => 2\n"}};
     Bad cases[] = {
-        {"print(1)\nimport util\n", "`import` can only be used at the top of a file"},
-        {"fn f() {\n    import util\n}\n", "`import` can only be used at the top of a file"},
-        {"if true {\n    import util\n}\n", "`import` can only be used at the top of a file"},
-        {"print(1)\nfrom util import a\n", "`from ... import` can only be used at the top of a file"},
         {"pub import util\n", "`pub` cannot go in front of `import`"},
         {"import\n", "expected a module name after 'import'"},
         {"import util.\n", "expected a name after '.' in the module name"},
@@ -205,10 +201,10 @@ static void test_syntax_errors(void) {
         {"from util\n", "expected 'import' after the module name"},
         {"from util import a,\n", "expected a name after 'import'"},
         {"import util as\n", "expected a name after 'as'"},
-        {"import util\nimport other as util\n", "`util` is imported twice"},
+        {"import util\nimport other as util\n", "'util' is already declared in this scope"},
         {"import util\nfn util() {}\n", "`util` is already declared in this file"},
         {"from util import a\nlet a = 1\n", "`a` is already declared in this file"},
-        {"from util import a\nfrom other import a\n", "`a` is imported twice"},
+        {"from util import a\nfrom other import a\n", "'a' is already declared in this scope"},
     };
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
         Env env;
@@ -282,7 +278,9 @@ static void test_run_imports(void) {
     finish(&env);
 
     setup(&env, sources, 3);
-    LZ_CHECK(compile_main(&env, "println(\"start\")\nimport boom\n") == LZ_ERR_COMPILE); /* imports come first */
+    LZ_CHECK(compile_main(&env, "println(\"start\")\nimport boom\n") == LZ_OK);
+    LZ_CHECK(lz_vm_run(&env.vm, &env.chunk) != LZ_OK);
+    LZ_CHECK(strcmp(env.out.data, "start\nboom\n") == 0);
     finish(&env);
 
     setup(&env, sources, 3);
@@ -290,6 +288,70 @@ static void test_run_imports(void) {
     LZ_CHECK(lz_vm_run(&env.vm, &env.chunk) != LZ_OK);
     LZ_CHECK(strcmp(env.out.data, "boom\n") == 0);
     LZ_CHECK(env.vm.error[0] != '\0');
+    finish(&env);
+
+    setup(&env, sources, 3);
+    LZ_CHECK(compile_main(&env,
+                          "fn repeat() {\n"
+                          "    import util as u\n"
+                          "    println(u.add(2, 3))\n"
+                          "}\n"
+                          "fn taken() {\n"
+                          "    from util import add as plus\n"
+                          "    return fn(x) => plus(x, 1)\n"
+                          "}\n"
+                          "repeat()\nrepeat()\nprintln(taken()(4))\n") == LZ_OK);
+    LZ_CHECK(lz_vm_run(&env.vm, &env.chunk) == LZ_OK);
+    LZ_CHECK(strcmp(env.out.data, "util\n5\n5\n5\n") == 0);
+    finish(&env);
+}
+
+static void test_local_import_generations(void) {
+    Src sources[] = {{"util", "pub fn value() => 1\n"},
+                     {"boom", "let zero = 0\nlet bad = 1 / zero\n"}};
+    const char *program =
+        "fn use() {\n"
+        "    import util\n"
+        "    return util.value()\n"
+        "}\n"
+        "let n = 0\nwhile n < 2 { n += use() }\nprintln(n)\n";
+    for (size_t engine = 0; engine < 2; engine++) {
+        Env env;
+        setup(&env, sources, 2);
+        LZ_CHECK(compile_main(&env, program) == LZ_OK);
+        LZ_CHECK(lz_vm_run(&env.vm, &env.chunk) == LZ_OK);
+        LZ_CHECK(strcmp(env.out.data, "2\n") == 0);
+        finish(&env);
+    }
+
+    Src retry_sources[] = {
+        {"state", "let calls = 0\npub fn next() { calls += 1; return calls }\n"},
+        {"util", "pub fn value() => 42\n"},
+        {"owner",
+         "import state\n"
+         "fn get() { import util; return util.value() }\n"
+         "let first = get()\n"
+         "if state.next() == 1 { throw RuntimeError(\"retry\") }\n"
+         "pub fn run() => get()\n"},
+    };
+    Env env;
+    setup(&env, retry_sources, 3);
+    LZ_CHECK(compile_main(&env,
+                          "try { import owner } catch ImportError { println(\"retry caught\") }\n"
+                          "import owner\nprintln(owner.run())\n") == LZ_OK);
+    LZ_CHECK(lz_vm_run(&env.vm, &env.chunk) == LZ_OK);
+    LZ_CHECK(strcmp(env.out.data, "retry caught\n42\n") == 0);
+    finish(&env);
+
+    Src subtype_sources[] = {
+        {"custom", "pub error OptionalImport : ImportError\n"},
+    };
+    setup(&env, subtype_sources, 1);
+    LZ_CHECK(compile_main(&env,
+                          "import custom\n"
+                          "try { import missing } catch custom.OptionalImport as _ { println(\"caught\") }\n") == LZ_OK);
+    LZ_CHECK(lz_vm_run(&env.vm, &env.chunk) == LZ_ERR_RUNTIME);
+    LZ_CHECK(strstr(env.vm.error, "cannot import 'missing'") != NULL);
     finish(&env);
 }
 
@@ -630,6 +692,7 @@ int main(void) {
     test_pub_names_cannot_be_assigned();
     test_cross_module_types();
     test_run_imports();
+    test_local_import_generations();
     test_all_forms_compile_without_running();
     test_prepare_then_run_once();
     test_cycles();

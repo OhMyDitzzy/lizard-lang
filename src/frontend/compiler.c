@@ -29,7 +29,8 @@
 typedef enum SymbolKind {
     SYMBOL_LOCAL,    /* stack slot, declared inside a block */
     SYMBOL_GLOBAL,   /* top-level let, or a const whose value is only known at run time */
-    SYMBOL_CONSTANT  /* const folded at compile time: no storage, uses emit the value */
+    SYMBOL_CONSTANT, /* const folded at compile time: no storage, uses emit the value */
+    SYMBOL_IMPORT    /* the slot indexes the import bindings, not the value stack */
 } SymbolKind;
 
 struct FuncState;
@@ -61,6 +62,7 @@ typedef struct FuncSig {
 
 typedef struct Symbol {
     LzString *name;
+    uint32_t offset;
     int depth;
     SymbolKind kind;
     bool is_const;
@@ -180,6 +182,7 @@ typedef struct TryContext {
     bool failed;         /* a copy of the finally body reported errors: no more copies */
     size_t symbol_start; /* symbols from here on were declared inside the try */
     FinallySnapshot snapshot;
+    bool catches_import;
 } TryContext;
 
 /* A finally body being compiled: it may not be left with return, break or continue. */
@@ -243,6 +246,7 @@ typedef struct ImportBinding {
     LzModule *loaded;   /* the module, compiled and kept by the VM */
     char original[48];  /* for `from`: the name in the module, which `as` may have changed here */
     const LzIfaceEntry *entry; /* for `from`: what the module exports under that name */
+    char stored[48];   /* global key for the copy, inaccessible from source for block imports */
 } ImportBinding;
 
 typedef struct Parser {
@@ -328,7 +332,6 @@ typedef struct Parser {
     /* `import`. */
     ImportBinding imports[LZ_MAX_IMPORTS];
     size_t import_count;
-    bool body_started;        /* a statement other than an import has been read, so imports are too late */
 } Parser;
 
 static LzAssign type_assignable(const Parser *parser, const LzType *from, const LzType *to);
@@ -993,6 +996,12 @@ static Symbol *add_symbol(Parser *parser, const LzToken *token, LzString *name, 
             break;
         }
         if (existing->name == name) {
+            if (existing->kind == SYMBOL_IMPORT || kind == SYMBOL_IMPORT) {
+                LzLocation where = lz_source_locate(parser->source, existing->offset);
+                diag_label(parser, "this name is already in use");
+                diag_note(parser, "first declared on line %u", (unsigned)where.line);
+                diag_help(parser, "give one declaration another name");
+            }
             error_with_name(parser, token, "variable '", "' is already declared in this scope");
             return NULL;
         }
@@ -1008,6 +1017,7 @@ static Symbol *add_symbol(Parser *parser, const LzToken *token, LzString *name, 
 
     Symbol *symbol = &parser->symbols[parser->symbol_count++];
     symbol->name = name;
+    symbol->offset = token->offset;
     symbol->depth = parser->scope_depth;
     symbol->kind = kind;
     symbol->is_const = is_const;
@@ -1770,6 +1780,8 @@ static bool error_kind_of_member(Parser *parser, const LzToken *ns, const LzToke
 static void note_imported_error_class(Parser *parser, const LzIfaceEntry *entry);
 static const LzIfaceEntry *from_import_entry(const Parser *parser, const char *bound);
 static const ImportBinding *find_import_binding(const Parser *parser, const char *name, size_t length);
+static bool at_import_statement(const Parser *parser);
+static bool at_from_statement(const Parser *parser);
 static const LzIfaceEntry *iface_find(const LzModule *module, const char *name);
 static void import_missing_name(Parser *parser, const LzToken *member, const char *bound, const LzModule *module);
 
@@ -3410,7 +3422,7 @@ static Expr variable_at(Parser *parser, const LzToken *token) {
     if (symbol == NULL && name->length == 5 && memcmp(name->data, "super", 5) == 0) {
         return super_expr(parser, token);
     }
-    if (symbol != NULL) {
+    if (symbol != NULL && symbol->kind != SYMBOL_IMPORT) {
         switch (symbol->kind) {
         case SYMBOL_LOCAL:
             if (symbol->owner == parser->fs) {
@@ -3431,6 +3443,8 @@ static Expr variable_at(Parser *parser, const LzToken *token) {
             break;
         case SYMBOL_CONSTANT:
             emit_constant(parser, symbol->value);
+            break;
+        case SYMBOL_IMPORT:
             break;
         }
         Expr found = expr_of(symbol->type);
@@ -6658,6 +6672,7 @@ static void emit_try_exits(Parser *parser, bool loop_only, uint32_t offset) {
 typedef struct {
     bool has_catch;
     bool has_finally;
+    bool catches_import;
     FinallySnapshot finally_at;
 } TryScan;
 
@@ -6684,7 +6699,7 @@ static bool scan_block(LzLexer *lexer, LzToken *tok) {
  * Looks ahead from the `{` of the try block for its catch clauses and its finally body, so that
  * a `return` in the try can compile the finally body before the parser has reached it.
  */
-static TryScan scan_try(const Parser *parser) {
+static TryScan scan_try(Parser *parser) {
     TryScan scan;
     memset(&scan, 0, sizeof scan);
     LzLexer lexer = parser->lexer;
@@ -6698,6 +6713,32 @@ static TryScan scan_try(const Parser *parser) {
         }
         if (tok.type == LZ_TOKEN_CATCH) {
             scan.has_catch = true;
+            LzToken kind = lz_lexer_next(&lexer);
+            tok = kind;
+            if (kind.type == LZ_TOKEN_IDENTIFIER) {
+                tok = lz_lexer_next(&lexer);
+                uint8_t id;
+                bool typed;
+                if (tok.type == LZ_TOKEN_DOT) {
+                    LzToken member = lz_lexer_next(&lexer);
+                    tok = lz_lexer_next(&lexer);
+                    const ImportBinding *binding = find_import_binding(
+                        parser, parser->source->text + kind.offset, kind.length);
+                    char name[48];
+                    token_text(parser, &member, name, sizeof name);
+                    const LzIfaceEntry *entry = binding != NULL && binding->is_namespace &&
+                                                       binding->loaded != NULL
+                                                   ? iface_find(binding->loaded, name) : NULL;
+                    uint64_t class_id = entry != NULL ? lz_interface_entry_class_id(entry) : 0;
+                    typed = class_id != 0 && lz_interface_entry_kind(entry) == LZ_IFACE_ERROR;
+                    id = (uint8_t)(class_id - 1);
+                } else {
+                    typed = error_kind_of_token(parser, &kind, &id);
+                }
+                if (typed && lz_vm_error_kind_is(parser->vm, id, LZ_ERROR_IMPORT)) {
+                    scan.catches_import = true;
+                }
+            }
             while (tok.type != LZ_TOKEN_LEFT_BRACE) {
                 if (tok.type == LZ_TOKEN_EOF || tok.type == LZ_TOKEN_NEWLINE ||
                     tok.type == LZ_TOKEN_ERROR) {
@@ -6825,6 +6866,13 @@ static bool catch_header(Parser *parser, CatchHeader *header) {
     uint8_t known;
     bool is_kind = error_kind_of_token(parser, &first, &known);
     if (after.type == LZ_TOKEN_LEFT_BRACE) {
+        if (is_kind && lz_vm_error_kind_is(parser->vm, known, LZ_ERROR_IMPORT)) {
+            advance(parser);
+            header->typed = true;
+            header->kind = known;
+            header->kind_token = first;
+            return true;
+        }
         if (is_kind) {
             char message[300];
             char name[48];
@@ -6873,13 +6921,13 @@ static void try_statement(Parser *parser) {
     if (scan.has_finally) {
         finally_jump = emit_jump(parser, LZ_OP_TRY_BEGIN, offset);
         finally_ctx = (TryContext){parser->try_ctx, parser->fs, parser->loop, true, false,
-                                   symbols_at_start, scan.finally_at};
+                                   symbols_at_start, scan.finally_at, false};
         parser->try_ctx = &finally_ctx;
     }
     if (scan.has_catch) {
         catch_jump = emit_jump(parser, LZ_OP_TRY_BEGIN, offset);
         catch_ctx = (TryContext){parser->try_ctx, parser->fs, parser->loop, false, false,
-                                 symbols_at_start, scan.finally_at};
+                                 symbols_at_start, scan.finally_at, scan.catches_import};
         parser->try_ctx = &catch_ctx;
     }
 
@@ -7178,6 +7226,13 @@ static void end_statement(Parser *parser) {
     }
     if (check(parser, LZ_TOKEN_EQUAL) || is_compound(parser->current.type)) {
         error_at_current(parser, "invalid assignment target");
+    } else if ((word_is(parser, &parser->previous, "import") || word_is(parser, &parser->previous, "from")) &&
+               check(parser, LZ_TOKEN_IDENTIFIER)) {
+        diag_label(parser, "imports are statements");
+        diag_help(parser, "put the import on its own line");
+        record(parser, parser->previous.offset, parser->previous.length,
+               "an import cannot appear in an expression");
+        parser->panic = true;
     } else {
         error_at_current(parser, "expected end of statement");
     }
@@ -7319,6 +7374,13 @@ static void variable_declaration(Parser *parser, bool is_const) {
 /* The instruction that stores the top of the stack into a variable. */
 static void store_variable(Parser *parser, LzString *name, const Symbol *symbol,
                            const LzToken *at) {
+    if (symbol != NULL && symbol->kind == SYMBOL_IMPORT) {
+        diag_label(parser, "an import binding cannot be changed");
+        diag_help(parser, "use another local name for the new value");
+        record(parser, at->offset, at->length, "cannot assign to an imported name");
+        emit_op_at(parser, LZ_OP_POP, at->offset);
+        return;
+    }
     if (symbol != NULL) {
         Symbol *assigned = (Symbol *)symbol;
         assigned->has_narrow = false; /* the new value says nothing about the old condition */
@@ -8414,6 +8476,13 @@ static void operator_member(Parser *parser, LzClass *cls, LzVisibility vis, bool
 
 static void class_member(Parser *parser, LzClass *cls) {
     LzToken first = parser->current;
+    if (at_import_statement(parser) || at_from_statement(parser)) {
+        diag_label(parser, "this body only accepts members");
+        diag_help(parser, "put the import inside a method if the method needs it");
+        record(parser, first.offset, first.length, "an import cannot appear directly in a class body");
+        parser->panic = true;
+        return;
+    }
     LzVisibility vis = LZ_VIS_PRIVATE;
     bool read_only = false;
     bool has_pub = false;
@@ -10291,28 +10360,6 @@ static bool find_top_declaration(const Parser *parser, const char *name, uint32_
     return source_declares(parser->source, name, offset);
 }
 
-/* Is this `import` or `from` allowed here? If not, it says so and the line is skipped. */
-static bool import_placement_ok(Parser *parser, const LzToken *keyword, bool is_from) {
-    const char *label = NULL;
-    if (parser->fs->function != NULL) {
-        label = "this is inside a function";
-    } else if (parser->scope_depth != 0) {
-        label = "this is inside a block";
-    } else if (parser->body_started) {
-        label = "other code comes before this";
-    }
-    if (label == NULL) {
-        return true;
-    }
-    diag_label(parser, "%s", label);
-    diag_help(parser, "move this import to the top of the file, above any other code");
-    record(parser, keyword->offset, keyword->length,
-           is_from ? "`from ... import` can only be used at the top of a file"
-                   : "`import` can only be used at the top of a file");
-    parser->panic = true;
-    return false;
-}
-
 /* Reads `a.b.c` into out. Returns false after reporting what is wrong. */
 static bool import_module_name(Parser *parser, const LzToken *word, char *out, size_t size, LzToken *last) {
     if (!check(parser, LZ_TOKEN_IDENTIFIER) || word_is(parser, &parser->current, "import")) {
@@ -10350,11 +10397,15 @@ static bool import_module_name(Parser *parser, const LzToken *word, char *out, s
     }
 }
 
+static void emit_import(Parser *parser, const char *id, const char *bound, const char *original,
+                        uint8_t mode, uint32_t offset);
+
 /*
  * Finds and compiles the module of an import, without running it. On failure it reports at the
  * module's name and returns NULL.
  */
-static LzModule *import_prepare(Parser *parser, const LzToken *first, const LzToken *last, const char *name) {
+static LzModule *import_prepare(Parser *parser, const LzToken *first, const LzToken *last,
+                                const char *name, uint32_t keyword) {
     LzModule *module = NULL;
     LzVM *vm = parser->vm;
     vm->error[0] = '\0';
@@ -10371,6 +10422,21 @@ static LzModule *import_prepare(Parser *parser, const LzToken *first, const LzTo
     uint32_t length = last->offset + last->length - first->offset;
     char message[256];
     const LzModuleFailure *failed = vm->last_failure;
+    if (!vm->import_cycle && strncmp(vm->error, "circular import:", 16) != 0) {
+        for (const TryContext *ctx = parser->try_ctx; ctx != NULL && ctx->func == parser->fs;
+             ctx = ctx->enclosing) {
+            if (ctx->catches_import) {
+                const char *reason = vm->error;
+                if (failed != NULL && failed->diagnostics.count > 0) {
+                    (void)snprintf(message, sizeof message, "%s: %s", failed->source.name,
+                                   failed->diagnostics.items[0].message);
+                    reason = message;
+                }
+                emit_import(parser, name, reason, "", 2, keyword);
+                return NULL;
+            }
+        }
+    }
     if (strncmp(vm->error, "circular import:", 16) == 0) {
         /* The one error of the cycle, at the import that closes it, with the way round in the note. */
         char closing[96];
@@ -10413,18 +10479,6 @@ static ImportBinding *import_bind(Parser *parser, const LzToken *at, const char 
     binding.length = at->length;
     binding.is_namespace = is_namespace;
     binding.loaded = loaded;
-
-    for (size_t i = 0; i < parser->import_count; i++) {
-        if (strcmp(parser->imports[i].bound, binding.bound) == 0) {
-            LzLocation was = lz_source_locate(parser->source, parser->imports[i].offset);
-            diag_label(parser, "`%s` is already taken by the import on line %u", binding.bound, (unsigned)was.line);
-            diag_help(parser, "give one of them another name with `as`");
-            char message[96];
-            (void)snprintf(message, sizeof message, "`%s` is imported twice", binding.bound);
-            record(parser, at->offset, at->length, message);
-            return NULL;
-        }
-    }
     if (is_namespace) {
         LzType ignored;
         LzString *interned = lz_vm_intern(parser->vm, binding.bound, strlen(binding.bound));
@@ -10457,7 +10511,7 @@ static ImportBinding *import_bind(Parser *parser, const LzToken *at, const char 
         }
     }
     uint32_t declared;
-    if (find_top_declaration(parser, binding.bound, &declared)) {
+    if (parser->scope_depth == 0 && find_top_declaration(parser, binding.bound, &declared)) {
         LzLocation where = lz_source_locate(parser->source, declared);
         diag_label(parser, "this import binds `%s`", binding.bound);
         diag_note(parser, "`%s` is also declared on line %u of this file", binding.bound, (unsigned)where.line);
@@ -10476,6 +10530,20 @@ static ImportBinding *import_bind(Parser *parser, const LzToken *at, const char 
         diag_help(parser, "import a module as a namespace instead of naming many of its members");
         record(parser, at->offset, at->length, "too many imported names in one file");
         return NULL;
+    }
+    LzString *name = intern_token(parser, at);
+    LzType type = lz_type_of_kinds(LZ_KINDS_ANY);
+    Symbol *symbol = name != NULL
+                         ? add_symbol(parser, at, name, SYMBOL_IMPORT, true, lz_value_nil(), &type)
+                         : NULL;
+    if (symbol == NULL) {
+        return NULL;
+    }
+    symbol->slot = (uint16_t)parser->import_count;
+    if (parser->scope_depth == 0) {
+        memcpy(binding.stored, binding.bound, sizeof binding.stored);
+    } else {
+        (void)snprintf(binding.stored, sizeof binding.stored, "(import:%u)", (unsigned)at->offset);
     }
     parser->imports[parser->import_count] = binding;
     return &parser->imports[parser->import_count++];
@@ -10802,9 +10870,10 @@ static Expr import_entry_expr(Parser *parser, const LzToken *at, const LzIfaceEn
 }
 
 static const ImportBinding *find_import_binding(const Parser *parser, const char *name, size_t length) {
-    for (size_t i = 0; i < parser->import_count; i++) {
-        if (strlen(parser->imports[i].bound) == length && memcmp(parser->imports[i].bound, name, length) == 0) {
-            return &parser->imports[i];
+    for (size_t i = parser->symbol_count; i > 0; i--) {
+        const Symbol *symbol = &parser->symbols[i - 1];
+        if (symbol->name->length == length && memcmp(symbol->name->data, name, length) == 0) {
+            return symbol->kind == SYMBOL_IMPORT ? &parser->imports[symbol->slot] : NULL;
         }
     }
     return NULL;
@@ -10913,7 +10982,7 @@ static bool imported_head(Parser *parser, const LzToken *first, const LzIfaceEnt
         return false;
     }
     char global[128];
-    (void)snprintf(global, sizeof global, "%s.%s", binding->bound, member_name);
+    (void)snprintf(global, sizeof global, "%s.%s", binding->stored, member_name);
     *name = lz_vm_intern(parser->vm, global, strlen(global));
     *entry = found;
     if (*name == NULL) {
@@ -10929,14 +10998,7 @@ static bool imported_head(Parser *parser, const LzToken *first, const LzIfaceEnt
  * is in the interface, so the type is made from that.
  */
 static bool imported_type(Parser *parser, const LzToken *token, LzType *out, bool *handled) {
-    const ImportBinding *binding = NULL;
-    for (size_t i = 0; i < parser->import_count; i++) {
-        const char *bound = parser->imports[i].bound;
-        if (strlen(bound) == token->length && memcmp(bound, parser->source->text + token->offset, token->length) == 0) {
-            binding = &parser->imports[i];
-            break;
-        }
-    }
+    const ImportBinding *binding = find_import_binding(parser, parser->source->text + token->offset, token->length);
     if (binding == NULL) {
         return true;
     }
@@ -11034,21 +11096,14 @@ static void import_missing_name(Parser *parser, const LzToken *member, const cha
 }
 
 static bool import_name_expr(Parser *parser, const LzToken *token, LzString *name, Expr *out) {
-    const ImportBinding *binding = NULL;
-    for (size_t i = 0; i < parser->import_count; i++) {
-        if (strlen(parser->imports[i].bound) == name->length &&
-            memcmp(parser->imports[i].bound, name->data, name->length) == 0) {
-            binding = &parser->imports[i];
-            break;
-        }
-    }
+    const ImportBinding *binding = find_import_binding(parser, name->data, name->length);
     if (binding == NULL) {
         return false;
     }
     if (!binding->is_namespace) {
-        *out = binding->entry != NULL ? import_entry_expr(parser, token, binding->entry, binding->loaded, binding->bound) : any_expr();
+        *out = binding->entry != NULL ? import_entry_expr(parser, token, binding->entry, binding->loaded, binding->stored) : any_expr();
         if (binding->entry == NULL) {
-            emit_named(parser, LZ_OP_GET_GLOBAL, name, token->offset);
+            emit_op_at(parser, LZ_OP_NIL, token->offset);
         }
         return true;
     }
@@ -11082,7 +11137,8 @@ static bool import_name_expr(Parser *parser, const LzToken *token, LzString *nam
     LzToken member = parser->current;
     advance(parser);
     if (binding->loaded == NULL) {
-        *out = any_expr(); /* the import itself failed and said so */
+        emit_op_at(parser, LZ_OP_NIL, member.offset);
+        *out = any_expr();
         return true;
     }
     char member_name[48];
@@ -11101,18 +11157,18 @@ static bool import_name_expr(Parser *parser, const LzToken *token, LzString *nam
         return true;
     }
     char global[128];
-    (void)snprintf(global, sizeof global, "%s.%s", binding->bound, member_name);
+    (void)snprintf(global, sizeof global, "%s.%s", binding->stored, member_name);
     *out = import_entry_expr(parser, &member, entry, binding->loaded, global);
     return true;
 }
 
 /* The instruction that runs the module and copies its exports, at the place of the import. */
-static void emit_import(Parser *parser, const LzModule *module, const char *bound, const char *original, uint8_t mode,
+static void emit_import(Parser *parser, const char *module, const char *bound, const char *original, uint8_t mode,
                         uint32_t offset) {
     if (module == NULL) {
         return;
     }
-    LzString *id = lz_vm_intern(parser->vm, module->id, strlen(module->id));
+    LzString *id = lz_vm_intern(parser->vm, module, strlen(module));
     LzString *bound_name = lz_vm_intern(parser->vm, bound, strlen(bound));
     LzString *original_name = lz_vm_intern(parser->vm, original, strlen(original));
     if (id == NULL || bound_name == NULL || original_name == NULL) {
@@ -11132,9 +11188,6 @@ static void emit_import(Parser *parser, const LzModule *module, const char *boun
 static void import_statement(Parser *parser) {
     LzToken keyword = parser->current;
     advance(parser);
-    if (!import_placement_ok(parser, &keyword, false)) {
-        return;
-    }
     char module[256];
     LzToken first = parser->current;
     LzToken last;
@@ -11146,10 +11199,10 @@ static void import_statement(Parser *parser) {
     if (!ok) {
         return;
     }
-    LzModule *loaded = import_prepare(parser, &first, &last, module);
+    LzModule *loaded = import_prepare(parser, &first, &last, module, keyword.offset);
     ImportBinding *added = import_bind(parser, &bound, module, true, loaded);
     if (added != NULL) {
-        emit_import(parser, loaded, added->bound, "", 0, keyword.offset);
+        emit_import(parser, loaded != NULL ? loaded->id : NULL, added->stored, "", 0, keyword.offset);
     }
     end_statement(parser);
 }
@@ -11157,9 +11210,6 @@ static void import_statement(Parser *parser) {
 static void from_statement(Parser *parser) {
     LzToken keyword = parser->current;
     advance(parser);
-    if (!import_placement_ok(parser, &keyword, true)) {
-        return;
-    }
     char module[256];
     LzToken first = parser->current;
     LzToken last;
@@ -11174,7 +11224,7 @@ static void from_statement(Parser *parser) {
     }
     LzToken import_word = parser->current;
     advance(parser);
-    LzModule *loaded = import_prepare(parser, &first, &last, module);
+    LzModule *loaded = import_prepare(parser, &first, &last, module, keyword.offset);
     for (;;) {
         if (!check(parser, LZ_TOKEN_IDENTIFIER)) {
             diag_label(parser, "a name to take from `%s` goes here", module);
@@ -11200,7 +11250,7 @@ static void from_statement(Parser *parser) {
         if (added != NULL) {
             memcpy(added->original, original, sizeof original);
             added->entry = entry;
-            emit_import(parser, loaded, added->bound, original, 1, keyword.offset);
+            emit_import(parser, loaded != NULL ? loaded->id : NULL, added->stored, original, 1, keyword.offset);
         }
         if (!match(parser, LZ_TOKEN_COMMA)) {
             break;
@@ -11226,16 +11276,15 @@ static void declaration(Parser *parser) {
     parser->terminated = false;
 
     bool import_start = at_import_statement(parser) || at_from_statement(parser);
-    if (import_start && !parser->panic) {
-        if (word_is(parser, &parser->current, "from")) {
-            from_statement(parser);
-        } else {
-            import_statement(parser);
+    if (import_start) {
+        if (!parser->panic) {
+            if (word_is(parser, &parser->current, "from")) {
+                from_statement(parser);
+            } else {
+                import_statement(parser);
+            }
         }
         goto finished;
-    }
-    if (!import_start && at_top_level(parser)) {
-        parser->body_started = true;
     }
 
     switch (parser->current.type) {
@@ -11509,10 +11558,15 @@ void lz_diagnostics_report(const LzDiagnostics *diagnostics, const LzSource *sou
 
 void lz_diagnostics_report_body(const LzDiagnostics *diagnostics, const LzSource *source, bool color,
                                 const LzWriter *out) {
+    lz_diagnostics_report_severity(diagnostics, source, "error", color, out);
+}
+
+void lz_diagnostics_report_severity(const LzDiagnostics *diagnostics, const LzSource *source,
+                                    const char *severity, bool color, const LzWriter *out) {
     for (size_t i = 0; i < diagnostics->count; i++) {
         const LzDiagnostic *item = &diagnostics->items[i];
         LzReport report = {0};
-        report.severity = "error";
+        report.severity = severity;
         report.message = item->message;
         report.offset = item->offset;
         report.length = item->length;

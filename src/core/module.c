@@ -79,6 +79,7 @@ void lz_modules_release_tables(LzVM *vm) {
         lz_table_free(&vm->heap, &list->globals);
     }
     for (LzModule *list = vm->retired; list != NULL; list = list->next) {
+        module_chunk_release(vm, list);
         lz_table_free(&vm->heap, &list->globals);
     }
 }

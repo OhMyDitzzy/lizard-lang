@@ -1,0 +1,4 @@
+fn collision() {
+    let local = 0
+    import fallback as local
+}

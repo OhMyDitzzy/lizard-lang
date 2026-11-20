@@ -365,6 +365,8 @@ static inline bool analyse(JitIR *c, int32_t entry_depth) {
         case LZ_OP_GET_FIELD:
             ok = d >= 1; /* the error becomes its field */
             break;
+        case LZ_OP_IMPORT:
+            break; /* the handler runs the module without changing the value stack */
         case LZ_OP_THROW:
             ok = d >= 1;
             nd = d - 1;

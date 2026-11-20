@@ -366,15 +366,15 @@ static void test_kind_limit(void) {
                      "true true true true false false\n");
         free(text);
     }
-    /* up to the limit works: 8 built-in kinds and 248 declared ones */
+    /* Up to the unchanged total limit works with the built-in ImportError kind. */
     {
-        char *text = kind_program(248, chain_parent, "println(K247(\"m\") is K0, K247(\"m\") is RuntimeError)\n");
+        char *text = kind_program(247, chain_parent, "println(K246(\"m\") is K0, K246(\"m\") is RuntimeError)\n");
         check_output(text, "true true\n");
         free(text);
     }
     /* past it, a message, not a crash or a wrong match */
     {
-        char *text = kind_program(249, branch_parent, "");
+        char *text = kind_program(248, branch_parent, "");
         check_compile_error(text, "too many error kinds (limit is 256)");
         free(text);
         text = kind_program(400, chain_parent, "println(1)\n");

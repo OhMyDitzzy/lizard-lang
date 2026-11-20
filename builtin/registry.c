@@ -52,6 +52,7 @@ static const LzBuiltin builtins[] = {
     {"ArithmeticError", lz_error_type_native, 1, 1, LZ_KIND_ERROR, 0},
     {"ArityError", lz_error_type_native, 1, 1, LZ_KIND_ERROR, 0},
     {"IOError", lz_error_type_native, 1, 1, LZ_KIND_ERROR, 0},
+    {"ImportError", lz_error_type_native, 1, 1, LZ_KIND_ERROR, 0},
 };
 
 #define BUILTIN_COUNT (sizeof builtins / sizeof builtins[0])

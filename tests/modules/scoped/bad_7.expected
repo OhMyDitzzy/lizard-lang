@@ -1,0 +1,7 @@
+fallback loaded
+error: undefined variable 'fallback'
+ --> bad_7.lz:4:9
+  |
+4 | println(fallback.parse("1"))
+  |         ^^^^^^^^ not found in this scope
+

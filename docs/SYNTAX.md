@@ -30,9 +30,15 @@ Hello, Lizard! Ana, round 3
 ## Imports
 
 `import util`, `import util as u`, `import tools.format` and `from util import a, b as c` bring in the
-`pub` names of another file. They stand at the top of the file, before any other statement. `import`,
-`from` and `as` are only special in that position, so they are still fine as variable names. See
+`pub` names of another file. They may appear wherever a statement may appear, including inside a
+function, block, loop, or handler. They are still statements, so they cannot appear in an expression
+or directly in a class, trait, or extend body. `import`, `from` and `as` are only special in import
+syntax, so they are still fine as variable names. See
 [MODULES.md](MODULES.md).
+
+An imported name follows the same scope as `let`. The compiler checks the module interface and
+the module runs when execution reaches the import. Use an explicit `catch ImportError` around an
+optional import to provide a fallback.
 
 `is_main` is a builtin `bool` that is `true` only in the file run directly and `false` in imported
 files, so a file can be a library and a program at once. See [MODULES.md](MODULES.md#a-file-that-is-a-library-and-a-program).

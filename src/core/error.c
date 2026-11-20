@@ -28,6 +28,7 @@ static const KindInfo kinds[LZ_ERROR_KIND_COUNT] = {
     [LZ_ERROR_ARITHMETIC] = {"ArithmeticError", LZ_ERROR_RUNTIME, true},
     [LZ_ERROR_ARITY] = {"ArityError", LZ_ERROR_RUNTIME, true},
     [LZ_ERROR_IO] = {"IOError", LZ_ERROR_ERROR, true},
+    [LZ_ERROR_IMPORT] = {"ImportError", LZ_ERROR_RUNTIME, true},
 };
 
 const char *lz_error_kind_name(LzErrorKind kind) {

@@ -138,7 +138,7 @@ mode 1 means the target is the class that the global of that name holds */
     LZ_OP_IMPORT,      /* u16 constant for the module id, u16 constant for the bound name, u16 constant for the
 name in the module, u8 mode. Runs the module once and copies its `pub` values into this module's globals.
 Mode 0 is `import m`: every export is stored as "bound.name". Mode 1 is `from m import a as b`: the export
-`a` is stored as `b` */
+`a` is stored as `b`. Mode 2 raises ImportError using the first two constants as name and reason */
     LZ_OP_STRING_BEGIN, /* u16 build plan, executes the first load and chooses the guarded builder */
     LZ_OP_STRING_FALLBACK, /* u16 build plan, executes the last legacy ADD and skips the builder */
     LZ_OP_STRING_CHECK, /* u16 build plan, u16 piece, validates formatting and pushes its byte length */
@@ -209,6 +209,14 @@ typedef struct LzBuiltinSite {
 } LzBuiltinSite;
 
 /* Compiler-owned metadata stays outside charged function objects. */
+struct LzModule;
+struct LzVM;
+typedef struct LzImportSite {
+    struct LzModule *module;
+    const struct LzVM *vm;
+    unsigned generation;
+} LzImportSite;
+
 typedef struct LzChunkCache {
     LzStringBuild *builds;
     size_t build_count;
@@ -218,6 +226,7 @@ typedef struct LzChunkCache {
     size_t member_site_count;
     LzGlobalSite *globals;
     LzBuiltinSite *builtin_sites;
+    LzImportSite *imports;
 } LzChunkCache;
 
 typedef struct LzChunk {

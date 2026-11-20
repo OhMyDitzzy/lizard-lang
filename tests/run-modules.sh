@@ -15,7 +15,9 @@ for flags in "--engine=ref" "--jit=off" "--jit=eager"; do
         (cd "$dir" && "$lizard" $flags --color=never main.lz 2>&1) | cmp -s - "$dir/expected.txt" || { ok=0; echo "  differs: $main"; }
         for bad in "$dir"/bad_*.lz; do
             [ -e "$bad" ] || continue
-            (cd "$dir" && "$lizard" $flags --color=never "$(basename "$bad")" 2>&1) | cmp -s - "${bad%.lz}.expected" || { ok=0; echo "  differs: $bad"; }
+            (cd "$dir" && "$lizard" $flags --color=never "$(basename "$bad")" 2>&1) |
+                sed 's@looked for [^,]*/\([^/,]*\.lz\),@looked for \1,@' |
+                cmp -s - "${bad%.lz}.expected" || { ok=0; echo "  differs: $bad"; }
         done
         for entry in "$dir"/entry_*.expected; do
             [ -e "$entry" ] || continue

@@ -95,12 +95,17 @@ Error
 |  +- RangeError         an index out of range, a missing key, a shift out of range
 |  +- ArithmeticError    division by zero, overflow
 |  +- ArityError         the wrong number of arguments
+|  +- ImportError        a module could not be initialized or an optional import failed
 +- IOError               for the input/output builtins
 ```
 
 Every built-in failure has the kind that fits it, and anything not listed is a
 `RuntimeError`. Each kind is a function that makes an error: `RangeError("message")`; the
 message must be a string.
+
+`ImportError` reports the module name and the reason it failed. When module code throws an error,
+the original value is available as `cause`. An explicit `catch ImportError` can also handle a
+missing or broken optional module. See [MODULES.md](MODULES.md#using-modules-in-a-program).
 
 ### Your own kinds
 

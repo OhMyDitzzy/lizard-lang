@@ -1,0 +1,13 @@
+# this is just demonstration, don't run this program
+
+fn parse(text: string) {
+    try {
+        import fastjson
+        return fastjson.parse(text)
+    } catch ImportError {
+        import optional_json as json
+        return json.parse(text)
+    }
+}
+
+println(parse("42"))

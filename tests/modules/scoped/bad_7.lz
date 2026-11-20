@@ -1,0 +1,4 @@
+if true {
+    import fallback
+}
+println(fallback.parse("1"))
